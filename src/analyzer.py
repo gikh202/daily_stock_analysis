@@ -4751,7 +4751,14 @@ class GeminiAnalyzer:
 4. ❓ 消息面有无重大利空或与技能结论冲突的信息？
 5. ❓ 若结论成立，具体触发条件、止损位、观察点分别是什么？
 """
-        prompt += f"""
+        # Python 3.11 兼容性说明：
+        # 大段 JSON 示例不能直接放在 f-string 中，否则 JSON 大括号会被
+        # Python 当作 f-string 表达式解析，触发：
+        # SyntaxError: f-string: expressions nested too deeply
+        #
+        # 因此：固定 JSON 示例使用普通字符串；只有真正需要变量插值的
+        # news_window_days 部分单独使用一个很小的 f-string。
+        prompt += """
 
 ### 预测与执行分离（最高优先级）：
 
@@ -4800,7 +4807,9 @@ class GeminiAnalyzer:
 - `expected_return_pct` 是对应周期的绝对收益率点估计
 - `expected_excess_vs_spy_pct` / `expected_excess_vs_qqq_pct` 是对应周期的超额收益率点估计
 - 对预测结果不得因“非交易日/盘后”机械修改方向或概率；阶段约束只作用于执行层
+"""
 
+        prompt += f"""
 ### 决策仪表盘要求：
 - **股票名称**：必须输出正确的中文全称（如"贵州茅台"而非"股票600519"）
 - **核心结论**：一句话说清该买/该卖/该等
@@ -4813,7 +4822,7 @@ class GeminiAnalyzer:
 - **财报事件合规**：若结构化财报事件显示距离财报 ≤ 7 天，必须明确披露事件不确定性；财报临近不是利空，不得机械扣分或强制看空
 - **财报数据防幻觉**：只允许引用上方结构化表格中明确提供的财报日期、EPS、Surprise、EPS revisions、营收预期数值；缺失字段必须写“数据不可用”
 - **技术面一致性**：严禁把“空头排列”和“多头排列”等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”
- 
+
 请输出完整的 JSON 格式决策仪表盘。"""
 
         if report_language == "en":
