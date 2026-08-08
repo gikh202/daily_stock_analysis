@@ -1731,6 +1731,11 @@ class AnalysisResult:
     action: Optional[str] = None  # 建议动作 taxonomy：buy/add/hold/reduce/sell/watch/avoid/alert
     action_label: Optional[str] = None  # 本地化建议动作标签
 
+    # ========== 预测层（与交易执行层分离）==========
+    forecast: Optional[Dict[str, Any]] = None
+    execution: Optional[Dict[str, Any]] = None
+    decision_trace: Optional[Dict[str, Any]] = None
+
     # ========== 决策仪表盘 (新增) ==========
     dashboard: Optional[Dict[str, Any]] = None  # 完整的决策仪表盘数据
 
@@ -1796,6 +1801,9 @@ class AnalysisResult:
             'report_language': self.report_language,
             'action': self.action,
             'action_label': self.action_label,
+            'forecast': self.forecast,
+            'execution': self.execution,
+            'decision_trace': self.decision_trace,
             'dashboard': self.dashboard,  # 决策仪表盘数据
             'trend_analysis': self.trend_analysis,
             'short_term_outlook': self.short_term_outlook,
@@ -1943,6 +1951,38 @@ class GeminiAnalyzer:
 ```json
 {
     "stock_name": "股票中文名称",
+    "forecast": {
+        "primary_horizon": "10d",
+        "horizons": {
+            "5d": {
+                "direction": "bullish/neutral/bearish",
+                "up_probability": 0-100数值,
+                "expected_return_pct": 预期5个交易日绝对收益率百分比数值,
+                "expected_excess_vs_spy_pct": 预期相对SPY超额收益率百分比数值,
+                "expected_excess_vs_qqq_pct": 预期相对QQQ超额收益率百分比数值,
+                "confidence": "高/中/低",
+                "rationale": "预测依据"
+            },
+            "10d": {
+                "direction": "bullish/neutral/bearish",
+                "up_probability": 0-100数值,
+                "expected_return_pct": 预期10个交易日绝对收益率百分比数值,
+                "expected_excess_vs_spy_pct": 预期相对SPY超额收益率百分比数值,
+                "expected_excess_vs_qqq_pct": 预期相对QQQ超额收益率百分比数值,
+                "confidence": "高/中/低",
+                "rationale": "预测依据"
+            },
+            "20d": {
+                "direction": "bullish/neutral/bearish",
+                "up_probability": 0-100数值,
+                "expected_return_pct": 预期20个交易日绝对收益率百分比数值,
+                "expected_excess_vs_spy_pct": 预期相对SPY超额收益率百分比数值,
+                "expected_excess_vs_qqq_pct": 预期相对QQQ超额收益率百分比数值,
+                "confidence": "高/中/低",
+                "rationale": "预测依据"
+            }
+        }
+    },
     "sentiment_score": 0-100整数,
     "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
     "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
@@ -2133,6 +2173,38 @@ class GeminiAnalyzer:
 ```json
 {
     "stock_name": "股票中文名称",
+    "forecast": {
+        "primary_horizon": "10d",
+        "horizons": {
+            "5d": {
+                "direction": "bullish/neutral/bearish",
+                "up_probability": 0-100数值,
+                "expected_return_pct": 预期5个交易日绝对收益率百分比数值,
+                "expected_excess_vs_spy_pct": 预期相对SPY超额收益率百分比数值,
+                "expected_excess_vs_qqq_pct": 预期相对QQQ超额收益率百分比数值,
+                "confidence": "高/中/低",
+                "rationale": "预测依据"
+            },
+            "10d": {
+                "direction": "bullish/neutral/bearish",
+                "up_probability": 0-100数值,
+                "expected_return_pct": 预期10个交易日绝对收益率百分比数值,
+                "expected_excess_vs_spy_pct": 预期相对SPY超额收益率百分比数值,
+                "expected_excess_vs_qqq_pct": 预期相对QQQ超额收益率百分比数值,
+                "confidence": "高/中/低",
+                "rationale": "预测依据"
+            },
+            "20d": {
+                "direction": "bullish/neutral/bearish",
+                "up_probability": 0-100数值,
+                "expected_return_pct": 预期20个交易日绝对收益率百分比数值,
+                "expected_excess_vs_spy_pct": 预期相对SPY超额收益率百分比数值,
+                "expected_excess_vs_qqq_pct": 预期相对QQQ超额收益率百分比数值,
+                "confidence": "高/中/低",
+                "rationale": "预测依据"
+            }
+        }
+    },
     "sentiment_score": 0-100整数,
     "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
     "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
@@ -4048,6 +4120,21 @@ class GeminiAnalyzer:
 | VIX 近5日 | {vix.get('change_5d_pct', 'N/A')}% |
 | 美国10Y收益率 | {tnx.get('yield_pct', 'N/A')}% |
 | 美国10Y近5日变化 | {tnx.get('change_5d_bp', 'N/A')} bp |
+| Market Breadth | {(
+    market_regime.get('market_breadth', {}).get('breadth', 'unknown')
+    if isinstance(market_regime.get('market_breadth'), dict)
+    else 'unknown'
+)} |
+| RSP vs SPY 20D | {(
+    market_regime.get('market_breadth', {}).get('rsp_vs_spy_20d_pct', 'N/A')
+    if isinstance(market_regime.get('market_breadth'), dict)
+    else 'N/A'
+)}% |
+| QQQE vs QQQ 20D | {(
+    market_regime.get('market_breadth', {}).get('qqqe_vs_qqq_20d_pct', 'N/A')
+    if isinstance(market_regime.get('market_breadth'), dict)
+    else 'N/A'
+)}% |
 | Risk-On 依据 | {risk_on_reasons} |
 | Risk-Off 依据 | {risk_off_reasons} |
 
@@ -4057,6 +4144,53 @@ class GeminiAnalyzer:
 > `neutral` 表示市场环境没有给出足够一致的方向确认。
 > TNX 仅作上下文，不把收益率单独解释为必然利空或利多。
 > status=partial/failed/unknown 时按中性缺失处理，不得因为 Market Regime 数据缺失而自动降低个股评分。
+"""
+
+        prediction_context = (
+            context.get("prediction_context", {})
+            if isinstance(context, dict)
+            else {}
+        )
+        if isinstance(prediction_context, dict) and prediction_context:
+            rs_horizons = (
+                prediction_context.get("horizons", {})
+                if isinstance(prediction_context.get("horizons"), dict)
+                else {}
+            )
+
+            def _rs_value(horizon: str, key: str) -> Any:
+                block = rs_horizons.get(horizon, {})
+                return (
+                    block.get(key, "N/A")
+                    if isinstance(block, dict)
+                    else "N/A"
+                )
+
+            breadth_ctx = (
+                prediction_context.get("market_breadth", {})
+                if isinstance(prediction_context.get("market_breadth"), dict)
+                else {}
+            )
+
+            prompt += f"""
+## 预测专用上下文：Relative Strength + Breadth
+
+| 指标 | 5D | 10D | 20D | 60D |
+|------|----|-----|-----|-----|
+| 标的绝对收益 | {_rs_value('5d', 'target_return_pct')}% | {_rs_value('10d', 'target_return_pct')}% | {_rs_value('20d', 'target_return_pct')}% | {_rs_value('60d', 'target_return_pct')}% |
+| 相对SPY超额 | {_rs_value('5d', 'excess_vs_spy_pct')}% | {_rs_value('10d', 'excess_vs_spy_pct')}% | {_rs_value('20d', 'excess_vs_spy_pct')}% | {_rs_value('60d', 'excess_vs_spy_pct')}% |
+| 相对QQQ超额 | {_rs_value('5d', 'excess_vs_qqq_pct')}% | {_rs_value('10d', 'excess_vs_qqq_pct')}% | {_rs_value('20d', 'excess_vs_qqq_pct')}% | {_rs_value('60d', 'excess_vs_qqq_pct')}% |
+
+- Relative Strength 状态：**{prediction_context.get('relative_strength_state', 'unknown')}**
+- 20日年化实现波动率：{prediction_context.get('realized_vol_20d_pct', 'N/A')}%
+- Market Breadth：**{breadth_ctx.get('breadth', 'unknown')}**
+- RSP vs SPY 20D：{breadth_ctx.get('rsp_vs_spy_20d_pct', 'N/A')}%
+- QQQE vs QQQ 20D：{breadth_ctx.get('qqqe_vs_qqq_20d_pct', 'N/A')}%
+
+> 这里的 Relative Strength 和 Breadth 用于提高方向预测质量。
+> 不允许因为单一相对强弱指标就机械决定买卖。
+> 对公司股票，除绝对涨跌外，必须判断相对 SPY / QQQ 是否具备超额收益潜力。
+> 对指数 ETF，绝对趋势是主要预测目标，但仍应参考相对强弱和市场宽度。
 """
 
         market_structure_section = format_market_structure_prompt_section(
@@ -4619,6 +4753,54 @@ class GeminiAnalyzer:
 """
         prompt += f"""
 
+### 预测与执行分离（最高优先级）：
+
+`forecast` 必须使用下面的结构；即使某个预测值无法可靠估计，也保留字段并使用 `null`，不要删除整个 forecast：
+
+```json
+"forecast": {
+  "primary_horizon": "10d",
+  "horizons": {
+    "5d": {
+      "direction": "bullish/neutral/bearish",
+      "up_probability": 0-100,
+      "expected_return_pct": 数值或null,
+      "expected_excess_vs_spy_pct": 数值或null,
+      "expected_excess_vs_qqq_pct": 数值或null,
+      "confidence": "高/中/低",
+      "rationale": "预测依据"
+    },
+    "10d": {
+      "direction": "bullish/neutral/bearish",
+      "up_probability": 0-100,
+      "expected_return_pct": 数值或null,
+      "expected_excess_vs_spy_pct": 数值或null,
+      "expected_excess_vs_qqq_pct": 数值或null,
+      "confidence": "高/中/低",
+      "rationale": "预测依据"
+    },
+    "20d": {
+      "direction": "bullish/neutral/bearish",
+      "up_probability": 0-100,
+      "expected_return_pct": 数值或null,
+      "expected_excess_vs_spy_pct": 数值或null,
+      "expected_excess_vs_qqq_pct": 数值或null,
+      "confidence": "高/中/低",
+      "rationale": "预测依据"
+    }
+  }
+}
+```
+
+- `forecast` 描述未来 **5/10/20个交易日** 的价格方向与收益预期；其中 **10D 是主预测周期**
+- `forecast` 是“市场走势预测层”，不得因为今天是周末、盘前、盘后、无法立即下单而自动降级
+- `operation_advice` / `decision_type` / `action` 是“交易执行层”，可以因为市场阶段、入场位置、风险控制而选择观望
+- 允许出现：`forecast.10d=bullish`，但 `action=watch`；这表示“中期看多，但当前等待更好的执行点”
+- `up_probability` 是主观概率估计，不是确定性承诺；必须结合相对强弱、市场宽度、波动率、财报/新闻证据给出
+- `expected_return_pct` 是对应周期的绝对收益率点估计
+- `expected_excess_vs_spy_pct` / `expected_excess_vs_qqq_pct` 是对应周期的超额收益率点估计
+- 对预测结果不得因“非交易日/盘后”机械修改方向或概率；阶段约束只作用于执行层
+
 ### 决策仪表盘要求：
 - **股票名称**：必须输出正确的中文全称（如"贵州茅台"而非"股票600519"）
 - **核心结论**：一句话说清该买/该卖/该等
@@ -4985,6 +5167,108 @@ class GeminiAnalyzer:
             },
         )
 
+    @staticmethod
+    def _normalize_forecast_payload(value: Any) -> Dict[str, Any]:
+        """Normalize multi-horizon forecast without touching execution fields."""
+        raw = value if isinstance(value, dict) else {}
+        raw_horizons = (
+            raw.get("horizons", {})
+            if isinstance(raw.get("horizons"), dict)
+            else {}
+        )
+
+        def safe_number(item: Any, *, clamp_probability: bool = False) -> Optional[float]:
+            try:
+                if item is None or item == "":
+                    return None
+                number = float(item)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(number):
+                return None
+            if clamp_probability:
+                number = max(0.0, min(number, 100.0))
+            return round(number, 2)
+
+        normalized_horizons: Dict[str, Dict[str, Any]] = {}
+        for horizon in ("5d", "10d", "20d"):
+            block = (
+                raw_horizons.get(horizon, {})
+                if isinstance(raw_horizons.get(horizon), dict)
+                else {}
+            )
+            direction = str(block.get("direction") or "neutral").strip().lower()
+            if direction not in {"bullish", "neutral", "bearish"}:
+                direction = "neutral"
+
+            normalized_horizons[horizon] = {
+                "direction": direction,
+                "up_probability": safe_number(
+                    block.get("up_probability"),
+                    clamp_probability=True,
+                ),
+                "expected_return_pct": safe_number(
+                    block.get("expected_return_pct")
+                ),
+                "expected_excess_vs_spy_pct": safe_number(
+                    block.get("expected_excess_vs_spy_pct")
+                ),
+                "expected_excess_vs_qqq_pct": safe_number(
+                    block.get("expected_excess_vs_qqq_pct")
+                ),
+                "confidence": str(
+                    block.get("confidence") or "低"
+                ).strip(),
+                "rationale": str(
+                    block.get("rationale") or ""
+                ).strip(),
+            }
+
+        return {
+            "primary_horizon": "10d",
+            "horizons": normalized_horizons,
+            "policy": (
+                "Forecast is independent from execution timing. Non-trading day, "
+                "premarket/postmarket, or waiting-for-entry may change execution "
+                "action but must not mechanically rewrite the forecast."
+            ),
+        }
+
+    @staticmethod
+    def _audit_forecast_payload(
+        forecast: Optional[Dict[str, Any]],
+        *,
+        code: str,
+    ) -> None:
+        horizons = (
+            forecast.get("horizons", {})
+            if isinstance(forecast, dict)
+            and isinstance(forecast.get("horizons"), dict)
+            else {}
+        )
+        missing = []
+        for horizon in ("5d", "10d", "20d"):
+            block = horizons.get(horizon)
+            if not isinstance(block, dict):
+                missing.append(horizon)
+                continue
+            if block.get("up_probability") is None:
+                missing.append(f"{horizon}.up_probability")
+            if block.get("expected_return_pct") is None:
+                missing.append(f"{horizon}.expected_return_pct")
+
+        log_fn = logger.warning if missing else logger.info
+        primary = horizons.get("10d", {}) if isinstance(horizons.get("10d"), dict) else {}
+        log_fn(
+            "[ForecastAudit] %s primary=10d direction=%s up_prob=%s "
+            "expected_return=%s missing=%s",
+            code,
+            primary.get("direction"),
+            primary.get("up_probability"),
+            primary.get("expected_return_pct"),
+            missing,
+        )
+
     def _parse_response(
         self, 
         response_text: str, 
@@ -5010,6 +5294,7 @@ class GeminiAnalyzer:
 
             # 提取 dashboard 数据
             dashboard = data.get('dashboard', None)
+            forecast = self._normalize_forecast_payload(data.get('forecast'))
             guardrail_reason = data.get("guardrail_reason") or data.get("downgrade_reason")
             if guardrail_reason and isinstance(dashboard, dict):
                 score_calibration = dashboard.get("decision_score_calibration")
@@ -5049,6 +5334,7 @@ class GeminiAnalyzer:
                     report_language,
                 ),
                 report_language=report_language,
+                forecast=forecast,
                 # 决策仪表盘
                 dashboard=dashboard,
                 # 走势分析
@@ -5080,6 +5366,7 @@ class GeminiAnalyzer:
                     report_language, en='Technical data', zh='技术面数据', ko='기술적 데이터')),
                 success=True,
             )
+            self._audit_forecast_payload(result.forecast, code=code)
             return populate_decision_action_fields(
                 result,
                 explicit_action=explicit_action,
