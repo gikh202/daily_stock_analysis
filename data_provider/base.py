@@ -31,6 +31,7 @@ from src.services.run_diagnostics import record_provider_run, record_provider_ru
 from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 from .sec_edgar_fundamental_adapter import SecEdgarFundamentalAdapter
+from .earnings_event_adapter import YfinanceEarningsEventAdapter
 from .realtime_types import CircuitBreaker
 
 # 配置日志
@@ -750,6 +751,7 @@ class DataFetcherManager:
         self._fundamental_adapter = AkshareFundamentalAdapter()
         self._yfinance_fundamental_adapter = YfinanceFundamentalAdapter()
         self._sec_edgar_fundamental_adapter = SecEdgarFundamentalAdapter()
+        self._earnings_event_adapter = YfinanceEarningsEventAdapter()
         self._tickflow_fetcher = None
         self._tickflow_api_key: Optional[str] = None
         self._tickflow_lock = RLock()
@@ -2960,6 +2962,7 @@ class DataFetcherManager:
             "valuation": {},
             "growth": {},
             "earnings": {},
+            "earnings_event": {},
             "institution": {},
             "capital_flow": {},
             "dragon_tiger": {},
@@ -3051,6 +3054,92 @@ class DataFetcherManager:
                         stock_code,
                         sec_err,
                     )
+
+        # 美股公司：结构化财报事件（未来财报日 / EPS 预期 / 历史 surprise /
+        # EPS revisions / 营收一致预期）。
+        #
+        # 设计原则：
+        # 1. ETF / 指数由 adapter 明确返回 not_supported，不套用公司财报逻辑；
+        # 2. 网络失败只记录数据缺口，不改变其他基本面块状态；
+        # 3. earnings_event 不参与顶层 data_quality 降级，避免“缺失 == 利空”。
+        if market == "us":
+            event_timeout = min(
+                fetch_timeout,
+                max(stage_timeout - (time.time() - start_ts), 0.0),
+            )
+            event_payload: Dict[str, Any] = {}
+            event_err = None
+            event_ms = 0
+
+            if event_timeout > 0:
+                try:
+                    event_stock_name = self.get_stock_name(stock_code)
+                except Exception:
+                    event_stock_name = ""
+
+                event_payload, event_err, event_ms = self._run_with_retry(
+                    lambda: self._earnings_event_adapter.get_earnings_event(
+                        stock_code,
+                        stock_name=event_stock_name or "",
+                    ),
+                    event_timeout,
+                    "fundamental_earnings_event_yfinance",
+                )
+
+            if isinstance(event_payload, dict) and event_payload:
+                event_status = str(event_payload.get("status", "partial"))
+                event_data = (
+                    event_payload.get("data", {})
+                    if isinstance(event_payload.get("data"), dict)
+                    else {}
+                )
+                event_errors = list(event_payload.get("errors", []))
+                if event_err:
+                    event_errors.append(event_err)
+
+                event_chain = self._normalize_source_chain(
+                    event_payload.get("source_chain", []),
+                    "yfinance_earnings_event",
+                    event_status,
+                    event_ms,
+                )
+                result_ctx["earnings_event"] = self._build_fundamental_block(
+                    event_status,
+                    event_data,
+                    event_chain,
+                    event_errors,
+                )
+
+                if event_status != "not_supported":
+                    logger.info(
+                        "[财报事件] %s enrichment status=%s next=%s days=%s risk=%s duration_ms=%s",
+                        stock_code,
+                        event_status,
+                        event_data.get("next_earnings_date"),
+                        event_data.get("days_to_earnings"),
+                        event_data.get("event_risk"),
+                        event_ms,
+                    )
+                else:
+                    logger.info(
+                        "[财报事件] %s skipped: %s",
+                        stock_code,
+                        event_data.get("skip_reason", "not_supported"),
+                    )
+            else:
+                event_errors = [event_err] if event_err else ["earnings event unavailable"]
+                result_ctx["earnings_event"] = self._build_fundamental_block(
+                    "failed",
+                    {},
+                    [
+                        {
+                            "provider": "yfinance_earnings_event",
+                            "result": "failed",
+                            "duration_ms": event_ms,
+                        }
+                    ],
+                    event_errors,
+                )
 
         bundle_chain = self._normalize_source_chain(
             bundle_payload.get("source_chain", []),
@@ -3171,8 +3260,27 @@ class DataFetcherManager:
             "dragon_tiger": "not_supported",
             "boards": "not_supported",
         }
+        if isinstance(result_ctx.get("earnings_event"), dict) and result_ctx["earnings_event"]:
+            block_statuses["earnings_event"] = result_ctx["earnings_event"].get(
+                "status",
+                "not_supported",
+            )
+
         result_ctx["coverage"] = block_statuses
-        for block in ("valuation", "growth", "earnings", "institution", "capital_flow", "dragon_tiger", "boards"):
+
+        aggregate_blocks = [
+            "valuation",
+            "growth",
+            "earnings",
+            "institution",
+            "capital_flow",
+            "dragon_tiger",
+            "boards",
+        ]
+        if isinstance(result_ctx.get("earnings_event"), dict) and result_ctx["earnings_event"]:
+            aggregate_blocks.append("earnings_event")
+
+        for block in aggregate_blocks:
             result_ctx["errors"].extend(result_ctx[block].get("errors", []))
             result_ctx["source_chain"].extend(result_ctx[block].get("source_chain", []))
 
