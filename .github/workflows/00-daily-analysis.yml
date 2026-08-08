@@ -1,7 +1,7 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 06:30
+  # 定时触发 - 美股收盘后执行（UTC 22:30；北京时间次日 06:30）
   schedule:
     - cron: '30 22 * * 1-5'
   
@@ -60,10 +60,14 @@ jobs:
         run: |
           mkdir -p data logs reports
 
+      - name: 准确率增强预检
+        run: |
+          python scripts/preflight_accuracy.py
+
       # 恢复历史分析数据库/快照，供历史对比与回测使用
       - name: 恢复历史分析数据
         id: restore-analysis-data
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: data/
           key: stock-analysis-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -282,17 +286,6 @@ jobs:
           # 数据源
           # ==========================================
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-          # Finnhub（美股行情备用数据源）
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-          # SEC EDGAR（美国 SEC 官方财报数据）
-          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
-          SEC_EDGAR_ENABLED: ${{ vars.SEC_EDGAR_ENABLED || 'true' }}
-          SEC_EDGAR_CACHE_TTL_SECONDS: ${{ vars.SEC_EDGAR_CACHE_TTL_SECONDS || '86400' }}
-          SEC_EDGAR_HTTP_TIMEOUT_SECONDS: ${{ vars.SEC_EDGAR_HTTP_TIMEOUT_SECONDS || '5' }}
-
-          # 接入 SEC 后适当增加基本面分析时间预算
-          FUNDAMENTAL_STAGE_TIMEOUT_SECONDS: ${{ vars.FUNDAMENTAL_STAGE_TIMEOUT_SECONDS || '15' }}
-          FUNDAMENTAL_FETCH_TIMEOUT_SECONDS: ${{ vars.FUNDAMENTAL_FETCH_TIMEOUT_SECONDS || '8' }}
           # Tushare Pro 自定义接入地址（可选；指向自建网关或第三方兼容镜像时设置）
           TUSHARE_HTTP_URL: ${{ vars.TUSHARE_HTTP_URL || secrets.TUSHARE_HTTP_URL }}
           # TickFlow（A 股日 K、实时行情、股票列表/名称与大盘复盘增强；不设则走免费源 fallback）
@@ -392,7 +385,7 @@ jobs:
           FEISHU_FOLDER_TOKEN: ${{ secrets.FEISHU_FOLDER_TOKEN }}
           FEISHU_CHAT_ID: ${{ vars.FEISHU_CHAT_ID || secrets.FEISHU_CHAT_ID }}
           FEISHU_RECEIVE_ID_TYPE: ${{ vars.FEISHU_RECEIVE_ID_TYPE || secrets.FEISHU_RECEIVE_ID_TYPE }}
-          FEISHU_DOMAIN: ${{ vars.FEISHU_DOMAIN || secrets.FEISHU_DOMAIN }}
+          FEISHU_DOMAIN: ${{ vars.FEISHU_DOMAIN || secrets.FEISHU_DOMAIN || 'feishu' }}
           FEISHU_SEND_AS_FILE: ${{ vars.FEISHU_SEND_AS_FILE || secrets.FEISHU_SEND_AS_FILE }}
 
           # 方式十：AstrBot
@@ -423,13 +416,13 @@ jobs:
           # ==========================================
           # 避免直接写入 STOCK_LIST，保留同名 Environment variables 的 runner 环境值。
           STOCK_LIST_CONFIG: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
-          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
+          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'us' }}
           MARKET_REVIEW_COLOR_SCHEME: ${{ vars.MARKET_REVIEW_COLOR_SCHEME || secrets.MARKET_REVIEW_COLOR_SCHEME || 'green_up' }}
           
           # ==========================================
           # 运行配置 ⬅️ 新增！
           # ==========================================
-          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'full' }}
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
           REPORT_SHOW_LLM_MODEL: ${{ vars.REPORT_SHOW_LLM_MODEL || secrets.REPORT_SHOW_LLM_MODEL || 'true' }}
           SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || secrets.SINGLE_STOCK_NOTIFY || 'false' }}
@@ -458,6 +451,14 @@ jobs:
 
           # 新闻时效
           NEWS_STRATEGY_PROFILE: ${{ vars.NEWS_STRATEGY_PROFILE || 'short' }}
+          SERPAPI_FRESH_TIMEOUT_SECONDS: ${{ vars.SERPAPI_FRESH_TIMEOUT_SECONDS || '12' }}
+          SERPAPI_ANALYTICAL_TIMEOUT_SECONDS: ${{ vars.SERPAPI_ANALYTICAL_TIMEOUT_SECONDS || '20' }}
+          REALTIME_QUOTE_REUSE_TTL_SECONDS: ${{ vars.REALTIME_QUOTE_REUSE_TTL_SECONDS || '30' }}
+          LITELLM_FAST_FAILOVER_ON_EMPTY_STREAM: ${{ vars.LITELLM_FAST_FAILOVER_ON_EMPTY_STREAM || 'true' }}
+          LITELLM_JSON_OBJECT_MODE: ${{ vars.LITELLM_JSON_OBJECT_MODE || 'true' }}
+          MARKET_REGIME_ENABLED: ${{ vars.MARKET_REGIME_ENABLED || 'true' }}
+          PREDICTION_CONTEXT_ENABLED: ${{ vars.PREDICTION_CONTEXT_ENABLED || 'true' }}
+          PREDICTION_CONTEXT_CACHE_TTL_SECONDS: ${{ vars.PREDICTION_CONTEXT_CACHE_TTL_SECONDS || '900' }}
           NEWS_MAX_AGE_DAYS: ${{ vars.NEWS_MAX_AGE_DAYS || '3' }}
 
           # 大盘上下文
@@ -474,13 +475,13 @@ jobs:
           # 系统配置
           # ==========================================
           LOG_LEVEL: INFO
-          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '1' }}
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '2' }}
           # 筹码分布：默认 false（云端接口不稳定）；需启用时在 Settings → Variables 添加 ENABLE_CHIP_DISTRIBUTION=true
           ENABLE_CHIP_DISTRIBUTION: ${{ vars.ENABLE_CHIP_DISTRIBUTION || secrets.ENABLE_CHIP_DISTRIBUTION || 'false' }}
           # 实时行情数据源优先级（腾讯有量比且稳定，推荐首选）
           # 可选值: tencent, akshare_sina, efinance, akshare_em, tickflow, tushare
           # 如果有 TickFlow 或 Tushare Pro，可按权限把 tickflow / tushare 放在更靠前位置
-          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'finnhub,yfinance,tencent,akshare_sina,efinance,akshare_em' }}
           
         run: |
           # 解析自选股配置：
@@ -593,7 +594,7 @@ jobs:
       # 保存本次 data/，供下一次 GitHub Actions 恢复
       - name: 保存历史分析数据
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: data/
           key: stock-analysis-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
