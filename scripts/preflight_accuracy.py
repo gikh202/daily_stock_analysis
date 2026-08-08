@@ -8,16 +8,16 @@ from __future__ import annotations
 import ast
 import os
 import py_compile
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 
-# When this file is executed as:
+# Always put the repository root on sys.path.  This is required when the file
+# is executed exactly as GitHub Actions does:
 #     python scripts/preflight_accuracy.py
-# Python puts <repo>/scripts at sys.path[0], not necessarily <repo>.
-# Add the repository root explicitly so imports such as `import src.analyzer`
-# work identically in GitHub Actions and local runs.
+# because Python otherwise places <repo>/scripts at sys.path[0].
 REPO_ROOT = Path(__file__).resolve().parents[1]
 repo_root_str = str(REPO_ROOT)
 if repo_root_str not in sys.path:
@@ -218,8 +218,50 @@ def _test_relative_strength_states() -> None:
     assert fn(None, 1.0) == "unknown"
 
 
+def _test_workflow_cache_safety(root: Path) -> None:
+    """Guard against saving an empty/corrupt data/ cache after failures."""
+    workflow_path = (
+        root / ".github" / "workflows" / "00-daily-analysis.yml"
+    )
+    text = workflow_path.read_text(encoding="utf-8")
+
+    save_match = re.search(
+        r"- name:\s*保存历史分析数据(?P<body>.*?)(?=\n\s*-\s+name:|\Z)",
+        text,
+        flags=re.DOTALL,
+    )
+    assert save_match is not None, "history cache save step missing"
+    save_block = save_match.group("body")
+
+    assert "if: always()" not in save_block, (
+        "history cache must never save with if: always()"
+    )
+    assert "validate-analysis-cache.outputs.valid" in save_block, (
+        "history cache save must be gated by SQLite validation"
+    )
+    assert "actions/cache/save@v5" in save_block
+    assert "restore_cache_key:" in text, (
+        "manual exact cache recovery input missing"
+    )
+    assert "fail-on-cache-miss: true" in text
+    assert "PRAGMA quick_check" in text
+    assert "data/stock_analysis.db" in text
+    assert "PYTHONPATH: ${{ github.workspace }}" in text
+    assert "analysis_history_regressed" in text
+    assert "inspect-analysis-data.outputs.analysis_history_count" in text
+
+
+
+def _test_repo_import_path(root: Path) -> None:
+    assert str(root) in sys.path, (
+        "repository root must be present in sys.path before importing src.*"
+    )
+    assert (root / "src").is_dir(), "repository src/ directory missing"
+
+
 def main() -> None:
     root = REPO_ROOT
+    _test_repo_import_path(root)
     _compile_critical_files(root)
 
     import src.analyzer  # noqa: F401
@@ -234,6 +276,7 @@ def main() -> None:
     _test_preaccept_forecast_and_evidence_contract()
     _test_quote_reuse_cache()
     _test_relative_strength_states()
+    _test_workflow_cache_safety(root)
     print("accuracy preflight: PASS")
 
 
