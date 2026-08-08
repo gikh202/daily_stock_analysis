@@ -1169,12 +1169,23 @@ class StockAnalysisPipeline:
         # available/complete = 正常证据
         # disabled/not_supported/unavailable = 中性证据缺口
         # stale/failed/inconsistent = 真正的数据质量风险
-        phase_ctx = enhanced.get("market_phase_context", {})
-        phase_name = (
-            str(phase_ctx.get("phase") or "")
-            if isinstance(phase_ctx, dict)
-            else ""
-        )
+        # 优先使用 _enhance_context() 已经收到的 market_phase_context 参数。
+        # 之前这里从 enhanced 读取，但 enhanced 此时还没有写入该字段，
+        # 导致周末/强制运行时 phase_name 为空，进而把 realtime_quote 存在
+        # 错判成 technical_intraday=available。
+        if isinstance(market_phase_context, dict):
+            phase_ctx = dict(market_phase_context)
+            enhanced["market_phase_context"] = phase_ctx
+        else:
+            phase_ctx = (
+                enhanced.get("market_phase_context", {})
+                if isinstance(enhanced.get("market_phase_context"), dict)
+                else {}
+            )
+
+        phase_name = str(phase_ctx.get("phase") or "").strip().lower()
+        is_trading_day = phase_ctx.get("is_trading_day")
+        is_market_open_flag = phase_ctx.get("is_market_open")
         rt = (
             enhanced.get("realtime", {})
             if isinstance(enhanced.get("realtime"), dict)
@@ -1208,15 +1219,39 @@ class StockAnalysisPipeline:
 
         technical_daily_status = "available" if trend_result is not None else "unavailable"
 
-        if phase_name in {"non_trading", "premarket"}:
+        # “盘中技术覆盖”只描述常规交易时段内的实时确认能力，
+        # 不能因为拿到了一个最新价格就认定存在盘中技术覆盖。
+        #
+        # - 非交易日：没有今日 regular-session 盘中走势
+        # - premarket/postmarket：不是 regular-session 盘中阶段
+        # - unknown：市场阶段不确定，保守标记 unavailable
+        # - intraday/lunch_break/closing_auction：有实时 quote 才标记 available
+        regular_intraday_phases = {
+            "intraday",
+            "lunch_break",
+            "closing_auction",
+        }
+
+        if is_trading_day is False:
+            technical_intraday_status = "unavailable"
+            technical_intraday_reason = "market_phase:non_trading_day"
+        elif phase_name in {"premarket", "postmarket", "unknown", ""}:
             technical_intraday_status = "unavailable"
             technical_intraday_reason = f"market_phase:{phase_name or 'unknown'}"
-        elif realtime_quote is not None:
+        elif phase_name in regular_intraday_phases:
+            if realtime_quote is not None:
+                technical_intraday_status = "available"
+                technical_intraday_reason = f"market_phase:{phase_name};realtime_overlay_available"
+            else:
+                technical_intraday_status = "unavailable"
+                technical_intraday_reason = f"market_phase:{phase_name};realtime_overlay_missing"
+        elif is_market_open_flag is True and realtime_quote is not None:
+            # 对未来可能新增的“开市中”阶段保持向前兼容。
             technical_intraday_status = "available"
-            technical_intraday_reason = "realtime_overlay_available"
+            technical_intraday_reason = "market_open;realtime_overlay_available"
         else:
             technical_intraday_status = "unavailable"
-            technical_intraday_reason = "realtime_overlay_missing"
+            technical_intraday_reason = f"market_phase:{phase_name or 'unknown'}"
 
         rvol_status = (
             "available"
@@ -1310,7 +1345,7 @@ class StockAnalysisPipeline:
 
         logger.info(
             "[数据可用性] %s price=%s(%s) daily=%s tech_daily=%s "
-            "tech_intraday=%s rvol=%s chip=%s",
+            "tech_intraday=%s rvol=%s chip=%s phase=%s trading_day=%s",
             context_code,
             price_status,
             rt.get("source") or "unknown",
@@ -1319,6 +1354,8 @@ class StockAnalysisPipeline:
             technical_intraday_status,
             rvol_status,
             chip_status,
+            phase_name or "unknown",
+            is_trading_day,
         )
 
         # 添加趋势分析结果
