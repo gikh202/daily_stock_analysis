@@ -11,6 +11,7 @@ def test_missing_features_reduce_confidence_instead_of_fake_neutral():
     )
     assert decision.confidence < 0.60
     assert decision.decision == "WAIT"
+    assert decision.trade_plan.action == "WAIT"
     assert decision.opportunity_score is not None
     assert decision.limitations
 
@@ -38,6 +39,7 @@ def test_high_risk_vetoes_strong_opportunity():
     assert decision.opportunity_score >= 75
     assert decision.risk_score >= 75
     assert decision.decision == "AVOID"
+    assert decision.trade_plan.action == "AVOID"
     assert decision.trade_plan.max_position_pct == 0
 
 
@@ -62,10 +64,39 @@ def test_good_setup_has_bounded_position_and_positive_rr():
         atr=4,
     )
     assert decision.decision == "BUY_SETUP"
+    assert decision.trade_plan.action == "BUY_SETUP"
     assert 0 < decision.trade_plan.max_position_pct <= 0.15
     assert decision.trade_plan.stop_loss < 200
     assert decision.trade_plan.targets[0] > 200
     assert decision.trade_plan.risk_reward >= 1.5
+
+
+def test_low_rr_gate_downgrades_top_level_decision_to_wait():
+    decision = AlphaDecisionEngine().evaluate(
+        "MSFT",
+        AlphaFeatures(
+            trend=92,
+            momentum=88,
+            relative_strength=90,
+            volume_confirmation=85,
+            fundamental_quality=90,
+            catalyst=85,
+            market_regime=90,
+            volatility_risk=20,
+            event_risk=20,
+            data_quality=95,
+        ),
+        current_price=100,
+        support=95,
+        resistance=102,
+        atr=4,
+    )
+    assert decision.opportunity_score >= 75
+    assert decision.trade_plan.risk_reward < 1.5
+    assert decision.trade_plan.action == "WAIT"
+    assert decision.decision == "WAIT"
+    assert decision.trade_plan.max_position_pct == 0
+    assert any("trade-plan gate downgraded" in item for item in decision.limitations)
 
 
 def test_non_finite_values_are_treated_as_missing():
@@ -74,4 +105,5 @@ def test_non_finite_values_are_treated_as_missing():
         AlphaFeatures(trend=math.nan, momentum=math.inf, data_quality=80),
     )
     assert decision.decision == "WAIT"
+    assert decision.trade_plan.action == "WAIT"
     assert decision.confidence < 0.60
