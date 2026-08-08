@@ -3192,10 +3192,18 @@ class GeminiAnalyzer:
             if model
         ]
 
+        fast_failover_on_empty_stream = (
+            os.getenv("LITELLM_FAST_FAILOVER_ON_EMPTY_STREAM", "true")
+            .strip()
+            .lower()
+            not in {"0", "false", "no", "off"}
+        )
+
         logger.info(
-            "[LLM故障转移] 调用计划: primary=%s, fallbacks=%s",
+            "[LLM故障转移] 调用计划: primary=%s, fallbacks=%s, fast_empty_stream=%s",
             config.litellm_model,
             fallback_models or [],
+            fast_failover_on_empty_stream,
         )
 
         use_channel_router = self._has_channel_config(config)
@@ -3335,8 +3343,28 @@ class GeminiAnalyzer:
                                 safe_error,
                             )
                         else:
+                            has_next_model = model_index + 1 < len(models_to_try)
+                            if fast_failover_on_empty_stream and has_next_model:
+                                logger.warning(
+                                    "[LiteLLM] %s stream empty before first chunk; "
+                                    "fast-failover enabled, skip same-model non-stream and switch to %s: %s",
+                                    model,
+                                    models_to_try[model_index + 1],
+                                    safe_error,
+                                )
+                                last_error = RuntimeError(
+                                    f"{type(exc).__name__}: {safe_error}"
+                                )
+                                logger.warning(
+                                    "[LLM故障转移] %s 空流快速切换到 %s",
+                                    model,
+                                    models_to_try[model_index + 1],
+                                )
+                                continue
+
                             logger.warning(
-                                "[LiteLLM] %s stream unavailable before first chunk, falling back to non-stream: %s",
+                                "[LiteLLM] %s stream unavailable before first chunk, "
+                                "falling back to non-stream: %s",
                                 model,
                                 safe_error,
                             )
@@ -3863,6 +3891,62 @@ class GeminiAnalyzer:
         )
         if daily_market_context_section:
             prompt += daily_market_context_section
+
+        market_regime = (
+            context.get("market_regime", {})
+            if isinstance(context, dict)
+            else {}
+        )
+        if isinstance(market_regime, dict) and market_regime:
+            regime_status = str(market_regime.get("status") or "unknown")
+            regime_name = str(market_regime.get("regime") or "unknown")
+            regime_confidence = str(market_regime.get("confidence") or "low")
+            components = (
+                market_regime.get("components", {})
+                if isinstance(market_regime.get("components"), dict)
+                else {}
+            )
+            spy = components.get("SPY", {}) if isinstance(components.get("SPY"), dict) else {}
+            qqq = components.get("QQQ", {}) if isinstance(components.get("QQQ"), dict) else {}
+            vix = components.get("^VIX", {}) if isinstance(components.get("^VIX"), dict) else {}
+            tnx = components.get("^TNX", {}) if isinstance(components.get("^TNX"), dict) else {}
+
+            risk_on_reasons = (
+                "；".join(market_regime.get("risk_on_reasons") or [])
+                or "无"
+            )
+            risk_off_reasons = (
+                "；".join(market_regime.get("risk_off_reasons") or [])
+                or "无"
+            )
+
+            prompt += f"""
+## 结构化美股 Market Regime
+
+| 指标 | 数值 |
+|------|------|
+| 数据状态 | {regime_status} |
+| **Regime** | **{regime_name}** |
+| Regime 置信度 | {regime_confidence} |
+| SPY 收盘 / MA20 | {spy.get('close', 'N/A')} / {spy.get('ma20', 'N/A')} |
+| SPY 近5日 | {spy.get('change_5d_pct', 'N/A')}% |
+| QQQ 收盘 / MA20 | {qqq.get('close', 'N/A')} / {qqq.get('ma20', 'N/A')} |
+| QQQ 近5日 | {qqq.get('change_5d_pct', 'N/A')}% |
+| VIX | {vix.get('close', 'N/A')} |
+| VIX 近5日 | {vix.get('change_5d_pct', 'N/A')}% |
+| 美国10Y收益率 | {tnx.get('yield_pct', 'N/A')}% |
+| 美国10Y近5日变化 | {tnx.get('change_5d_bp', 'N/A')} bp |
+| Risk-On 依据 | {risk_on_reasons} |
+| Risk-Off 依据 | {risk_off_reasons} |
+
+> Market Regime 是市场背景/风险修正因子，不是独立交易信号。
+> `risk_on` 只能增强已有多头证据的环境确认，不能单独触发买入。
+> `risk_off` 应提高入场确认要求和风险描述，但不能机械扣固定分，也不能自动触发卖出。
+> `neutral` 表示市场环境没有给出足够一致的方向确认。
+> TNX 仅作上下文，不把收益率单独解释为必然利空或利多。
+> status=partial/failed/unknown 时按中性缺失处理，不得因为 Market Regime 数据缺失而自动降低个股评分。
+"""
+
         market_structure_section = format_market_structure_prompt_section(
             context.get("market_structure_context"),
             report_language=report_language,
