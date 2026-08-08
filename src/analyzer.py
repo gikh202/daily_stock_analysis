@@ -3651,9 +3651,13 @@ class GeminiAnalyzer:
                         raise
                 elapsed = time.time() - start_time
 
-                # 记录响应信息
+                # 记录真正完成本次请求的模型。
+                # model_name 是初始主模型；发生 fallback 后它仍然是 Flash，
+                # 因此这里必须优先使用 _call_litellm() 返回的 model_used。
+                effective_model = model_used or model_name
+
                 logger.info(
-                    f"[LLM返回] {model_name} 响应成功, 耗时 {elapsed:.2f}s, 响应长度 {len(response_text)} 字符"
+                    f"[LLM返回] {effective_model} 响应成功, 耗时 {elapsed:.2f}s, 响应长度 {len(response_text)} 字符"
                 )
                 if backend_id in LOCAL_CLI_GENERATION_BACKEND_IDS:
                     response_preview = redact_diagnostic_text(response_text, limit=300)
@@ -3662,7 +3666,7 @@ class GeminiAnalyzer:
                 logger.info(f"[LLM返回 预览]\n{response_preview}")
                 if backend_id not in LOCAL_CLI_GENERATION_BACKEND_IDS:
                     logger.debug(
-                        f"=== {model_name} 完整响应 ({len(response_text)}字符) ===\n{response_text}\n=== End Response ==="
+                        f"=== {effective_model} 完整响应 ({len(response_text)}字符) ===\n{response_text}\n=== End Response ==="
                     )
                 # Keep parser/retry progress monotonic so task progress/message never "goes backward".
                 parse_progress = min(99, 93 + retry_count * 2)
