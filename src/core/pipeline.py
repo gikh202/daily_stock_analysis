@@ -474,9 +474,15 @@ class StockAnalysisPipeline:
                         # 兼容不同数据源的字段（有些数据源可能没有 volume_ratio）
                         volume_ratio = getattr(realtime_quote, 'volume_ratio', None)
                         turnover_rate = getattr(realtime_quote, 'turnover_rate', None)
-                        logger.info(f"{stock_name}({code}) 实时行情: 价格={realtime_quote.price}, "
-                                  f"量比={volume_ratio}, 换手率={turnover_rate}% "
-                                  f"(来源: {realtime_quote.source.value if hasattr(realtime_quote, 'source') else 'unknown'})")
+                        provider_source = getattr(realtime_quote, "provider_source", None)
+                        raw_source = getattr(realtime_quote, "source", None)
+                        raw_source_name = getattr(raw_source, "value", raw_source)
+                        effective_source = provider_source or raw_source_name or "unknown"
+                        logger.info(
+                            f"{stock_name}({code}) 实时行情: 价格={realtime_quote.price}, "
+                            f"量比={volume_ratio}, 换手率={turnover_rate}% "
+                            f"(来源: {effective_source})"
+                        )
                     else:
                         logger.warning(f"{stock_name}({code}) 所有实时行情数据源均不可用，已降级为历史收盘价继续分析")
                 else:
@@ -816,7 +822,11 @@ class StockAnalysisPipeline:
 
             # Step 7.6: chip_structure fallback (Issue #589) and unavailable collapse
             if result:
-                normalize_chip_structure_availability(result, chip_data)
+                normalize_chip_structure_availability(
+                    result,
+                    chip_data,
+                    feature_enabled=getattr(self.config, "enable_chip_distribution", False),
+                )
 
             # Step 7.7: price_position fallback
             if result:
@@ -1110,8 +1120,15 @@ class StockAnalysisPipeline:
             # 使用 getattr 安全获取字段，缺失字段返回 None 或默认值
             volume_ratio = getattr(realtime_quote, 'volume_ratio', None)
             quote_source = getattr(realtime_quote, 'source', None)
-            quote_source_name = getattr(quote_source, 'value', quote_source)
-            quote_source_name = str(quote_source_name) if quote_source_name is not None else None
+            raw_quote_source_name = getattr(quote_source, 'value', quote_source)
+            raw_quote_source_name = (
+                str(raw_quote_source_name)
+                if raw_quote_source_name is not None
+                else None
+            )
+            provider_source = getattr(realtime_quote, 'provider_source', None)
+            provider_source = str(provider_source) if provider_source else None
+            quote_source_name = provider_source or raw_quote_source_name
             enhanced['realtime'] = {
                 'name': getattr(realtime_quote, 'name', ''),
                 'price': getattr(realtime_quote, 'price', None),
@@ -1125,6 +1142,8 @@ class StockAnalysisPipeline:
                 'circ_mv': getattr(realtime_quote, 'circ_mv', None),
                 'change_60d': getattr(realtime_quote, 'change_60d', None),
                 'source': quote_source_name,
+                'provider_source': provider_source,
+                'raw_source': raw_quote_source_name,
                 'fetched_at': getattr(realtime_quote, 'fetched_at', None),
                 'provider_timestamp': getattr(realtime_quote, 'provider_timestamp', None),
                 'is_stale': getattr(realtime_quote, 'is_stale', None),
@@ -1145,6 +1164,157 @@ class StockAnalysisPipeline:
                 'chip_status': chip_data.get_chip_status(current_price or 0),
             }
         
+
+        # 统一数据可用性语义：
+        # available/complete = 正常证据
+        # disabled/not_supported/unavailable = 中性证据缺口
+        # stale/failed/inconsistent = 真正的数据质量风险
+        phase_ctx = enhanced.get("market_phase_context", {})
+        phase_name = (
+            str(phase_ctx.get("phase") or "")
+            if isinstance(phase_ctx, dict)
+            else ""
+        )
+        rt = (
+            enhanced.get("realtime", {})
+            if isinstance(enhanced.get("realtime"), dict)
+            else {}
+        )
+
+        rt_price = rt.get("price")
+        if rt_price is None:
+            price_status = "unavailable"
+            price_reason = "realtime_price_missing"
+        elif rt.get("is_stale") is True:
+            price_status = "stale"
+            price_reason = "provider_timestamp_exceeds_ttl"
+        else:
+            price_status = "available"
+            price_reason = "valid_price_from_provider"
+
+        today_ctx = enhanced.get("today", {})
+        is_partial_bar = (
+            bool(today_ctx.get("is_partial_bar"))
+            if isinstance(today_ctx, dict)
+            else False
+        )
+        daily_has_close = (
+            isinstance(today_ctx, dict)
+            and today_ctx.get("close") not in (None, "")
+        )
+        daily_status = "partial" if is_partial_bar else (
+            "complete" if daily_has_close else "unavailable"
+        )
+
+        technical_daily_status = "available" if trend_result is not None else "unavailable"
+
+        if phase_name in {"non_trading", "premarket"}:
+            technical_intraday_status = "unavailable"
+            technical_intraday_reason = f"market_phase:{phase_name or 'unknown'}"
+        elif realtime_quote is not None:
+            technical_intraday_status = "available"
+            technical_intraday_reason = "realtime_overlay_available"
+        else:
+            technical_intraday_status = "unavailable"
+            technical_intraday_reason = "realtime_overlay_missing"
+
+        rvol_status = (
+            "available"
+            if isinstance(volume_price_features, dict)
+            and (
+                volume_price_features.get("rvol5") is not None
+                or volume_price_features.get("rvol20") is not None
+            )
+            else "unavailable"
+        )
+
+        if chip_data is not None:
+            chip_status = "available"
+            chip_reason = "chip_data_available"
+        elif not getattr(self.config, "enable_chip_distribution", False):
+            chip_status = "disabled"
+            chip_reason = "feature_disabled"
+        else:
+            chip_status = "unavailable"
+            chip_reason = "provider_unavailable"
+
+        enhanced["data_availability"] = {
+            "policy": {
+                "neutral_missing_statuses": ["disabled", "not_supported", "unavailable"],
+                "true_quality_risk_statuses": ["stale", "failed", "inconsistent"],
+                "note": (
+                    "disabled/not_supported/unavailable are evidence gaps only; "
+                    "they are not bearish signals and must not reduce score by themselves"
+                ),
+            },
+            "price": {
+                "status": price_status,
+                "source": rt.get("source"),
+                "raw_source": rt.get("raw_source"),
+                "fallback_from": rt.get("fallback_from"),
+                "reason": price_reason,
+            },
+            "daily_bars": {
+                "status": daily_status,
+                "reason": "partial_bar" if is_partial_bar else (
+                    "complete_daily_bar" if daily_has_close else "daily_bar_missing"
+                ),
+            },
+            "technical_daily": {
+                "status": technical_daily_status,
+                "reason": (
+                    "trend_analysis_available"
+                    if technical_daily_status == "available"
+                    else "trend_analysis_missing"
+                ),
+            },
+            "technical_intraday": {
+                "status": technical_intraday_status,
+                "reason": technical_intraday_reason,
+            },
+            "rvol": {
+                "status": rvol_status,
+                "source": (
+                    volume_price_features.get("source")
+                    if isinstance(volume_price_features, dict)
+                    else None
+                ),
+            },
+            "intraday_volume_ratio": {
+                "status": "available" if rt.get("volume_ratio") is not None else "unavailable",
+                "reason": (
+                    "provider_value_available"
+                    if rt.get("volume_ratio") is not None
+                    else "provider_field_unavailable"
+                ),
+            },
+            "turnover_rate": {
+                "status": "available" if rt.get("turnover_rate") is not None else "unavailable",
+                "reason": (
+                    "provider_value_available"
+                    if rt.get("turnover_rate") is not None
+                    else "provider_field_unavailable"
+                ),
+            },
+            "chip_distribution": {
+                "status": chip_status,
+                "reason": chip_reason,
+            },
+        }
+
+        logger.info(
+            "[数据可用性] %s price=%s(%s) daily=%s tech_daily=%s "
+            "tech_intraday=%s rvol=%s chip=%s",
+            code,
+            price_status,
+            rt.get("source") or "unknown",
+            daily_status,
+            technical_daily_status,
+            technical_intraday_status,
+            rvol_status,
+            chip_status,
+        )
+
         # 添加趋势分析结果
         if trend_result:
             enhanced['trend_analysis'] = {
@@ -1662,7 +1832,11 @@ class StockAnalysisPipeline:
                     )
             # chip_structure fallback (Issue #589), before save_analysis_history
             if result and chip_data is not None:
-                normalize_chip_structure_availability(result, chip_data)
+                normalize_chip_structure_availability(
+                    result,
+                    chip_data,
+                    feature_enabled=getattr(self.config, "enable_chip_distribution", False),
+                )
 
             # price_position fallback (same as non-agent path Step 7.7)
             if result:
