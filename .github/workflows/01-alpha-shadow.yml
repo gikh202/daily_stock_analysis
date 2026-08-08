@@ -1,0 +1,183 @@
+name: V5 Alpha Shadow
+
+on:
+  workflow_run:
+    workflows: ['每日股票分析']
+    types: [completed]
+  schedule:
+    # Fallback run after the US post-close workflow window.
+    - cron: '15 0 * * 2-6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+concurrency:
+  group: v5-alpha-shadow
+  cancel-in-progress: false
+
+jobs:
+  shadow:
+    # workflow_run only proceeds when production analysis succeeded. Scheduled
+    # and manual runs may still replay the latest valid production cache.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Prepare directories
+        run: mkdir -p data alpha_data alpha_reports
+
+      - name: Restore latest valid production analysis cache
+        uses: actions/cache/restore@v5
+        with:
+          path: data/
+          key: alpha-shadow-stock-source-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-analysis-data-${{ runner.os }}-
+
+      - name: Validate production database
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = 'data/stock_analysis.db'
+          if not os.path.isfile(path):
+              raise SystemExit('stock_analysis.db missing; shadow run aborted')
+          if os.path.getsize(path) < 4096:
+              raise SystemExit('stock_analysis.db unexpectedly small')
+
+          conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+          try:
+              row = conn.execute('PRAGMA quick_check').fetchone()
+              quick = str(row[0]).strip().lower() if row else ''
+              tables = {
+                  r[0]
+                  for r in conn.execute(
+                      "SELECT name FROM sqlite_master WHERE type='table'"
+                  )
+              }
+          finally:
+              conn.close()
+
+          if quick != 'ok':
+              raise SystemExit(f'stock_analysis.db quick_check failed: {quick!r}')
+          required = {'analysis_history', 'stock_daily'}
+          missing = required - tables
+          if missing:
+              raise SystemExit(f'production database missing required tables: {sorted(missing)}')
+          print('production database: PASS')
+          PY
+
+      - name: Restore Alpha shadow history
+        id: restore-alpha
+        uses: actions/cache/restore@v5
+        with:
+          path: alpha_data/
+          key: alpha-shadow-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            alpha-shadow-data-${{ runner.os }}-
+
+      - name: Record Alpha baseline
+        id: alpha-baseline
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = 'alpha_data/alpha_shadow.db'
+          count = 0
+          if os.path.isfile(path):
+              conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+              try:
+                  row = conn.execute('PRAGMA quick_check').fetchone()
+                  if not row or str(row[0]).strip().lower() != 'ok':
+                      raise SystemExit('restored alpha_shadow.db failed quick_check')
+                  tables = {
+                      r[0]
+                      for r in conn.execute(
+                          "SELECT name FROM sqlite_master WHERE type='table'"
+                      )
+                  }
+                  if 'alpha_signals' in tables:
+                      count = int(conn.execute('SELECT COUNT(*) FROM alpha_signals').fetchone()[0])
+              finally:
+                  conn.close()
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f'signal_count={count}\n')
+          print('alpha baseline signals:', count)
+          PY
+
+      - name: Run V5 Alpha shadow engine
+        run: |
+          python scripts/run_alpha_shadow.py \
+            --stock-db data/stock_analysis.db \
+            --alpha-db alpha_data/alpha_shadow.db \
+            --report-dir alpha_reports \
+            --limit 5000
+
+      - name: Validate Alpha shadow database
+        id: validate-alpha
+        env:
+          BASELINE_SIGNAL_COUNT: ${{ steps.alpha-baseline.outputs.signal_count }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = 'alpha_data/alpha_shadow.db'
+          if not os.path.isfile(path) or os.path.getsize(path) < 4096:
+              raise SystemExit('alpha_shadow.db missing or unexpectedly small')
+
+          conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+          try:
+              row = conn.execute('PRAGMA quick_check').fetchone()
+              quick = str(row[0]).strip().lower() if row else ''
+              signals = int(conn.execute('SELECT COUNT(*) FROM alpha_signals').fetchone()[0])
+              outcomes = int(conn.execute('SELECT COUNT(*) FROM alpha_outcomes').fetchone()[0])
+          finally:
+              conn.close()
+
+          baseline = int(os.getenv('BASELINE_SIGNAL_COUNT', '0') or 0)
+          if quick != 'ok':
+              raise SystemExit(f'alpha_shadow.db quick_check failed: {quick!r}')
+          if signals < baseline:
+              raise SystemExit(f'alpha signal history regressed: {baseline} -> {signals}')
+
+          print(f'alpha database: PASS signals={signals} outcomes={outcomes}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write('valid=true\n')
+          PY
+
+      - name: Save Alpha shadow cache
+        if: ${{ success() && steps.validate-alpha.outputs.valid == 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: alpha_data/
+          key: alpha-shadow-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload Alpha shadow artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: alpha-shadow-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            alpha_reports/
+            alpha_data/alpha_shadow.db
+          if-no-files-found: warn
+          retention-days: 30
