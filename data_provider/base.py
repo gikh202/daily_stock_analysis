@@ -1788,14 +1788,24 @@ class DataFetcherManager:
         quote,
         *,
         fallback_from: Optional[str] = None,
+        provider_source: Optional[str] = None,
         realtime_cache_ttl: Optional[int] = None,
     ):
-        """Attach runtime metadata without inventing provider-side timestamps."""
+        """Attach runtime metadata without inventing provider-side timestamps.
+
+        ``quote.source`` may be a provider-defined generic label such as
+        ``fallback`` even when FetcherManager successfully fetched the price
+        from YFinance. ``provider_source`` records the concrete provider chosen
+        by FetcherManager so downstream logic can separate provenance from
+        actual data quality.
+        """
         if quote is None:
             return None
 
         fetched_at = self._utc_now_iso()
         setattr(quote, "fetched_at", fetched_at)
+        if provider_source:
+            setattr(quote, "provider_source", str(provider_source))
         if fallback_from:
             setattr(quote, "fallback_from", str(fallback_from))
 
@@ -1871,6 +1881,7 @@ class DataFetcherManager:
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: YfinanceFetcher)")
                 return self._enrich_realtime_quote(
                     quote,
+                    provider_source="yfinance",
                     realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
                 )
             if log_final_failure:
@@ -1893,12 +1904,17 @@ class DataFetcherManager:
                 secondary_kw = {"source": "hk"} if secondary_src == "AkshareFetcher" else {}
 
             primary_token = self._realtime_fetcher_token(primary_src, **primary_kw)
+            secondary_token = self._realtime_fetcher_token(secondary_src, **secondary_kw)
             primary_quote = self._try_fetcher_quote(stock_code, primary_src, **primary_kw)
+            primary_succeeded = primary_quote is not None
             fallback_from = primary_token if primary_quote is None else None
             if primary_quote is not None:
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: {primary_src})")
             primary_quote = self._supplement_quote(
                 stock_code, primary_quote, secondary_src, **secondary_kw,
+            )
+            provider_source = primary_token if primary_succeeded else (
+                secondary_token if primary_quote is not None else None
             )
             # 美股个股（非指数）尝试从 Finnhub/AlphaVantage 补充缺失字段
             if is_us and not is_us_index and primary_quote is not None:
@@ -1910,6 +1926,7 @@ class DataFetcherManager:
                 return self._enrich_realtime_quote(
                     primary_quote,
                     fallback_from=fallback_from,
+                    provider_source=provider_source,
                     realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
                 )
             if log_final_failure:
@@ -1929,6 +1946,7 @@ class DataFetcherManager:
         # missing fields (volume_ratio, turnover_rate, etc.) from later sources.
         primary_quote = None
         primary_fallback_from: Optional[str] = None
+        primary_provider_source: Optional[str] = None
         
         for source_index, source in enumerate(source_priority):
             attempt_start = time.time()
@@ -2012,6 +2030,7 @@ class DataFetcherManager:
                     if primary_quote is None:
                         # First successful source becomes primary
                         primary_quote = quote
+                        primary_provider_source = source
                         primary_fallback_from = failed_sources[0] if failed_sources else None
                         logger.info(f"[实时行情] {stock_code} 成功获取 (来源: {source})")
                         # If all key supplementary fields are present, return early
@@ -2019,6 +2038,7 @@ class DataFetcherManager:
                             return self._enrich_realtime_quote(
                                 primary_quote,
                                 fallback_from=primary_fallback_from,
+                                provider_source=primary_provider_source,
                                 realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
                             )
                         # Otherwise, continue to try later sources for missing fields
@@ -2075,6 +2095,7 @@ class DataFetcherManager:
             return self._enrich_realtime_quote(
                 primary_quote,
                 fallback_from=primary_fallback_from,
+                provider_source=primary_provider_source,
                 realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
             )
 
