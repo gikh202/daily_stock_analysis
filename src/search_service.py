@@ -2253,17 +2253,35 @@ class SearchService:
     NEWS_OVERSAMPLE_MAX = 10
     FUTURE_TOLERANCE_DAYS = 1
     ANALYTICAL_INTEL_LOOKBACK_DAYS = 180
-    ANALYTICAL_INTEL_DIMENSIONS = {"market_analysis", "earnings"}
+    ANALYTICAL_INTEL_DIMENSIONS = {
+        "market_analysis",
+        "earnings",
+        "fund_analysis",
+        "tracking_risk",
+        "index_outlook",
+        "holdings_allocation",
+    }
     _CHINESE_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
     _US_STOCK_RE = re.compile(r"^[A-Za-z]{1,5}(\.[A-Za-z])?$")
     _DIRECT_NEWS_CATEGORY = "direct_company_news"
+    _DIRECT_INSTRUMENT_NEWS_CATEGORY = "direct_instrument_news"
+    _ETF_FUND_NEWS_CATEGORY = "etf_fund_news"
     _SECTOR_NEWS_CATEGORY = "sector_related_news"
     _MACRO_NEWS_CATEGORY = "macro_market_news"
     _NEWS_CATEGORY_PRIORITY = {
         _DIRECT_NEWS_CATEGORY: 0,
-        _SECTOR_NEWS_CATEGORY: 1,
-        _MACRO_NEWS_CATEGORY: 2,
+        _DIRECT_INSTRUMENT_NEWS_CATEGORY: 0,
+        _ETF_FUND_NEWS_CATEGORY: 1,
+        _SECTOR_NEWS_CATEGORY: 2,
+        _MACRO_NEWS_CATEGORY: 3,
     }
+    _ETF_FUND_EVENT_TERMS = (
+        "etf", "fund", "fund flows", "inflow", "outflow", "holdings",
+        "allocation", "weight", "rebalance", "rebalancing", "tracking error",
+        "expense ratio", "aum", "assets under management", "index methodology",
+        "index composition", "成分股", "权重", "调仓", "换仓", "跟踪误差",
+        "资金流入", "资金流出", "基金规模", "指数编制", "指数调整",
+    )
     # 大盘复盘会使用 market / us_market 等逻辑标识调用新闻搜索。
     # 这些值不是证券代码，也不是公司名称，不能参与 direct_company_news 身份命中。
     _MARKET_SCOPE_CODES = frozenset({
@@ -3229,6 +3247,11 @@ class SearchService:
         has_unambiguous_company_signal = False
         has_ambiguous_company_signal = False
         is_market_scope = cls._is_market_scope_target(stock_code, stock_name)
+        is_index_etf = (
+            False
+            if is_market_scope
+            else cls.is_index_or_etf(stock_code, stock_name)
+        )
 
         def add_reason(reason: str) -> None:
             if reason not in reasons and len(reasons) < 5:
@@ -3353,7 +3376,13 @@ class SearchService:
                         break
 
         has_company_event = cls._contains_any_news_term(full_text, cls._COMPANY_EVENT_TERMS)
-        if has_company_event and direct_signal > 0:
+        has_etf_fund_event = cls._contains_any_news_term(full_text, cls._ETF_FUND_EVENT_TERMS)
+
+        if is_index_etf and has_etf_fund_event and direct_signal > 0:
+            score += 12
+            direct_signal += 12
+            add_reason("命中ETF/指数基金事件词")
+        elif not is_index_etf and has_company_event and direct_signal > 0:
             score += 12
             ambiguous_name_only = (
                 has_ambiguous_company_signal
@@ -3408,18 +3437,34 @@ class SearchService:
                 else:
                     add_reason("未命中宏观市场或行业关键词，作为低相关背景新闻")
         elif direct_signal >= 38:
-            category = cls._DIRECT_NEWS_CATEGORY
+            if is_index_etf:
+                category = (
+                    cls._ETF_FUND_NEWS_CATEGORY
+                    if has_etf_fund_event
+                    else cls._DIRECT_INSTRUMENT_NEWS_CATEGORY
+                )
+                add_reason("ETF/指数目标按证券本身相关性分类，不使用direct_company_news")
+            else:
+                category = cls._DIRECT_NEWS_CATEGORY
         elif has_macro_signal and not direct_signal:
             category = cls._MACRO_NEWS_CATEGORY
             score = max(0, score - 12)
-            add_reason("未命中目标公司身份，归为宏观/市场新闻")
+            add_reason(
+                "未命中目标证券身份，归为宏观/市场新闻"
+                if is_index_etf
+                else "未命中目标公司身份，归为宏观/市场新闻"
+            )
         else:
             category = cls._SECTOR_NEWS_CATEGORY
             if has_sector_signal:
                 score += 6
                 add_reason("仅命中行业或板块背景")
             else:
-                add_reason("未命中股票代码或公司全称，降级为背景新闻")
+                add_reason(
+                    "未命中证券代码或基金/指数名称，降级为背景新闻"
+                    if is_index_etf
+                    else "未命中股票代码或公司全称，降级为背景新闻"
+                )
 
         score = max(0, min(100, score))
         return SearchResult(
@@ -3455,15 +3500,29 @@ class SearchService:
 
         indexed_results = list(enumerate(scored_results))
         is_market_scope = cls._is_market_scope_target(stock_code, stock_name)
-        category_priority = (
-            {
+        is_index_etf = (
+            False
+            if is_market_scope
+            else cls.is_index_or_etf(stock_code, stock_name)
+        )
+        if is_market_scope:
+            category_priority = {
                 cls._MACRO_NEWS_CATEGORY: 0,
                 cls._SECTOR_NEWS_CATEGORY: 1,
-                cls._DIRECT_NEWS_CATEGORY: 2,
+                cls._DIRECT_NEWS_CATEGORY: 9,
+                cls._DIRECT_INSTRUMENT_NEWS_CATEGORY: 9,
+                cls._ETF_FUND_NEWS_CATEGORY: 9,
             }
-            if is_market_scope
-            else cls._NEWS_CATEGORY_PRIORITY
-        )
+        elif is_index_etf:
+            category_priority = {
+                cls._DIRECT_INSTRUMENT_NEWS_CATEGORY: 0,
+                cls._ETF_FUND_NEWS_CATEGORY: 1,
+                cls._SECTOR_NEWS_CATEGORY: 2,
+                cls._MACRO_NEWS_CATEGORY: 3,
+                cls._DIRECT_NEWS_CATEGORY: 9,
+            }
+        else:
+            category_priority = cls._NEWS_CATEGORY_PRIORITY
 
         def sort_key(entry: Tuple[int, SearchResult]) -> Tuple[int, int, int, int]:
             index, result = entry
@@ -3479,6 +3538,8 @@ class SearchService:
         limited_results = ranked_results[:max_results]
         category_counts = {
             cls._DIRECT_NEWS_CATEGORY: 0,
+            cls._DIRECT_INSTRUMENT_NEWS_CATEGORY: 0,
+            cls._ETF_FUND_NEWS_CATEGORY: 0,
             cls._SECTOR_NEWS_CATEGORY: 0,
             cls._MACRO_NEWS_CATEGORY: 0,
         }
@@ -3487,10 +3548,19 @@ class SearchService:
                 category_counts[result.relevance_category] += 1
         if limited_results:
             top = limited_results[0]
+            direct_total = (
+                category_counts[cls._DIRECT_NEWS_CATEGORY]
+                + category_counts[cls._DIRECT_INSTRUMENT_NEWS_CATEGORY]
+                + category_counts[cls._ETF_FUND_NEWS_CATEGORY]
+            )
             logger.info(
-                "[新闻相关度] %s: direct=%s, sector=%s, macro=%s, top_score=%s, top_category=%s, reasons=%s",
+                "[新闻相关度] %s: direct=%s, company=%s, instrument=%s, etf_fund=%s, "
+                "sector=%s, macro=%s, top_score=%s, top_category=%s, reasons=%s",
                 log_scope,
+                direct_total,
                 category_counts[cls._DIRECT_NEWS_CATEGORY],
+                category_counts[cls._DIRECT_INSTRUMENT_NEWS_CATEGORY],
+                category_counts[cls._ETF_FUND_NEWS_CATEGORY],
                 category_counts[cls._SECTOR_NEWS_CATEGORY],
                 category_counts[cls._MACRO_NEWS_CATEGORY],
                 top.relevance_score,
@@ -3539,10 +3609,15 @@ class SearchService:
                 continue
             candidates.append(item)
 
+        direct_categories = {
+            cls._DIRECT_NEWS_CATEGORY,
+            cls._DIRECT_INSTRUMENT_NEWS_CATEGORY,
+            cls._ETF_FUND_NEWS_CATEGORY,
+        }
         meaningful_candidates = [
             item
             for item in candidates
-            if item.relevance_category == cls._DIRECT_NEWS_CATEGORY
+            if item.relevance_category in direct_categories
             or (item.relevance_score or 0) > 0
         ]
         if meaningful_candidates:
@@ -3581,16 +3656,21 @@ class SearchService:
         prefer_chinese: bool,
     ) -> Dict[str, int]:
         results = response.results if response and response.results else []
+        direct_categories = {
+            cls._DIRECT_NEWS_CATEGORY,
+            cls._DIRECT_INSTRUMENT_NEWS_CATEGORY,
+            cls._ETF_FUND_NEWS_CATEGORY,
+        }
         return {
             "direct_count": sum(
-                1 for item in results if item.relevance_category == cls._DIRECT_NEWS_CATEGORY
+                1 for item in results if item.relevance_category in direct_categories
             ),
             "preferred_direct_count": sum(
                 1
                 for item in results
                 if (
                     prefer_chinese
-                    and item.relevance_category == cls._DIRECT_NEWS_CATEGORY
+                    and item.relevance_category in direct_categories
                     and cls._is_chinese_news_result(item)
                 )
             ),
@@ -4126,6 +4206,7 @@ class SearchService:
             stock_name,
             focus_keywords=focus_keywords,
         )
+        is_market_scope = self._is_market_scope_target(stock_code, stock_name)
 
         # 构建搜索查询（优化搜索效果）
         is_foreign = self._is_foreign_stock(stock_code)
@@ -4301,6 +4382,16 @@ class SearchService:
                     ):
                         best_ranked_response = limited_response
                         best_ranked_stats = stats
+
+                    if is_market_scope:
+                        logger.info(
+                            "%s 市场级搜索成功，已获得 %s 条可用宏观/指数新闻；"
+                            "市场目标无需直接个股命中，直接返回",
+                            provider.name,
+                            admitted_count,
+                        )
+                        self._put_cache(cache_key, limited_response)
+                        return limited_response
 
                     if stats["direct_count"] > 0 and (
                         not prefer_chinese or stats["preferred_direct_count"] > 0
@@ -4484,118 +4575,170 @@ class SearchService:
         is_index_etf = self.is_index_or_etf(stock_code, stock_name)
 
         if is_foreign:
-            # Issue #2026: Foreign-ticker English alias resolution from the
-            # single source of truth (STOCK_ENGLISH_NAME_MAP in
-            # src/data/stock_mapping.py). When STOCK_NAME_MAP maps the ticker
-            # to a Chinese display name, the English news query path must use
-            # the canonical English company name; otherwise English news
-            # providers receive the Chinese name and miss English headlines.
             english_aliases = self._foreign_english_query_terms(stock_code, stock_name)
             effective_name = english_aliases[0] if english_aliases else stock_name
-            search_dimensions = [
-                {
-                    'name': 'latest_news',
-                    'query': f"{effective_name} {stock_code} latest news events",
-                    'desc': '最新消息',
-                    'tavily_topic': 'news',
-                    'strict_freshness': True,
-                },
-                {
-                    'name': 'market_analysis',
-                    'query': f"{effective_name} analyst rating target price report",
-                    'desc': '机构分析',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
-                {
-                    'name': 'risk_check',
-                    'query': (
-                        f"{effective_name} {stock_code} index performance outlook tracking error"
-                        if is_index_etf else f"{effective_name} risk insider selling lawsuit litigation"
-                    ),
-                    'desc': '风险排查',
-                    'tavily_topic': None if is_index_etf else 'news',
-                    'strict_freshness': not is_index_etf,
-                },
-                {
-                    'name': 'earnings',
-                    'query': (
-                        f"{effective_name} {stock_code} index performance composition outlook"
-                        if is_index_etf else f"{effective_name} earnings revenue profit growth forecast"
-                    ),
-                    'desc': '业绩预期',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
-                {
-                    'name': 'industry',
-                    'query': (
-                        f"{effective_name} {stock_code} index sector allocation holdings"
-                        if is_index_etf else f"{effective_name} industry competitors market share outlook"
-                    ),
-                    'desc': '行业分析',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
-            ]
+
+            if is_index_etf:
+                search_dimensions = [
+                    {
+                        'name': 'latest_news',
+                        'query': f"{effective_name} {stock_code} ETF latest news flows performance",
+                        'desc': 'ETF最新消息',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'fund_analysis',
+                        'query': f"{effective_name} {stock_code} ETF fund analysis tracking index outlook",
+                        'desc': '基金/指数分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'tracking_risk',
+                        'query': f"{effective_name} {stock_code} tracking error liquidity spread index methodology rebalance risk",
+                        'desc': '跟踪与流动性风险',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'index_outlook',
+                        'query': f"{effective_name} {stock_code} underlying index earnings breadth composition performance outlook",
+                        'desc': '指数/成分展望',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'holdings_allocation',
+                        'query': f"{effective_name} {stock_code} holdings sector allocation weights rebalance composition",
+                        'desc': '持仓与行业配置',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                ]
+            else:
+                search_dimensions = [
+                    {
+                        'name': 'latest_news',
+                        'query': f"{effective_name} {stock_code} latest news events",
+                        'desc': '最新消息',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'market_analysis',
+                        'query': f"{effective_name} analyst rating target price report",
+                        'desc': '机构分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'risk_check',
+                        'query': f"{effective_name} risk insider selling lawsuit litigation",
+                        'desc': '风险排查',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'earnings',
+                        'query': f"{effective_name} earnings revenue profit growth forecast",
+                        'desc': '业绩预期',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'industry',
+                        'query': f"{effective_name} industry competitors market share outlook",
+                        'desc': '行业分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                ]
         else:
-            search_dimensions = [
-                {
-                    'name': 'latest_news',
-                    'query': f"{stock_name} {stock_code} 最新 新闻 重大 事件",
-                    'desc': '最新消息',
-                    'tavily_topic': 'news',
-                    'strict_freshness': True,
-                },
-                {
-                    'name': 'market_analysis',
-                    'query': f"{stock_name} 研报 目标价 评级 深度分析",
-                    'desc': '机构分析',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
-                {
-                    'name': 'risk_check',
-                    'query': (
-                        f"{stock_name} 指数走势 跟踪误差 净值 表现"
-                        if is_index_etf else f"{stock_name} 减持 处罚 违规 诉讼 利空 风险"
-                    ),
-                    'desc': '风险排查',
-                    'tavily_topic': None if is_index_etf else 'news',
-                    'strict_freshness': not is_index_etf,
-                },
-                {
-                    'name': 'announcements',
-                    'query': (
-                        f"{stock_name} {stock_code} 公告 指数调整 成分变化"
-                        if is_index_etf else f"{stock_name} {stock_code} 公司公告 重要公告 上交所 深交所 cninfo"
-                    ),
-                    'desc': '公司公告',
-                    'tavily_topic': 'news',
-                    'strict_freshness': True,
-                },
-                {
-                    'name': 'earnings',
-                    'query': (
-                        f"{stock_name} 指数成分 净值 跟踪表现"
-                        if is_index_etf else f"{stock_name} 业绩预告 财报 营收 净利润 同比增长"
-                    ),
-                    'desc': '业绩预期',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
-                {
-                    'name': 'industry',
-                    'query': (
-                        f"{stock_name} 指数成分股 行业配置 权重"
-                        if is_index_etf else f"{stock_name} 所在行业 竞争对手 市场份额 行业前景"
-                    ),
-                    'desc': '行业分析',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
-            ]
-        
+            if is_index_etf:
+                search_dimensions = [
+                    {
+                        'name': 'latest_news',
+                        'query': f"{stock_name} {stock_code} ETF 基金 最新消息 资金流 表现",
+                        'desc': 'ETF最新消息',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'fund_analysis',
+                        'query': f"{stock_name} {stock_code} ETF 指数 基金 分析 跟踪",
+                        'desc': '基金/指数分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'tracking_risk',
+                        'query': f"{stock_name} {stock_code} 跟踪误差 流动性 折溢价 调仓 风险",
+                        'desc': '跟踪与流动性风险',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'index_outlook',
+                        'query': f"{stock_name} {stock_code} 指数 成分股 盈利 广度 走势 展望",
+                        'desc': '指数/成分展望',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'holdings_allocation',
+                        'query': f"{stock_name} {stock_code} 成分股 行业配置 权重 调仓",
+                        'desc': '持仓与行业配置',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                ]
+            else:
+                search_dimensions = [
+                    {
+                        'name': 'latest_news',
+                        'query': f"{stock_name} {stock_code} 最新 新闻 重大 事件",
+                        'desc': '最新消息',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'market_analysis',
+                        'query': f"{stock_name} 研报 目标价 评级 深度分析",
+                        'desc': '机构分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'risk_check',
+                        'query': f"{stock_name} 减持 处罚 违规 诉讼 利空 风险",
+                        'desc': '风险排查',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'announcements',
+                        'query': f"{stock_name} {stock_code} 公司公告 重要公告 上交所 深交所 cninfo",
+                        'desc': '公司公告',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'earnings',
+                        'query': f"{stock_name} 业绩预告 财报 营收 净利润 同比增长",
+                        'desc': '业绩预期',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'industry',
+                        'query': f"{stock_name} 所在行业 竞争对手 市场份额 行业前景",
+                        'desc': '行业分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                ]
+
         search_days = self._effective_news_window_days()
         target_per_dimension = 3
         provider_max_results = self._provider_request_size(target_per_dimension)
@@ -4723,7 +4866,18 @@ class SearchService:
         lines = [f"【{stock_name} 情报搜索结果】"]
         
         # 维度展示顺序
-        display_order = ['latest_news', 'announcements', 'market_analysis', 'risk_check', 'earnings', 'industry']
+        display_order = [
+            'latest_news',
+            'announcements',
+            'market_analysis',
+            'risk_check',
+            'earnings',
+            'industry',
+            'fund_analysis',
+            'tracking_risk',
+            'index_outlook',
+            'holdings_allocation',
+        ]
 
         dim_labels = {
             'latest_news': '📰 最新消息',
@@ -4732,6 +4886,10 @@ class SearchService:
             'risk_check': '⚠️ 风险排查',
             'earnings': '📊 业绩预期',
             'industry': '🏭 行业分析',
+            'fund_analysis': '📈 基金/指数分析',
+            'tracking_risk': '⚠️ 跟踪与流动性风险',
+            'index_outlook': '📊 指数/成分展望',
+            'holdings_allocation': '🏭 持仓与行业配置',
         }
 
         for dim_name in display_order:
