@@ -12,6 +12,7 @@ A股自选股智能分析系统 - 搜索服务模块
 """
 
 import logging
+import os
 import multiprocessing
 import re
 import threading
@@ -61,6 +62,148 @@ def _terminate_search_process(process: Any) -> None:
     if process.is_alive() and hasattr(process, "kill"):
         process.kill()
         process.join(_SEARCH_TIMEOUT_PROCESS_JOIN_GRACE_SECONDS)
+
+
+def _serpapi_search_process_worker(
+    conn: Any,
+    api_keys: List[str],
+    query: str,
+    max_results: int,
+    days: int,
+) -> None:
+    """Run one SerpAPI request in an isolated process.
+
+    The google-search-results client does not give this service a dependable
+    per-call hard deadline.  Running it in a child process lets the parent
+    terminate a long-tail request without blocking the whole stock pipeline.
+    """
+    try:
+        provider = SerpAPISearchProvider(list(api_keys or []))
+        response = provider.search(
+            query,
+            max_results=max_results,
+            days=days,
+        )
+        conn.send((True, response))
+    except BaseException as exc:
+        try:
+            conn.send((False, RuntimeError(f"{type(exc).__name__}: {exc}")))
+        except BaseException:
+            pass
+    finally:
+        try:
+            conn.close()
+        except BaseException:
+            pass
+
+
+def _call_serpapi_search_in_subprocess(
+    *,
+    api_keys: List[str],
+    query: str,
+    max_results: int,
+    days: int,
+    timeout_seconds: float,
+) -> "SearchResponse":
+    """Execute exactly one SerpAPI search with a hard process-level timeout."""
+    wait_seconds = max(0.5, float(timeout_seconds))
+
+    if not _SEARCH_TIMEOUT_WORKER_SLOTS.acquire(blocking=False):
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider="SerpAPI",
+            success=False,
+            error_message="SerpAPI timeout worker slots are full",
+            search_time=0.0,
+        )
+
+    process: Any = None
+    parent_conn: Any = None
+    child_conn: Any = None
+    started = time.monotonic()
+
+    try:
+        multiprocessing.freeze_support()
+        ctx = multiprocessing.get_context(_SEARCH_TIMEOUT_PROCESS_START_METHOD)
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
+        process = ctx.Process(
+            target=_serpapi_search_process_worker,
+            args=(
+                child_conn,
+                list(api_keys or []),
+                query,
+                int(max_results),
+                int(days),
+            ),
+            name="serpapi-search",
+            daemon=True,
+        )
+        process.start()
+        child_conn.close()
+        child_conn = None
+
+        if parent_conn.poll(wait_seconds):
+            try:
+                ok, payload = parent_conn.recv()
+            except EOFError:
+                ok, payload = False, RuntimeError("SerpAPI worker exited without response")
+
+            elapsed = time.monotonic() - started
+            if ok and isinstance(payload, SearchResponse):
+                payload.search_time = elapsed
+                return payload
+
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider="SerpAPI",
+                success=False,
+                error_message=str(payload),
+                search_time=elapsed,
+            )
+
+        elapsed = time.monotonic() - started
+        if process is not None:
+            _terminate_search_process(process)
+
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider="SerpAPI",
+            success=False,
+            error_message=f"SerpAPI hard timeout after {wait_seconds:.1f}s",
+            search_time=elapsed,
+        )
+    except BaseException as exc:
+        elapsed = time.monotonic() - started
+        if process is not None:
+            _terminate_search_process(process)
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider="SerpAPI",
+            success=False,
+            error_message=f"{type(exc).__name__}: {exc}",
+            search_time=elapsed,
+        )
+    finally:
+        if parent_conn is not None:
+            try:
+                parent_conn.close()
+            except BaseException:
+                pass
+        if child_conn is not None:
+            try:
+                child_conn.close()
+            except BaseException:
+                pass
+        if process is not None:
+            try:
+                process.join(timeout=0.05)
+            except BaseException:
+                pass
+        _SEARCH_TIMEOUT_WORKER_SLOTS.release()
 
 
 def _search_topic_news_process_worker(
@@ -2827,6 +2970,129 @@ class SearchService:
                         self._cache.pop(k, None)
             self._cache[key] = (time.time(), response)
 
+    def _serpapi_timeout_seconds(self, timeout_class: str = "fresh") -> float:
+        """Resolve a purpose-aware SerpAPI hard deadline.
+
+        Defaults:
+        - fresh:      12s  -> latest news / risk checks / market news
+        - analytical: 20s  -> analyst research / earnings / ETF/index analysis
+
+        Rationale:
+        Recent-news queries should normally return quickly.  Analytical queries
+        cover a wider lookback window and are allowed more time so a legitimate
+        ~15-20 second response is not discarded.  Requests taking 30-50 seconds
+        are treated as abnormal long-tail calls and are terminated.
+
+        Optional GitHub Actions variables:
+        - SERPAPI_FRESH_TIMEOUT_SECONDS
+        - SERPAPI_ANALYTICAL_TIMEOUT_SECONDS
+
+        No extra variable is required; sensible defaults are built in.
+        """
+        normalized = str(timeout_class or "fresh").strip().lower()
+
+        if normalized == "analytical":
+            env_name = "SERPAPI_ANALYTICAL_TIMEOUT_SECONDS"
+            default_value = 20.0
+        else:
+            env_name = "SERPAPI_FRESH_TIMEOUT_SECONDS"
+            default_value = 12.0
+
+        raw = os.getenv(env_name, str(int(default_value)))
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = default_value
+
+        # Prevent accidental values that are either too aggressive or so large
+        # that the hard-timeout protection becomes meaningless.
+        return max(5.0, min(value, 60.0))
+
+    @staticmethod
+    def _serpapi_timeout_class_for_dimension(
+        dimension_name: str = "",
+        *,
+        strict_freshness: bool = False,
+    ) -> str:
+        """Classify an intelligence dimension into a timeout tier."""
+        dim = str(dimension_name or "").strip().lower()
+
+        fresh_dimensions = {
+            "latest_news",
+            "risk_check",
+            "announcements",
+            "stock_news",
+            "market_news",
+        }
+        analytical_dimensions = {
+            "market_analysis",
+            "earnings",
+            "industry",
+            "fund_analysis",
+            "tracking_risk",
+            "index_outlook",
+            "holdings_allocation",
+        }
+
+        if strict_freshness or dim in fresh_dimensions:
+            return "fresh"
+        if dim in analytical_dimensions:
+            return "analytical"
+
+        # Unknown dimensions default to the conservative/fast tier instead of
+        # silently allowing a long request.
+        return "fresh"
+
+    def _search_provider_bounded(
+        self,
+        provider: BaseSearchProvider,
+        query: str,
+        *,
+        max_results: int,
+        days: int,
+        timeout_class: str = "fresh",
+        **search_kwargs: Any,
+    ) -> SearchResponse:
+        """Search one provider; SerpAPI gets a purpose-aware hard deadline.
+
+        Other providers keep their existing behavior.
+
+        A SerpAPI timeout is treated as a neutral evidence gap.  The returned
+        SearchResponse is a normal failed response so the rest of the stock
+        analysis continues; timeout itself must not be interpreted as bearish.
+        """
+        if not isinstance(provider, SerpAPISearchProvider):
+            return provider.search(
+                query,
+                max_results=max_results,
+                days=days,
+                **search_kwargs,
+            )
+
+        timeout_seconds = self._serpapi_timeout_seconds(timeout_class)
+        response = _call_serpapi_search_in_subprocess(
+            api_keys=list(getattr(provider, "_api_keys", []) or []),
+            query=query,
+            max_results=max_results,
+            days=days,
+            timeout_seconds=timeout_seconds,
+        )
+
+        if (
+            not response.success
+            and response.error_message
+            and "hard timeout" in response.error_message.lower()
+        ):
+            logger.warning(
+                "[SerpAPI超时保护] class=%s query='%s' 超过 %.1fs，"
+                "终止异常长尾请求并按中性证据缺口继续",
+                timeout_class,
+                query,
+                timeout_seconds,
+            )
+
+        return response
+
     def _effective_news_window_days(self) -> int:
         """Resolve effective news window from strategy profile and global max-age."""
         return resolve_news_window_days(
@@ -4068,7 +4334,14 @@ class SearchService:
                         provider=provider.name,
                         operation="search_topic_news",
                     )
-                    response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
+                    response = self._search_provider_bounded(
+                        provider,
+                        query,
+                        max_results=provider_max_results,
+                        days=search_days,
+                        timeout_class="fresh",
+                        **search_kwargs,
+                    )
                 except Exception as exc:
                     self._record_news_search_run(
                         provider=provider.name,
@@ -4785,19 +5058,39 @@ class SearchService:
                 request_days,
             )
 
+            search_kwargs: Dict[str, Any] = {}
             if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
-                response = provider.search(
-                    dim['query'],
-                    max_results=provider_max_results,
-                    days=request_days,
-                    topic=dim['tavily_topic'],
-                )
-            else:
-                response = provider.search(
-                    dim['query'],
-                    max_results=provider_max_results,
-                    days=request_days,
-                )
+                search_kwargs["topic"] = dim['tavily_topic']
+
+            timeout_class = self._serpapi_timeout_class_for_dimension(
+                dim.get("name", ""),
+                strict_freshness=bool(dim.get("strict_freshness")),
+            )
+            timeout_seconds = (
+                self._serpapi_timeout_seconds(timeout_class)
+                if isinstance(provider, SerpAPISearchProvider)
+                else None
+            )
+
+            logger.info(
+                "[情报搜索] %s: timeout_class=%s%s",
+                dim['desc'],
+                timeout_class,
+                (
+                    f", SerpAPI硬超时={timeout_seconds:.1f}s"
+                    if timeout_seconds is not None
+                    else ""
+                ),
+            )
+
+            response = self._search_provider_bounded(
+                provider,
+                dim['query'],
+                max_results=provider_max_results,
+                days=request_days,
+                timeout_class=timeout_class,
+                **search_kwargs,
+            )
             if dim['strict_freshness']:
                 filtered_response = self._filter_news_response(
                     response,
@@ -4845,7 +5138,12 @@ class SearchService:
                     len(filtered_response.results),
                 )
             else:
-                logger.warning(f"[情报搜索] {dim['desc']}: 搜索失败 - {response.error_message}")
+                logger.warning(
+                    "[情报搜索] %s: 搜索失败/超时，按中性证据缺口继续；"
+                    "该维度不自动扣分 - %s",
+                    dim['desc'],
+                    response.error_message,
+                )
             
             # 短暂延迟避免请求过快
             time.sleep(0.5)
