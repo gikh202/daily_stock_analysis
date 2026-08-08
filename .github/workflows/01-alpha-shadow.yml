@@ -4,6 +4,13 @@ on:
   workflow_run:
     workflows: ['每日股票分析']
     types: [completed]
+  push:
+    branches:
+      - 'feature/v5-alpha-engine'
+    paths:
+      - 'src/alpha_engine/**'
+      - 'scripts/run_alpha_shadow.py'
+      - '.github/workflows/01-alpha-shadow.yml'
   schedule:
     # Fallback run after the US post-close workflow window.
     - cron: '15 0 * * 2-6'
@@ -21,8 +28,8 @@ concurrency:
 
 jobs:
   shadow:
-    # workflow_run only proceeds when production analysis succeeded. Scheduled
-    # and manual runs may still replay the latest valid production cache.
+    # workflow_run only proceeds when production analysis succeeded. Scheduled,
+    # feature-branch validation and manual runs replay the latest valid cache.
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
