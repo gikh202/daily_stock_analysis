@@ -659,6 +659,7 @@ class DataFetcherManager:
             self._init_default_fetchers()
         self._fundamental_adapter = AkshareFundamentalAdapter()
         self._yfinance_fundamental_adapter = YfinanceFundamentalAdapter()
+        self._sec_edgar_fundamental_adapter = SecEdgarFundamentalAdapter()
         self._tickflow_fetcher = None
         self._tickflow_api_key: Optional[str] = None
         self._tickflow_lock = RLock()
@@ -2927,6 +2928,39 @@ class DataFetcherManager:
             )
         if not isinstance(bundle_payload, dict):
             bundle_payload = {}
+
+        # 美股：使用 SEC EDGAR 官方财报补充 YFinance 基本面
+        if market == "us":
+            sec_timeout = min(
+                fetch_timeout,
+                max(stage_timeout - (time.time() - start_ts), 0.0),
+            )
+            if sec_timeout > 0:
+                sec_payload, sec_err, sec_ms = self._run_with_retry(
+                    lambda: self._sec_edgar_fundamental_adapter.get_fundamental_bundle(stock_code),
+                    sec_timeout,
+                    "fundamental_bundle_sec_edgar",
+                )
+                if isinstance(sec_payload, dict):
+                    bundle_payload = (
+                        self._sec_edgar_fundamental_adapter.merge_into_yfinance_bundle(
+                            bundle_payload,
+                            sec_payload,
+                        )
+                    )
+                    if sec_payload.get("status") != "not_supported":
+                        logger.info(
+                            "[SEC EDGAR] %s fundamental enrichment status=%s duration_ms=%s",
+                            stock_code,
+                            sec_payload.get("status"),
+                            sec_ms,
+                        )
+                if sec_err:
+                    logger.warning(
+                        "[SEC EDGAR] %s enrichment failed: %s",
+                        stock_code,
+                        sec_err,
+                    )
 
         bundle_chain = self._normalize_source_chain(
             bundle_payload.get("source_chain", []),
