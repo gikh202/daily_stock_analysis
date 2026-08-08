@@ -2264,6 +2264,35 @@ class SearchService:
         _SECTOR_NEWS_CATEGORY: 1,
         _MACRO_NEWS_CATEGORY: 2,
     }
+    # 大盘复盘会使用 market / us_market 等逻辑标识调用新闻搜索。
+    # 这些值不是证券代码，也不是公司名称，不能参与 direct_company_news 身份命中。
+    _MARKET_SCOPE_CODES = frozenset({
+        "market",
+        "us_market",
+        "cn_market",
+        "hk_market",
+        "jp_market",
+        "kr_market",
+        "tw_market",
+        "global_market",
+    })
+    _MARKET_SCOPE_NAMES = frozenset({
+        "market",
+        "stock market",
+        "us market",
+        "us stock market",
+        "global market",
+        "市场",
+        "大盘",
+        "美股市场",
+        "a股市场",
+        "a股大盘",
+        "港股市场",
+        "日本市场",
+        "韩国市场",
+        "台湾市场",
+        "全球市场",
+    })
     _AMBIGUOUS_EN_COMPANY_NAMES = {"apple", "meta", "square", "target", "gap"}
     _AMBIGUOUS_EN_CONFIRMING_EVENT_TERMS = (
         "earnings", "revenue", "profit", "guidance", "filing", "buyback",
@@ -2800,6 +2829,26 @@ class SearchService:
             values.append(cleaned)
 
     @classmethod
+    def _is_market_scope_target(cls, stock_code: str = "", stock_name: str = "") -> bool:
+        """
+        判断当前新闻搜索目标是否是“大盘/市场”，而不是具体证券。
+
+        大盘复盘内部会使用 ``market`` 一类占位标识。如果继续把它交给
+        股票代码身份匹配，标题中的普通英文单词 ``market`` 会被误判为
+        “命中股票代码 market”，进而错误归类为 direct_company_news。
+        """
+        code = re.sub(r"\s+", " ", str(stock_code or "").strip().lower())
+        name = re.sub(r"\s+", " ", str(stock_name or "").strip().lower())
+
+        if code in cls._MARKET_SCOPE_CODES:
+            return True
+        if code.endswith("_market") and code:
+            return True
+        if name in cls._MARKET_SCOPE_NAMES:
+            return True
+        return False
+
+    @classmethod
     def _stock_code_identity_terms(cls, stock_code: str) -> List[str]:
         """Return code/ticker variants that should count as strong identity hits."""
         raw = (stock_code or "").strip()
@@ -3179,12 +3228,25 @@ class SearchService:
         has_stock_code_signal = False
         has_unambiguous_company_signal = False
         has_ambiguous_company_signal = False
+        is_market_scope = cls._is_market_scope_target(stock_code, stock_name)
 
         def add_reason(reason: str) -> None:
             if reason not in reasons and len(reasons) < 5:
                 reasons.append(reason)
 
-        for term in cls._stock_code_identity_terms(stock_code):
+        # 市场级搜索不生成任何证券/公司身份词。
+        # 例如 stock_code="market" 时，"US stock market" 中的 market
+        # 只能作为宏观市场词，不能作为股票代码直接命中。
+        stock_identity_terms = (
+            [] if is_market_scope else cls._stock_code_identity_terms(stock_code)
+        )
+        company_identity_terms = (
+            [] if is_market_scope else cls._company_identity_terms(stock_name)
+        )
+        if is_market_scope:
+            add_reason("市场级搜索，禁用股票代码/公司身份直接命中")
+
+        for term in stock_identity_terms:
             if cls._contains_stock_code_identity_term(title, term):
                 score += 55
                 direct_signal += 55
@@ -3192,7 +3254,7 @@ class SearchService:
                 add_reason(f"标题命中股票代码 {term}")
                 break
         else:
-            for term in cls._stock_code_identity_terms(stock_code):
+            for term in stock_identity_terms:
                 if cls._contains_stock_code_identity_term(snippet, term):
                     score += 34
                     direct_signal += 34
@@ -3200,7 +3262,7 @@ class SearchService:
                     add_reason(f"摘要命中股票代码 {term}")
                     break
             else:
-                for term in cls._stock_code_identity_terms(stock_code):
+                for term in stock_identity_terms:
                     if cls._contains_stock_code_identity_term(url, term):
                         score += 18
                         direct_signal += 18
@@ -3208,7 +3270,7 @@ class SearchService:
                         add_reason(f"链接命中股票代码 {term}")
                         break
 
-        for term in cls._company_identity_terms(stock_name):
+        for term in company_identity_terms:
             ambiguous_en = (
                 not cls._contains_chinese_text(term)
                 and term.lower() in cls._AMBIGUOUS_EN_COMPANY_NAMES
@@ -3242,7 +3304,11 @@ class SearchService:
         # be a subset of its foreign-ticker keys) and feed both the alias
         # strings and their legal-suffix-stripped variants into the same
         # identity-term scoring path.
-        english_aliases = foreign_stock_english_aliases(stock_code, stock_name)
+        english_aliases = (
+            []
+            if is_market_scope
+            else foreign_stock_english_aliases(stock_code, stock_name)
+        )
         if english_aliases:
             # Issue #2026 / PR #2049 review: dedupe identity terms across all
             # aliases BEFORE scoring. STOCK_ENGLISH_NAME_MAP legal alias
@@ -3309,7 +3375,39 @@ class SearchService:
         has_sector_signal = cls._contains_any_news_term(full_text, cls._SECTOR_NEWS_TERMS)
         has_macro_signal = cls._contains_any_news_term(full_text, cls._MACRO_NEWS_TERMS)
 
-        if direct_signal >= 38:
+        if is_market_scope:
+            # 大盘复盘只按“宏观/市场”或“行业/板块背景”处理。
+            # direct_company_news 对市场占位目标永远不成立。
+            title_has_macro = cls._contains_any_news_term(title, cls._MACRO_NEWS_TERMS)
+            snippet_has_macro = cls._contains_any_news_term(snippet, cls._MACRO_NEWS_TERMS)
+            title_has_sector = cls._contains_any_news_term(title, cls._SECTOR_NEWS_TERMS)
+            snippet_has_sector = cls._contains_any_news_term(snippet, cls._SECTOR_NEWS_TERMS)
+
+            if has_macro_signal:
+                category = cls._MACRO_NEWS_CATEGORY
+                if title_has_macro:
+                    score += 55
+                    add_reason("标题命中宏观/指数/市场关键词")
+                elif snippet_has_macro:
+                    score += 34
+                    add_reason("摘要命中宏观/指数/市场关键词")
+                else:
+                    score += 20
+                    add_reason("命中宏观/指数/市场背景")
+            else:
+                category = cls._SECTOR_NEWS_CATEGORY
+                if title_has_sector:
+                    score += 28
+                    add_reason("标题命中行业或板块背景")
+                elif snippet_has_sector:
+                    score += 18
+                    add_reason("摘要命中行业或板块背景")
+                elif has_sector_signal:
+                    score += 12
+                    add_reason("仅命中行业或板块背景")
+                else:
+                    add_reason("未命中宏观市场或行业关键词，作为低相关背景新闻")
+        elif direct_signal >= 38:
             category = cls._DIRECT_NEWS_CATEGORY
         elif has_macro_signal and not direct_signal:
             category = cls._MACRO_NEWS_CATEGORY
@@ -3356,11 +3454,21 @@ class SearchService:
         ]
 
         indexed_results = list(enumerate(scored_results))
+        is_market_scope = cls._is_market_scope_target(stock_code, stock_name)
+        category_priority = (
+            {
+                cls._MACRO_NEWS_CATEGORY: 0,
+                cls._SECTOR_NEWS_CATEGORY: 1,
+                cls._DIRECT_NEWS_CATEGORY: 2,
+            }
+            if is_market_scope
+            else cls._NEWS_CATEGORY_PRIORITY
+        )
 
         def sort_key(entry: Tuple[int, SearchResult]) -> Tuple[int, int, int, int]:
             index, result = entry
             category = result.relevance_category or cls._SECTOR_NEWS_CATEGORY
-            category_rank = cls._NEWS_CATEGORY_PRIORITY.get(category, 9)
+            category_rank = category_priority.get(category, 9)
             language_rank = 0 if prefer_chinese and cls._is_chinese_news_result(result) else 1
             if not prefer_chinese:
                 language_rank = 0
