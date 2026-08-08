@@ -1032,8 +1032,9 @@ class StockAnalysisPipeline:
                 )
 
                 logger.info(
-                    "[PredictionExecutionSplit] %s forecast10d=%s execution=%s/%s "
-                    "forecast_immutable=%s",
+                    "[PredictionExecutionSplit] %s forecast10d=%s "
+                    "execution_action=%s action_label=%s operation_advice=%s "
+                    "execution_score=%s forecast_immutable=%s",
                     code,
                     (
                         getattr(result, "forecast", {})
@@ -1044,6 +1045,8 @@ class StockAnalysisPipeline:
                         else None
                     ),
                     getattr(result, "action", None),
+                    getattr(result, "action_label", None),
+                    getattr(result, "operation_advice", None),
                     getattr(result, "sentiment_score", None),
                     trace.get("forecast_immutable_through_guardrails"),
                 )
@@ -1060,6 +1063,18 @@ class StockAnalysisPipeline:
                         chip_data=chip_data,
                         analysis_context_pack_overview=analysis_context_pack_overview,
                         market_phase_summary=market_phase_summary,
+                    )
+                    # Persist the prediction layer explicitly so future
+                    # forecast-accuracy backtests can evaluate forecast and
+                    # execution independently without reconstructing old prompts.
+                    context_snapshot["forecast"] = copy.deepcopy(
+                        getattr(result, "forecast", None)
+                    )
+                    context_snapshot["execution"] = copy.deepcopy(
+                        getattr(result, "execution", None)
+                    )
+                    context_snapshot["decision_trace"] = copy.deepcopy(
+                        getattr(result, "decision_trace", None)
                     )
                     result.diagnostic_context_snapshot = context_snapshot
                     saved_history_id = self.db.save_analysis_history(
@@ -1569,10 +1584,17 @@ class StockAnalysisPipeline:
                 if isinstance(prediction_context, dict):
                     enhanced["prediction_context"] = prediction_context
                     logger.info(
-                        "[PredictionContext] %s status=%s rs=%s breadth=%s",
+                        "[PredictionContext] %s status=%s rs_spy=%s rs_qqq=%s breadth=%s",
                         context_code,
                         prediction_context.get("status"),
-                        prediction_context.get("relative_strength_state"),
+                        prediction_context.get(
+                            "relative_strength_vs_spy_state",
+                            prediction_context.get("relative_strength_state"),
+                        ),
+                        prediction_context.get(
+                            "relative_strength_vs_qqq_state",
+                            "unknown",
+                        ),
                         (
                             prediction_context.get("market_breadth", {}).get("breadth")
                             if isinstance(prediction_context.get("market_breadth"), dict)
@@ -2324,6 +2346,15 @@ class StockAnalysisPipeline:
                         chip_data=chip_data,
                         analysis_context_pack_overview=analysis_context_pack_overview,
                         market_phase_summary=market_phase_summary,
+                    )
+                    agent_context_snapshot["forecast"] = copy.deepcopy(
+                        getattr(result, "forecast", None)
+                    )
+                    agent_context_snapshot["execution"] = copy.deepcopy(
+                        getattr(result, "execution", None)
+                    )
+                    agent_context_snapshot["decision_trace"] = copy.deepcopy(
+                        getattr(result, "decision_trace", None)
                     )
                     result.diagnostic_context_snapshot = agent_context_snapshot
                     agent_context_snapshot["stock_name"] = resolved_stock_name
