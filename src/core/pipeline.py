@@ -11,6 +11,7 @@ A股自选股智能分析系统 - 核心分析流水线
 4. 提供股票分析的核心功能
 """
 
+import copy
 import logging
 import inspect
 import threading
@@ -258,6 +259,7 @@ class StockAnalysisPipeline:
         self.fetcher_manager = DataFetcherManager()
         self._market_regime_adapter = MarketRegimeAdapter()
         self._run_market_regime: Dict[str, Any] = {}
+        self._run_prediction_contexts: Dict[str, Dict[str, Any]] = {}
         # 不再单独创建 akshare_fetcher，统一使用 fetcher_manager 获取增强数据
         self.trend_analyzer = StockTrendAnalyzer()  # 技术分析器
         self.analyzer = GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
@@ -405,6 +407,104 @@ class StockAnalysisPipeline:
             logger.error(f"{stock_name}({code}) {error_msg}")
             return False, error_msg
     
+    @staticmethod
+    def _decision_state_snapshot(result: Optional[AnalysisResult]) -> Dict[str, Any]:
+        if result is None:
+            return {}
+        return {
+            "sentiment_score": getattr(result, "sentiment_score", None),
+            "trend_prediction": getattr(result, "trend_prediction", None),
+            "operation_advice": getattr(result, "operation_advice", None),
+            "decision_type": getattr(result, "decision_type", None),
+            "action": getattr(result, "action", None),
+        }
+
+    @staticmethod
+    def _technical_prediction_snapshot(
+        trend_result: Optional[TrendAnalysisResult],
+    ) -> Dict[str, Any]:
+        if trend_result is None:
+            return {
+                "status": "unavailable",
+            }
+        return {
+            "status": "available",
+            "signal_score": getattr(trend_result, "signal_score", None),
+            "buy_signal": (
+                getattr(getattr(trend_result, "buy_signal", None), "value", None)
+                or str(getattr(trend_result, "buy_signal", ""))
+            ),
+            "trend_status": (
+                getattr(getattr(trend_result, "trend_status", None), "value", None)
+                or str(getattr(trend_result, "trend_status", ""))
+            ),
+            "trend_strength": getattr(trend_result, "trend_strength", None),
+        }
+
+    @classmethod
+    def _append_guardrail_trace(
+        cls,
+        trace: Dict[str, Any],
+        *,
+        name: str,
+        before: Dict[str, Any],
+        after: Dict[str, Any],
+        adjustments: Any,
+    ) -> None:
+        guardrails = trace.setdefault("guardrails", [])
+        guardrails.append(
+            {
+                "name": name,
+                "adjustments": list(adjustments or []),
+                "before": before,
+                "after": after,
+            }
+        )
+
+    @staticmethod
+    def _finalize_prediction_execution_split(
+        result: AnalysisResult,
+        *,
+        trace: Dict[str, Any],
+        market_phase_summary: Optional[Dict[str, Any]],
+        forecast_before_guardrails: Any,
+    ) -> None:
+        final_state = StockAnalysisPipeline._decision_state_snapshot(result)
+        trace["final"] = final_state
+
+        forecast_after = copy.deepcopy(getattr(result, "forecast", None))
+        trace["forecast_immutable_through_guardrails"] = (
+            forecast_after == forecast_before_guardrails
+        )
+        trace["forecast"] = forecast_after
+
+        phase = None
+        if isinstance(market_phase_summary, dict):
+            phase = (
+                market_phase_summary.get("phase")
+                or market_phase_summary.get("market_phase")
+            )
+
+        result.execution = {
+            "action": getattr(result, "action", None),
+            "operation_advice": getattr(result, "operation_advice", None),
+            "decision_type": getattr(result, "decision_type", None),
+            "execution_score": getattr(result, "sentiment_score", None),
+            "market_phase": phase,
+            "note": (
+                "Execution may be watch/hold even when forecast is bullish; "
+                "market phase and entry discipline belong to the execution layer."
+            ),
+        }
+        result.decision_trace = trace
+
+        if isinstance(result.dashboard, dict):
+            result.dashboard["forecast"] = copy.deepcopy(
+                getattr(result, "forecast", None)
+            )
+            result.dashboard["execution"] = copy.deepcopy(result.execution)
+            result.dashboard["decision_trace"] = copy.deepcopy(trace)
+
     def analyze_stock(
         self,
         code: str,
@@ -831,11 +931,43 @@ class StockAnalysisPipeline:
                     feature_enabled=getattr(self.config, "enable_chip_distribution", False),
                 )
 
-            # Step 7.7: price_position fallback
+            # Step 7.7: prediction / execution split + full decision trace
             if result:
                 fill_price_position_if_needed(result, trend_result, realtime_quote)
+
+                trace: Dict[str, Any] = {
+                    "technical_raw": self._technical_prediction_snapshot(trend_result),
+                    "llm_raw": self._decision_state_snapshot(result),
+                    "forecast_raw": copy.deepcopy(getattr(result, "forecast", None)),
+                    "guardrails": [],
+                }
+                forecast_before_guardrails = copy.deepcopy(
+                    getattr(result, "forecast", None)
+                )
+
                 action_source_advice = getattr(result, "operation_advice", None)
-                stabilize_decision_with_structure(result, trend_result, fundamental_context)
+
+                before_structure = self._decision_state_snapshot(result)
+                stabilize_decision_with_structure(
+                    result,
+                    trend_result,
+                    fundamental_context,
+                )
+                after_structure = self._decision_state_snapshot(result)
+                trace["structure_stabilized"] = after_structure
+                self._append_guardrail_trace(
+                    trace,
+                    name="structure_and_fundamentals",
+                    before=before_structure,
+                    after=after_structure,
+                    adjustments=(
+                        ["state_changed"]
+                        if before_structure != after_structure
+                        else []
+                    ),
+                )
+
+                before_phase = self._decision_state_snapshot(result)
                 adjustments = apply_phase_decision_guardrails(
                     result,
                     market_phase_summary=market_phase_summary,
@@ -843,13 +975,35 @@ class StockAnalysisPipeline:
                     report_language=getattr(result, "report_language", None)
                     or getattr(self.config, "report_language", "zh"),
                 )
+                after_phase = self._decision_state_snapshot(result)
+                self._append_guardrail_trace(
+                    trace,
+                    name="market_phase",
+                    before=before_phase,
+                    after=after_phase,
+                    adjustments=adjustments,
+                )
                 if adjustments:
-                    logger.info("[phase_decision_guardrail] Applied adjustments for %s: %s", code, adjustments)
+                    logger.info(
+                        "[phase_decision_guardrail] Applied adjustments for %s: %s",
+                        code,
+                        adjustments,
+                    )
+
+                before_market_context = self._decision_state_snapshot(result)
                 market_context_adjustments = apply_daily_market_context_guardrail(
                     result,
                     daily_market_context=enhanced_context.get("daily_market_context"),
                     report_language=getattr(result, "report_language", None)
                     or getattr(self.config, "report_language", "zh"),
+                )
+                after_market_context = self._decision_state_snapshot(result)
+                self._append_guardrail_trace(
+                    trace,
+                    name="daily_market_context",
+                    before=before_market_context,
+                    after=after_market_context,
+                    adjustments=market_context_adjustments,
                 )
                 if market_context_adjustments:
                     logger.info(
@@ -857,16 +1011,41 @@ class StockAnalysisPipeline:
                         code,
                         market_context_adjustments,
                     )
+
                 if isinstance(fundamental_context, dict):
                     result.fundamental_context = fundamental_context
                 if isinstance(market_structure_context, dict):
                     result.market_structure_context = market_structure_context
                 result.market_phase_summary = market_phase_summary
                 result.analysis_context_pack_overview = analysis_context_pack_overview
+
                 self._refresh_decision_action_for_final_result(
                     result,
                     report_type=report_type.value,
                     previous_operation_advice=action_source_advice,
+                )
+                self._finalize_prediction_execution_split(
+                    result,
+                    trace=trace,
+                    market_phase_summary=market_phase_summary,
+                    forecast_before_guardrails=forecast_before_guardrails,
+                )
+
+                logger.info(
+                    "[PredictionExecutionSplit] %s forecast10d=%s execution=%s/%s "
+                    "forecast_immutable=%s",
+                    code,
+                    (
+                        getattr(result, "forecast", {})
+                        .get("horizons", {})
+                        .get("10d", {})
+                        .get("direction")
+                        if isinstance(getattr(result, "forecast", None), dict)
+                        else None
+                    ),
+                    getattr(result, "action", None),
+                    getattr(result, "sentiment_score", None),
+                    trace.get("forecast_immutable_through_guardrails"),
                 )
 
             # Step 8: 保存分析历史记录
@@ -1369,6 +1548,49 @@ class StockAnalysisPipeline:
             regime_payload = getattr(self, "_run_market_regime", None)
             if isinstance(regime_payload, dict) and regime_payload:
                 enhanced["market_regime"] = dict(regime_payload)
+
+            try:
+                prediction_context = (
+                    getattr(self, "_run_prediction_contexts", {}).get(
+                        str(context_code).upper()
+                    )
+                    if isinstance(
+                        getattr(self, "_run_prediction_contexts", {}),
+                        dict,
+                    )
+                    else None
+                )
+                if not isinstance(prediction_context, dict):
+                    prediction_context = (
+                        self._market_regime_adapter.get_stock_prediction_context(
+                            str(context_code)
+                        )
+                    )
+                if isinstance(prediction_context, dict):
+                    enhanced["prediction_context"] = prediction_context
+                    logger.info(
+                        "[PredictionContext] %s status=%s rs=%s breadth=%s",
+                        context_code,
+                        prediction_context.get("status"),
+                        prediction_context.get("relative_strength_state"),
+                        (
+                            prediction_context.get("market_breadth", {}).get("breadth")
+                            if isinstance(prediction_context.get("market_breadth"), dict)
+                            else "unknown"
+                        ),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[PredictionContext] %s 获取失败，按中性缺失继续: %s",
+                    context_code,
+                    exc,
+                )
+                enhanced["prediction_context"] = {
+                    "status": "failed",
+                    "relative_strength_state": "unknown",
+                    "horizons": {},
+                    "reason": str(exc)[:200],
+                }
 
         # 添加趋势分析结果
         if trend_result:
@@ -2006,6 +2228,39 @@ class StockAnalysisPipeline:
                 result.market_phase_summary = market_phase_summary
                 result.analysis_context_pack_overview = analysis_context_pack_overview
                 final_action = normalize_decision_action(getattr(result, "action", None))
+                # Agent path: preserve the same prediction/execution separation contract.
+                agent_trace: Dict[str, Any] = {
+                    "technical_raw": self._technical_prediction_snapshot(trend_result),
+                    "llm_raw": {
+                        "sentiment_score": None,
+                        "trend_prediction": None,
+                        "operation_advice": initial_action_advice,
+                        "decision_type": pipeline_start_signal,
+                        "action": pipeline_start_action,
+                    },
+                    "guardrails": [
+                        {
+                            "name": "agent_pipeline_adjustments",
+                            "adjustments": [
+                                {
+                                    "source": getattr(item, "source", None),
+                                    "before": getattr(item, "before", None),
+                                    "after": getattr(item, "after", None),
+                                }
+                                for item in pipeline_adjustments
+                            ],
+                        }
+                    ],
+                }
+                self._finalize_prediction_execution_split(
+                    result,
+                    trace=agent_trace,
+                    market_phase_summary=market_phase_summary,
+                    forecast_before_guardrails=copy.deepcopy(
+                        getattr(result, "forecast", None)
+                    ),
+                )
+
                 if isinstance(result.dashboard, dict):
                     result.dashboard.pop("agent_disagreement_explanation", None)
                 if (
@@ -3434,6 +3689,17 @@ class StockAnalysisPipeline:
                     payload.get("regime"),
                     payload.get("confidence"),
                 )
+
+            self._run_prediction_contexts = (
+                self._market_regime_adapter.prefetch_stock_prediction_contexts(
+                    [
+                        code
+                        for code in (stock_codes or [])
+                        if get_market_for_stock(code) == "us"
+                        or is_us_stock_code(code)
+                    ]
+                )
+            )
         except Exception as exc:
             logger.warning("[MarketRegime] 准备失败，按中性缺失继续: %s", exc)
             self._run_market_regime = {
