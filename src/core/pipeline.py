@@ -563,6 +563,7 @@ class StockAnalysisPipeline:
 
             # Step 3: 趋势分析（基于交易理念）— 在 Agent 分支之前执行，供两条路径共用
             trend_result: Optional[TrendAnalysisResult] = None
+            volume_price_features: Optional[Dict[str, Any]] = None
             try:
                 from src.services.history_loader import get_frozen_target_date
                 _mkt = get_market_for_stock(normalize_stock_code(code))
@@ -572,6 +573,24 @@ class StockAnalysisPipeline:
                 historical_bars = self.db.get_data_range(code, start_date, end_date)
                 if historical_bars:
                     df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
+
+                    # 基于数据库中的完整日线重新计算量价特征。
+                    # 这样即使本轮命中断点续传，没有重新走 DataFetcherManager，
+                    # RVOL5 / RVOL20 仍然能够进入后续 LLM 分析上下文。
+                    volume_price_features = self._build_volume_price_features(df)
+                    if volume_price_features:
+                        logger.info(
+                            "[量价上下文] %s %s RVOL5=%s RVOL20=%s "
+                            "5日量能趋势=%s%% 短期vs20日=%s%% 价量信号=%s",
+                            code,
+                            volume_price_features.get("trade_date"),
+                            volume_price_features.get("rvol5"),
+                            volume_price_features.get("rvol20"),
+                            volume_price_features.get("volume_trend_5d_pct"),
+                            volume_price_features.get("volume_trend_vs20_pct"),
+                            volume_price_features.get("price_volume_signal"),
+                        )
+
                     # Issue #234: Augment with realtime for intraday MA calculation
                     if self.config.enable_realtime_quote and realtime_quote:
                         df = self._augment_historical_with_realtime(df, realtime_quote, code)
@@ -695,6 +714,7 @@ class StockAnalysisPipeline:
                 fundamental_context,
                 market_phase_context=market_phase_context_dict,
                 portfolio_context=portfolio_context,
+                volume_price_features=volume_price_features,
             )
             enhanced_context["market_phase_context"] = market_phase_context_dict
             self._attach_daily_market_context(
@@ -894,6 +914,150 @@ class StockAnalysisPipeline:
             logger.exception(f"{stock_name}({code}) 详细错误信息:")
             return None
     
+    @staticmethod
+    def _build_volume_price_features(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """
+        从完整日线计算用于 LLM 决策确认的量价特征。
+
+        设计原则：
+        1. RVOL 分母只使用“此前交易日”，避免把当日成交量放进分母稀释信号。
+        2. 不依赖实时 quote，适合收盘后/周末基于上一完整交易日分析。
+        3. 只作为趋势确认因子，不在这里直接修改买卖评分。
+        """
+        if df is None or df.empty:
+            return None
+
+        work = df.copy()
+        if "close" not in work.columns or "volume" not in work.columns:
+            return None
+
+        if "date" in work.columns:
+            try:
+                work = work.sort_values("date")
+            except Exception:
+                pass
+
+        work["close"] = pd.to_numeric(work["close"], errors="coerce")
+        work["volume"] = pd.to_numeric(work["volume"], errors="coerce")
+        work = work.dropna(subset=["close", "volume"])
+        work = work[(work["close"] > 0) & (work["volume"] >= 0)]
+        if len(work) < 2:
+            return None
+
+        latest = work.iloc[-1]
+        previous = work.iloc[:-1]
+        latest_close = float(latest["close"])
+        latest_volume = float(latest["volume"])
+
+        positive_previous_volume = previous.loc[previous["volume"] > 0, "volume"]
+        prev5 = positive_previous_volume.tail(5)
+        prev20 = positive_previous_volume.tail(20)
+
+        rvol5 = (
+            latest_volume / float(prev5.mean())
+            if latest_volume > 0 and len(prev5) >= 3 and float(prev5.mean()) > 0
+            else None
+        )
+        rvol20 = (
+            latest_volume / float(prev20.mean())
+            if latest_volume > 0 and len(prev20) >= 10 and float(prev20.mean()) > 0
+            else None
+        )
+
+        positive_all_volume = work.loc[work["volume"] > 0, "volume"]
+        current5 = positive_all_volume.tail(5)
+        current20 = positive_all_volume.tail(20)
+
+        volume_ma5 = float(current5.mean()) if len(current5) >= 3 else None
+        volume_ma20 = float(current20.mean()) if len(current20) >= 10 else None
+
+        previous_5_block = positive_all_volume.iloc[-10:-5] if len(positive_all_volume) >= 10 else pd.Series(dtype=float)
+        previous_5_avg = (
+            float(previous_5_block.mean())
+            if len(previous_5_block) >= 3 and float(previous_5_block.mean()) > 0
+            else None
+        )
+        volume_trend_5d_pct = (
+            (volume_ma5 / previous_5_avg - 1.0) * 100.0
+            if volume_ma5 is not None and previous_5_avg is not None
+            else None
+        )
+        volume_trend_vs20_pct = (
+            (volume_ma5 / volume_ma20 - 1.0) * 100.0
+            if volume_ma5 is not None and volume_ma20 is not None and volume_ma20 > 0
+            else None
+        )
+
+        previous_close = float(previous.iloc[-1]["close"]) if not previous.empty else None
+        price_change_pct = (
+            (latest_close / previous_close - 1.0) * 100.0
+            if previous_close is not None and previous_close > 0
+            else None
+        )
+
+        # 优先使用 20 日 RVOL 作为量能状态基准；样本不足时退化到 RVOL5。
+        volume_reference = rvol20 if rvol20 is not None else rvol5
+        if volume_reference is None:
+            volume_regime = "数据不足"
+        elif volume_reference >= 1.50:
+            volume_regime = "显著放量"
+        elif volume_reference >= 1.20:
+            volume_regime = "温和放量"
+        elif volume_reference >= 0.80:
+            volume_regime = "正常量能"
+        else:
+            volume_regime = "缩量"
+
+        # 价量组合只做“确认/削弱”描述，不在此处硬编码买卖分数。
+        price_volume_signal = "中性"
+        if price_change_pct is not None and volume_reference is not None:
+            if price_change_pct > 0.20 and volume_reference >= 1.20:
+                price_volume_signal = "上涨放量-多头确认增强"
+            elif price_change_pct > 0.20 and volume_reference < 0.80:
+                price_volume_signal = "上涨缩量-上涨确认不足"
+            elif price_change_pct < -0.20 and volume_reference >= 1.20:
+                price_volume_signal = "下跌放量-空头确认增强"
+            elif price_change_pct < -0.20 and volume_reference < 0.80:
+                price_volume_signal = "下跌缩量-下跌确认有限"
+            elif abs(price_change_pct) <= 0.20:
+                price_volume_signal = "价格横盘-量能作为突破预警"
+
+        trade_date = latest.get("date")
+        if hasattr(trade_date, "isoformat"):
+            try:
+                trade_date = trade_date.isoformat()
+            except Exception:
+                trade_date = str(trade_date)
+        elif trade_date is not None:
+            trade_date = str(trade_date)
+
+        return {
+            "trade_date": trade_date,
+            "rvol5": round(rvol5, 2) if rvol5 is not None else None,
+            "rvol20": round(rvol20, 2) if rvol20 is not None else None,
+            "volume_ma5": round(volume_ma5, 0) if volume_ma5 is not None else None,
+            "volume_ma20": round(volume_ma20, 0) if volume_ma20 is not None else None,
+            "volume_trend_5d_pct": (
+                round(volume_trend_5d_pct, 2)
+                if volume_trend_5d_pct is not None
+                else None
+            ),
+            "volume_trend_vs20_pct": (
+                round(volume_trend_vs20_pct, 2)
+                if volume_trend_vs20_pct is not None
+                else None
+            ),
+            "dollar_volume_proxy": round(latest_close * latest_volume, 0),
+            "price_change_pct": (
+                round(price_change_pct, 2)
+                if price_change_pct is not None
+                else None
+            ),
+            "volume_regime": volume_regime,
+            "price_volume_signal": price_volume_signal,
+            "source": "complete_daily_bars",
+        }
+
     def _enhance_context(
         self,
         context: Dict[str, Any],
@@ -904,6 +1068,7 @@ class StockAnalysisPipeline:
         fundamental_context: Optional[Dict[str, Any]] = None,
         market_phase_context: Optional[Dict[str, Any]] = None,
         portfolio_context: Optional[Dict[str, Any]] = None,
+        volume_price_features: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         增强分析上下文
@@ -931,6 +1096,11 @@ class StockAnalysisPipeline:
             enhanced['stock_name'] = realtime_quote.name
         if isinstance(portfolio_context, dict):
             enhanced["portfolio_context"] = dict(portfolio_context)
+
+        # 收盘日线量价特征：独立于实时 quote。
+        # 美股收盘后分析时，即使实时数据源没有量比/换手率，也能用完整日线 RVOL 做确认。
+        if isinstance(volume_price_features, dict) and volume_price_features:
+            enhanced["volume_price_features"] = dict(volume_price_features)
 
         # 将运行时搜索窗口透传给 analyzer，避免与全局配置重新读取产生窗口不一致
         enhanced['news_window_days'] = getattr(self.search_service, "news_window_days", 3)
