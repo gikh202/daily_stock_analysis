@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      restore_cache_key:
+        description: '可选：精确恢复某个历史 data/ Cache Key；正常运行请留空'
+        required: false
+        default: ''
+        type: string
 
 # 并发控制：同一时间只运行一个分析任务
 concurrency:
@@ -61,19 +66,124 @@ jobs:
           mkdir -p data logs reports
 
       - name: 准确率增强预检
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           python scripts/preflight_accuracy.py
 
-      # 恢复历史分析数据库/快照，供历史对比与回测使用
-      - name: 恢复历史分析数据
-        id: restore-analysis-data
+      # 恢复历史分析数据库/快照，供历史对比与回测使用。
+      #
+      # 手动恢复旧历史：
+      # workflow_dispatch 时填写 restore_cache_key，可精确恢复指定 Cache。
+      # 正常定时/手动运行请留空，自动恢复最近一次有效 Cache。
+      - name: 精确恢复指定历史分析数据
+        id: restore-analysis-data-exact
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.restore_cache_key != '' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: data/
+          key: ${{ github.event.inputs.restore_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: 恢复最近有效历史分析数据
+        id: restore-analysis-data-latest
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.restore_cache_key == '' }}
         uses: actions/cache/restore@v5
         with:
           path: data/
           key: stock-analysis-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             stock-analysis-data-${{ runner.os }}-
-      
+
+      - name: 显示并校验历史数据恢复状态
+        id: inspect-analysis-data
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "历史分析数据恢复状态"
+          echo "=========================================="
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = "data/stock_analysis.db"
+          output = os.environ["GITHUB_OUTPUT"]
+
+          def emit(name: str, value) -> None:
+              with open(output, "a", encoding="utf-8") as f:
+                  f.write(f"{name}={value}\n")
+
+          if not os.path.isfile(path):
+              print("未恢复到 stock_analysis.db：本轮将由程序按需新建。")
+              emit("db_present", "false")
+              emit("db_size", "0")
+              emit("analysis_history_count", "-1")
+              raise SystemExit(0)
+
+          size = os.path.getsize(path)
+          print(f"SQLite size: {size} bytes")
+          if size < 4096:
+              print(
+                  f"::error::恢复的 SQLite 文件异常小：{size} bytes。"
+                  "为避免历史数据被异常缓存污染，本轮停止。"
+              )
+              raise SystemExit(2)
+
+          try:
+              conn = sqlite3.connect(
+                  f"file:{path}?mode=ro",
+                  uri=True,
+                  timeout=10,
+              )
+              try:
+                  row = conn.execute("PRAGMA quick_check").fetchone()
+                  quick_check = str(row[0]).strip().lower() if row else ""
+                  tables = {
+                      row[0]
+                      for row in conn.execute(
+                          "SELECT name FROM sqlite_master "
+                          "WHERE type='table'"
+                      )
+                  }
+                  history_count = (
+                      int(
+                          conn.execute(
+                              "SELECT COUNT(*) FROM analysis_history"
+                          ).fetchone()[0]
+                      )
+                      if "analysis_history" in tables
+                      else -1
+                  )
+              finally:
+                  conn.close()
+          except Exception as exc:
+              print(
+                  "::error::恢复的 SQLite 无法读取或校验："
+                  + str(exc)
+              )
+              raise SystemExit(2)
+
+          if quick_check != "ok":
+              print(
+                  "::error::恢复的 SQLite quick_check 失败："
+                  f"{quick_check!r}"
+              )
+              raise SystemExit(2)
+
+          if not tables:
+              print("::error::恢复的 SQLite 不包含任何数据表")
+              raise SystemExit(2)
+
+          print("SQLite quick_check: ok")
+          print("SQLite tables:", len(tables))
+          if history_count >= 0:
+              print("analysis_history rows:", history_count)
+
+          emit("db_present", "true")
+          emit("db_size", size)
+          emit("analysis_history_count", history_count)
+          PY
+
       - name: 执行股票分析
         env:
           # ==========================================
@@ -591,9 +701,122 @@ jobs:
             python main.py $FORCE_RUN_ARG
           fi
       
-      # 保存本次 data/，供下一次 GitHub Actions 恢复
+      # 只有“主流程成功 + SQLite 有效”才保存历史 Cache。
+      # 失败运行绝不能把空 data/ 保存成最新缓存。
+      - name: 验证历史分析数据库
+        id: validate-analysis-cache
+        if: success()
+        shell: bash
+        env:
+          BASELINE_ANALYSIS_HISTORY_COUNT: ${{ steps.inspect-analysis-data.outputs.analysis_history_count }}
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = "data/stock_analysis.db"
+          output = os.environ["GITHUB_OUTPUT"]
+
+          def set_result(valid: bool, reason: str) -> None:
+              with open(output, "a", encoding="utf-8") as f:
+                  f.write(f"valid={'true' if valid else 'false'}\n")
+                  f.write(f"reason={reason}\n")
+
+          if not os.path.isfile(path):
+              print("::warning::不保存历史 Cache：data/stock_analysis.db 不存在")
+              set_result(False, "db_missing")
+              raise SystemExit(0)
+
+          size = os.path.getsize(path)
+          if size < 4096:
+              print(
+                  f"::warning::不保存历史 Cache：SQLite 文件异常小 "
+                  f"({size} bytes)"
+              )
+              set_result(False, "db_too_small")
+              raise SystemExit(0)
+
+          try:
+              conn = sqlite3.connect(
+                  f"file:{path}?mode=ro",
+                  uri=True,
+                  timeout=10,
+              )
+              try:
+                  row = conn.execute("PRAGMA quick_check").fetchone()
+                  quick_check = str(row[0]).strip().lower() if row else ""
+                  tables = {
+                      row[0]
+                      for row in conn.execute(
+                          "SELECT name FROM sqlite_master "
+                          "WHERE type='table'"
+                      )
+                  }
+                  history_count = (
+                      int(
+                          conn.execute(
+                              "SELECT COUNT(*) FROM analysis_history"
+                          ).fetchone()[0]
+                      )
+                      if "analysis_history" in tables
+                      else -1
+                  )
+              finally:
+                  conn.close()
+          except Exception as exc:
+              print(
+                  "::warning::不保存历史 Cache：SQLite 校验异常："
+                  + str(exc)
+              )
+              set_result(False, "db_check_exception")
+              raise SystemExit(0)
+
+          if quick_check != "ok":
+              print(
+                  "::warning::不保存历史 Cache："
+                  f"PRAGMA quick_check={quick_check!r}"
+              )
+              set_result(False, "db_quick_check_failed")
+              raise SystemExit(0)
+
+          if not tables:
+              print("::warning::不保存历史 Cache：SQLite 没有任何业务表")
+              set_result(False, "db_has_no_tables")
+              raise SystemExit(0)
+
+          baseline_raw = os.getenv(
+              "BASELINE_ANALYSIS_HISTORY_COUNT",
+              "",
+          ).strip()
+          try:
+              baseline_count = int(baseline_raw)
+          except (TypeError, ValueError):
+              baseline_count = -1
+
+          # If the restored DB had analysis_history rows, never replace its
+          # cache with a new DB that silently contains fewer rows.
+          if (
+              baseline_count >= 0
+              and history_count >= 0
+              and history_count < baseline_count
+          ):
+              print(
+                  "::warning::不保存历史 Cache：analysis_history 行数回退 "
+                  f"{baseline_count} -> {history_count}"
+              )
+              set_result(False, "analysis_history_regressed")
+              raise SystemExit(0)
+
+          print(
+              f"历史 Cache 校验通过：size={size} bytes, "
+              f"tables={len(tables)}, quick_check=ok, "
+              f"analysis_history={history_count}"
+          )
+          set_result(True, "ok")
+          PY
+
       - name: 保存历史分析数据
-        if: always()
+        if: ${{ success() && steps.validate-analysis-cache.outputs.valid == 'true' }}
         uses: actions/cache/save@v5
         with:
           path: data/
@@ -607,6 +830,7 @@ jobs:
           path: |
             reports/
             logs/
+            data/stock_analysis.db
           retention-days: 30
       
       - name: 显示运行结果
