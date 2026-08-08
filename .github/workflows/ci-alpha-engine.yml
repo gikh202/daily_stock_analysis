@@ -55,4 +55,10 @@ jobs:
       - name: Run Alpha tests
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: pytest -q tests/test_alpha_engine.py tests/test_alpha_features.py tests/test_alpha_portfolio.py tests/test_alpha_shadow_store.py
+        run: >-
+          pytest -q
+          tests/test_alpha_engine.py
+          tests/test_alpha_features.py
+          tests/test_alpha_portfolio.py
+          tests/test_alpha_shadow_store.py
+          tests/test_alpha_shadow_runner.py
