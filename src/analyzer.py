@@ -1044,25 +1044,23 @@ def stabilize_decision_with_structure(
 
         flow_bias, flow_reason = _capital_flow_bias_with_status(fundamental_context)
         if flow_bias == "unavailable":
+            # “资金流数据不可用/市场不支持”只是数据缺口，不是负面资金信号。
+            # 因此不再把 buy 强制降级为 hold，也不压低 sentiment_score。
+            # 只有拿到真实资金流数据后，inflow/outflow 才参与结构校准。
             if isinstance(fundamental_context, dict) and "capital_flow" in fundamental_context:
-                if decision_type == "buy" or advice_decision_type == "buy":
-                    _downgrade_buy_without_capital_flow(
-                        result,
-                        language,
-                        current_price=current_price,
-                        support=support,
-                        resistance=resistance,
-                        flow_status=flow_reason,
-                    )
-                else:
-                    _set_decision_stability_unavailable(
-                        result,
-                        language,
-                        current_price=current_price,
-                        support=support,
-                        resistance=resistance,
-                        flow_status=flow_reason,
-                    )
+                _set_decision_stability_unavailable(
+                    result,
+                    language,
+                    current_price=current_price,
+                    support=support,
+                    resistance=resistance,
+                    flow_status=flow_reason,
+                )
+                logger.info(
+                    "[decision_stability] Capital flow unavailable; "
+                    "kept original action/score unchanged: %s",
+                    flow_reason,
+                )
             return
 
         if current_price is None:
@@ -1331,16 +1329,33 @@ def _set_decision_stability_unavailable(
     resistance: Optional[float],
     flow_status: str,
 ) -> None:
+    """
+    记录资金流数据缺口，但保持 LLM 原始动作与评分不变。
+
+    关键原则：
+    - unavailable / not_supported != outflow
+    - 缺失数据不能作为看空证据
+    - 不修改 decision_type / operation_advice / sentiment_score
+    """
     dashboard = result.dashboard if isinstance(result.dashboard, dict) else {}
     result.dashboard = dashboard
+    if language == "zh":
+        reason = "资金流不可用，仅记录数据缺口；不作为负面证据，不调整买卖结论或评分。"
+    else:
+        reason = (
+            "Capital flow is unavailable; recorded as a data gap only. "
+            "It is not bearish evidence and does not change the action or score."
+        )
     dashboard["decision_stability"] = {
         "applied": False,
-        "reason": "资金流不可用，未使用资金流校准" if language == "zh" else "Capital flow unavailable; stability calibration not applied",
+        "reason": reason,
         "capital_flow_status": _capital_flow_status_for_stability(flow_status, language),
         "current_price": current_price,
         "support": support,
         "resistance": resistance,
         "capital_flow_bias": "unavailable",
+        "action_adjusted": False,
+        "score_adjusted": False,
     }
     _sync_stability_dashboard_fields(result)
 
