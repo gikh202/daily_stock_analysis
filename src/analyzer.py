@@ -3799,6 +3799,37 @@ class GeminiAnalyzer:
 | 60日涨跌幅 | {rt.get('change_60d', 'N/A')}% | 中期表现 |
 """
 
+        # 收盘日线量价确认。该区块与“实时量比”独立：
+        # 对美股收盘后/周末运行，优先使用完整交易日 RVOL 判断量能确认程度。
+        volume_features = (
+            context.get("volume_price_features", {})
+            if isinstance(context, dict)
+            else {}
+        )
+        if isinstance(volume_features, dict) and volume_features:
+            prompt += f"""
+### 收盘日线量价确认（RVOL，趋势确认因子）
+| 指标 | 数值 | 解读 |
+|------|------|------|
+| 数据日期 | {volume_features.get('trade_date', 'N/A')} | 最近完整交易日 |
+| **RVOL5** | **{volume_features.get('rvol5', 'N/A')}** | 当日成交量 / 前5个交易日平均成交量 |
+| **RVOL20** | **{volume_features.get('rvol20', 'N/A')}** | 当日成交量 / 前20个交易日平均成交量 |
+| 5日平均成交量 | {volume_features.get('volume_ma5', 'N/A')} | 短期量能基准 |
+| 20日平均成交量 | {volume_features.get('volume_ma20', 'N/A')} | 中期量能基准 |
+| 5日量能趋势 | {volume_features.get('volume_trend_5d_pct', 'N/A')}% | 最近5日均量相对前5日变化 |
+| 短期量能 vs 20日 | {volume_features.get('volume_trend_vs20_pct', 'N/A')}% | 5日均量相对20日均量 |
+| 当日涨跌幅 | {volume_features.get('price_change_pct', 'N/A')}% | 与量能组合判断 |
+| 成交额代理 | {self._format_amount(volume_features.get('dollar_volume_proxy'))} | 收盘价×成交量近似 |
+| **量能状态** | **{volume_features.get('volume_regime', 'N/A')}** | RVOL20优先，样本不足时参考RVOL5 |
+| **价量信号** | **{volume_features.get('price_volume_signal', 'N/A')}** | 只作趋势确认/削弱，不作单独买卖信号 |
+
+> RVOL解释规则：RVOL20≥1.50=显著放量；1.20~1.50=温和放量；0.80~1.20=正常量能；<0.80=缩量。
+> 决策要求：上涨+放量可增强趋势确认；上涨+缩量应降低突破可信度；下跌+放量增强抛压确认；下跌+缩量说明下跌确认有限。
+> RVOL属于确认因子，不能单独覆盖基本面、重大事件、市场阶段和关键支撑/压力结论。
+> 若实时行情里的量比为空，而本区块有完整日线数据，以本区块 RVOL 为收盘后量能判断依据。
+> 当本区块可用时，最终 JSON 的 `volume_analysis` 必须至少引用 RVOL5 或 RVOL20 中一个具体数值，并说明它对当前趋势是“确认”还是“削弱”。
+"""
+
         # 添加财报与分红（价值投资口径）
         fundamental_context = context.get("fundamental_context") if isinstance(context, dict) else None
         earnings_block = (
