@@ -3949,6 +3949,80 @@ class GeminiAnalyzer:
 > 若上述字段为 N/A 或缺失，请明确写“数据缺失，无法判断”，禁止编造。
 """
 
+        # 结构化财报事件风险（仅公司股；ETF / 指数不套公司财报逻辑）
+        earnings_event_block = (
+            fundamental_context.get("earnings_event", {})
+            if isinstance(fundamental_context, dict)
+            else {}
+        )
+        earnings_event_status = (
+            earnings_event_block.get("status")
+            if isinstance(earnings_event_block, dict)
+            else None
+        )
+        earnings_event_data = (
+            earnings_event_block.get("data", {})
+            if isinstance(earnings_event_block, dict)
+            else {}
+        )
+
+        if (
+            not context.get("is_index_etf")
+            and isinstance(earnings_event_data, dict)
+            and earnings_event_status in {"ok", "partial"}
+            and earnings_event_data
+        ):
+            event_risk = earnings_event_data.get("event_risk", "unknown")
+            days_to_earnings = earnings_event_data.get("days_to_earnings", "N/A")
+            next_earnings_date = earnings_event_data.get("next_earnings_date", "N/A")
+            eps_revision_direction = earnings_event_data.get(
+                "eps_revision_direction_30d",
+                "N/A",
+            )
+
+            prompt += f"""
+### 财报事件与分析师预期（结构化事件风险）
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| 下一次财报日期 | {next_earnings_date} | Yahoo Finance 结构化财报日 |
+| 距离财报 | {days_to_earnings} 天 | 日历天 |
+| **事件风险** | **{event_risk}** | very_high/high/medium/low/unknown |
+| 下一次 EPS 预期 | {earnings_event_data.get('next_eps_estimate', 'N/A')} | 当前一致预期 |
+| 本季 EPS 一致预期 | {earnings_event_data.get('eps_estimate_current_q', 'N/A')} | 0q |
+| EPS 预期区间 | {earnings_event_data.get('eps_estimate_low', 'N/A')} ~ {earnings_event_data.get('eps_estimate_high', 'N/A')} | |
+| EPS 分析师数量 | {earnings_event_data.get('eps_analyst_count', 'N/A')} | |
+| 上次财报日期 | {earnings_event_data.get('last_earnings_date', 'N/A')} | |
+| 上次 EPS 预期 | {earnings_event_data.get('last_eps_estimate', 'N/A')} | |
+| 上次 EPS 实际 | {earnings_event_data.get('last_eps_actual', 'N/A')} | |
+| 上次 EPS Surprise | {earnings_event_data.get('last_eps_surprise_pct', 'N/A')}% | Yahoo Earnings Dates 的 Surprise(%) |
+| 7日 EPS 上调/下调 | {earnings_event_data.get('eps_revision_up_7d', 'N/A')} / {earnings_event_data.get('eps_revision_down_7d', 'N/A')} | 分析师修正 |
+| 30日 EPS 上调/下调 | {earnings_event_data.get('eps_revision_up_30d', 'N/A')} / {earnings_event_data.get('eps_revision_down_30d', 'N/A')} | 分析师修正 |
+| **30日 EPS 修正方向** | **{eps_revision_direction}** | up/down/neutral |
+| 30日 EPS 预期变化 | {earnings_event_data.get('eps_trend_change_30d_pct', 'N/A')}% | current vs 30daysAgo |
+| 本季营收一致预期 | {self._format_amount(earnings_event_data.get('revenue_estimate_current_q'))} | 0q |
+| 营收预期区间 | {self._format_amount(earnings_event_data.get('revenue_estimate_low'))} ~ {self._format_amount(earnings_event_data.get('revenue_estimate_high'))} | |
+| 营收分析师数量 | {earnings_event_data.get('revenue_analyst_count', 'N/A')} | |
+
+> 财报事件是“风险调整因子”，不是独立的看多/看空信号。
+> 若距离财报 ≤ 7 天（event_risk=high/very_high），必须在 `risk_alerts` 或 `guardrail_reason` 中明确说明“财报事件不确定性较高”，并避免仅凭技术面/RVOL给出高置信度追涨结论。
+> 财报临近本身 **不等于利空**，不得仅因 days_to_earnings 较小就把趋势判为看空。
+> `eps_revision_direction_30d=up` 可作为“市场盈利预期改善”的辅助证据；`down` 可作为“盈利预期走弱”的辅助证据，但均不能替代已公布财务数据。
+> 上次 EPS Surprise 只代表历史已公布结果，不得当成下一季度必然超预期。
+> 任一字段为 N/A / 缺失时，必须按“数据不可用”处理，**严禁把缺失数据解释为负面证据**。
+> 禁止引用本表中未提供具体数值的财报指标。
+"""
+        elif (
+            not context.get("is_index_etf")
+            and isinstance(earnings_event_block, dict)
+            and earnings_event_status == "failed"
+        ):
+            prompt += """
+### 财报事件数据状态
+- 结构化财报事件数据本次获取失败或超时。
+- 该缺失仅表示事件证据不可用，**不得解释为利空，也不得因此自动降低评分或买入评级**。
+- 若新闻中存在财报日期或预期，只可作为未结构化背景信息，并应降低事实确定性。
+"""
+
         capital_flow_block = (
             fundamental_context.get("capital_flow", {})
             if isinstance(fundamental_context, dict)
@@ -4248,6 +4322,8 @@ class GeminiAnalyzer:
 - **具体狙击点位**：买入价、止损价、目标价（精确到分）
 - **检查清单**：每项用 ✅/⚠️/❌ 标记
 - **消息面时间合规**：`latest_news`、`risk_alerts`、`positive_catalysts` 不得包含超出近{news_window_days}日或时间未知的信息
+- **财报事件合规**：若结构化财报事件显示距离财报 ≤ 7 天，必须明确披露事件不确定性；财报临近不是利空，不得机械扣分或强制看空
+- **财报数据防幻觉**：只允许引用上方结构化表格中明确提供的财报日期、EPS、Surprise、EPS revisions、营收预期数值；缺失字段必须写“数据不可用”
 - **技术面一致性**：严禁把“空头排列”和“多头排列”等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”
  
 请输出完整的 JSON 格式决策仪表盘。"""
