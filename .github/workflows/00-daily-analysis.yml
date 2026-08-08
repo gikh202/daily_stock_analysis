@@ -284,6 +284,15 @@ jobs:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           # Finnhub（美股行情备用数据源）
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          # SEC EDGAR（美国 SEC 官方财报数据）
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          SEC_EDGAR_ENABLED: ${{ vars.SEC_EDGAR_ENABLED || 'true' }}
+          SEC_EDGAR_CACHE_TTL_SECONDS: ${{ vars.SEC_EDGAR_CACHE_TTL_SECONDS || '86400' }}
+          SEC_EDGAR_HTTP_TIMEOUT_SECONDS: ${{ vars.SEC_EDGAR_HTTP_TIMEOUT_SECONDS || '5' }}
+
+          # 接入 SEC 后适当增加基本面分析时间预算
+          FUNDAMENTAL_STAGE_TIMEOUT_SECONDS: ${{ vars.FUNDAMENTAL_STAGE_TIMEOUT_SECONDS || '15' }}
+          FUNDAMENTAL_FETCH_TIMEOUT_SECONDS: ${{ vars.FUNDAMENTAL_FETCH_TIMEOUT_SECONDS || '8' }}
           # Tushare Pro 自定义接入地址（可选；指向自建网关或第三方兼容镜像时设置）
           TUSHARE_HTTP_URL: ${{ vars.TUSHARE_HTTP_URL || secrets.TUSHARE_HTTP_URL }}
           # TickFlow（A 股日 K、实时行情、股票列表/名称与大盘复盘增强；不设则走免费源 fallback）
