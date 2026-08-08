@@ -3527,6 +3527,14 @@ class GeminiAnalyzer:
                     last_usage = _stream_usage
                     if response_validator is not None:
                         response_validator(_stream_text)
+                    logger.info(
+                        "[LLM路由命中] primary=%s selected=%s provider=%s "
+                        "fallback_used=%s",
+                        config.litellm_model,
+                        model,
+                        usage_provider,
+                        bool(model != config.litellm_model),
+                    )
                     return _stream_text, model, _stream_usage
 
                 try:
@@ -3592,6 +3600,17 @@ class GeminiAnalyzer:
                     last_usage = usage
                     if response_validator is not None:
                         response_validator(content)
+
+                    # Exact successful route audit.  `model` is the outer
+                    # fallback candidate that has passed transport + validator.
+                    logger.info(
+                        "[LLM路由命中] primary=%s selected=%s provider=%s "
+                        "fallback_used=%s",
+                        config.litellm_model,
+                        model,
+                        usage_provider,
+                        bool(model != config.litellm_model),
+                    )
                     return (content, model, usage)
                 raise ValueError("LLM returned empty response")
 
