@@ -28,6 +28,7 @@ from src.config import FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT, get_config, Co
 from src.storage import get_db
 from data_provider import DataFetcherManager
 from data_provider.base import is_bse_code, normalize_stock_code
+from data_provider.market_regime_adapter import MarketRegimeAdapter
 from data_provider.realtime_types import ChipDistribution
 from src.analyzer import (
     GeminiAnalyzer,
@@ -255,6 +256,8 @@ class StockAnalysisPipeline:
         # 初始化各模块
         self.db = get_db()
         self.fetcher_manager = DataFetcherManager()
+        self._market_regime_adapter = MarketRegimeAdapter()
+        self._run_market_regime: Dict[str, Any] = {}
         # 不再单独创建 akshare_fetcher，统一使用 fetcher_manager 获取增强数据
         self.trend_analyzer = StockTrendAnalyzer()  # 技术分析器
         self.analyzer = GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
@@ -1357,6 +1360,15 @@ class StockAnalysisPipeline:
             phase_name or "unknown",
             is_trading_day,
         )
+
+        effective_market = str(phase_ctx.get("market") or "").strip().lower()
+        if (
+            effective_market == "us"
+            or (context_code and is_us_stock_code(str(context_code)))
+        ):
+            regime_payload = getattr(self, "_run_market_regime", None)
+            if isinstance(regime_payload, dict) and regime_payload:
+                enhanced["market_regime"] = dict(regime_payload)
 
         # 添加趋势分析结果
         if trend_result:
@@ -3402,6 +3414,117 @@ class StockAnalysisPipeline:
 
         return context
     
+    def _prepare_market_regime_for_run(self, stock_codes: List[str]) -> None:
+        """Fetch US Market Regime once per batch and reuse it across US symbols."""
+        self._run_market_regime = {}
+        try:
+            has_us_target = any(
+                get_market_for_stock(code) == "us" or is_us_stock_code(code)
+                for code in (stock_codes or [])
+            )
+            if not has_us_target:
+                return
+
+            payload = self._market_regime_adapter.get_us_market_regime()
+            if isinstance(payload, dict):
+                self._run_market_regime = payload
+                logger.info(
+                    "[MarketRegime] run context ready: status=%s regime=%s confidence=%s",
+                    payload.get("status"),
+                    payload.get("regime"),
+                    payload.get("confidence"),
+                )
+        except Exception as exc:
+            logger.warning("[MarketRegime] 准备失败，按中性缺失继续: %s", exc)
+            self._run_market_regime = {
+                "status": "failed",
+                "regime": "unknown",
+                "confidence": "low",
+                "reason": str(exc)[:200],
+            }
+
+    def _log_backtest_eligibility_diagnostics(self) -> None:
+        """Read-only probe that explains why main.py auto-backtest may process 0 rows."""
+        if not getattr(self.config, "backtest_enabled", False):
+            return
+
+        try:
+            from src.services.backtest_service import BacktestService
+
+            service = BacktestService(db_manager=self.db)
+            min_age_days = int(getattr(self.config, "backtest_min_age_days", 14))
+            eval_window_days = int(
+                getattr(self.config, "backtest_eval_window_days", 10)
+            )
+            engine_version = str(
+                getattr(self.config, "backtest_engine_version", "v1")
+            )
+            probe_limit = 5000
+
+            common = {
+                "code": None,
+                "limit": probe_limit,
+                "eval_window_days": eval_window_days,
+                "engine_version": engine_version,
+                "analysis_date_from": None,
+                "analysis_date_to": None,
+            }
+
+            all_age_candidates = service._get_run_candidates(
+                min_age_days=0,
+                force=True,
+                **common,
+            )
+            age_eligible_candidates = service._get_run_candidates(
+                min_age_days=min_age_days,
+                force=True,
+                **common,
+            )
+            pending_candidates = service._get_run_candidates(
+                min_age_days=min_age_days,
+                force=False,
+                **common,
+            )
+
+            total = len(all_age_candidates)
+            age_eligible = len(age_eligible_candidates)
+            pending = len(pending_candidates)
+            too_new = max(total - age_eligible, 0)
+            already_backtested = max(age_eligible - pending, 0)
+
+            if pending > 0:
+                reason = "eligible_pending"
+            elif too_new > 0 and age_eligible == 0:
+                reason = "too_new"
+            elif already_backtested > 0:
+                reason = "already_backtested"
+            elif total == 0:
+                reason = "no_analysis_history"
+            else:
+                reason = "no_pending_candidate"
+
+            logger.info(
+                "[回测资格诊断] total_candidates=%s too_new=%s "
+                "age_eligible=%s pending=%s already_backtested=%s "
+                "min_age_days=%s eval_window_days=%s expected_reason=%s",
+                total,
+                too_new,
+                age_eligible,
+                pending,
+                already_backtested,
+                min_age_days,
+                eval_window_days,
+                reason,
+            )
+
+            if total >= probe_limit:
+                logger.warning(
+                    "[回测资格诊断] candidate probe reached limit=%s; counts may be truncated",
+                    probe_limit,
+                )
+        except Exception as exc:
+            logger.warning("[回测资格诊断] 只读诊断失败，忽略并继续: %s", exc)
+
     def process_single_stock(
         self,
         code: str,
@@ -3565,6 +3688,10 @@ class StockAnalysisPipeline:
         if not dry_run:
             self.fetcher_manager.prefetch_stock_names(stock_codes, use_bulk=False)
 
+        # Structured US Market Regime: one fetch per run, shared by all US symbols.
+        if not dry_run:
+            self._prepare_market_regime_for_run(stock_codes)
+
         # 单股推送模式（#55）：从配置读取
         single_stock_notify = getattr(self.config, 'single_stock_notify', False)
         # Issue #119: 从配置读取报告类型
@@ -3675,6 +3802,11 @@ class StockAnalysisPipeline:
             else:
                 self._send_notifications(results, report_type)
         
+        # main.py runs the real auto-backtest after pipeline.run() returns.
+        # This read-only probe makes a later processed=0 explainable.
+        if not dry_run:
+            self._log_backtest_eligibility_diagnostics()
+
         return results
 
     def _send_single_stock_notification(
