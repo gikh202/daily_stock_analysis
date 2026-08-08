@@ -1302,10 +1302,16 @@ class StockAnalysisPipeline:
             },
         }
 
+        context_code = (
+            context.get("code")
+            if isinstance(context, dict)
+            else None
+        ) or getattr(realtime_quote, "symbol", None) or stock_name or "unknown"
+
         logger.info(
             "[数据可用性] %s price=%s(%s) daily=%s tech_daily=%s "
             "tech_intraday=%s rvol=%s chip=%s",
-            code,
+            context_code,
             price_status,
             rt.get("source") or "unknown",
             daily_status,
