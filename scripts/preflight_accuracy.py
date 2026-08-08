@@ -8,8 +8,20 @@ from __future__ import annotations
 import ast
 import os
 import py_compile
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+
+# When this file is executed as:
+#     python scripts/preflight_accuracy.py
+# Python puts <repo>/scripts at sys.path[0], not necessarily <repo>.
+# Add the repository root explicitly so imports such as `import src.analyzer`
+# work identically in GitHub Actions and local runs.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+repo_root_str = str(REPO_ROOT)
+if repo_root_str not in sys.path:
+    sys.path.insert(0, repo_root_str)
 
 
 def _compile_critical_files(root: Path) -> None:
@@ -207,7 +219,7 @@ def _test_relative_strength_states() -> None:
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     _compile_critical_files(root)
 
     import src.analyzer  # noqa: F401
