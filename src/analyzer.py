@@ -900,13 +900,42 @@ def _mark_chip_structure_unavailable(result: "AnalysisResult", language: str) ->
     data_perspective["chip_unavailable_reason"] = get_chip_unavailable_text(language)
 
 
-def normalize_chip_structure_availability(result: "AnalysisResult", chip_data: Any) -> None:
-    """Fill valid chip metrics or collapse placeholder-only chip fields to one fallback line."""
+def _mark_chip_structure_disabled(result: "AnalysisResult", language: str) -> None:
+    """Mark an intentionally disabled optional feature without making it bearish."""
+    if not result or not isinstance(result.dashboard, dict):
+        return
+    data_perspective = result.dashboard.get("data_perspective")
+    if not isinstance(data_perspective, dict):
+        return
+    data_perspective["chip_structure"] = {}
+    normalized = normalize_report_language(language)
+    if normalized == "zh":
+        reason = "筹码分布功能已禁用；本项不参与评分，也不作为负面证据。"
+    elif normalized == "ko":
+        reason = "칩 분포 기능이 비활성화되어 있으며, 점수나 부정적 근거에 사용하지 않습니다."
+    else:
+        reason = (
+            "Chip distribution is disabled; this item is excluded from scoring "
+            "and is not bearish evidence."
+        )
+    data_perspective["chip_unavailable_reason"] = reason
+
+
+def normalize_chip_structure_availability(
+    result: "AnalysisResult",
+    chip_data: Any,
+    *,
+    feature_enabled: bool = True,
+) -> None:
+    """Normalize optional chip evidence without treating missing data as bearish."""
     if not result:
         return
     language = getattr(result, "report_language", "zh")
     if _has_meaningful_chip_data(chip_data):
         fill_chip_structure_if_needed(result, chip_data)
+        return
+    if not feature_enabled:
+        _mark_chip_structure_disabled(result, language)
         return
     _mark_chip_structure_unavailable(result, language)
 
@@ -2043,7 +2072,7 @@ class GeminiAnalyzer:
 - ✅ 多头排列：MA5 > MA10 > MA20
 - ✅ 低乖离率：<2%，最佳买点
 - ✅ 缩量回调或放量突破
-- ✅ 筹码集中健康
+- ✅ 若筹码数据可用则筹码结构健康；若功能禁用/市场不支持则该项不参与评分
 - ✅ 消息面有利好催化
 
 ### 买入（60-79分）：
@@ -2074,17 +2103,19 @@ class GeminiAnalyzer:
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
 5. **风险优先级**：舆情中的风险点要醒目标出
+6. **缺失证据中性化**：disabled/not_supported/unavailable 只表示证据缺口，不得自动扣分、不得写成利空、不得单独把买入降为观望
+7. **来源与质量分离**：provider/source 表示数据来自哪里；quality/status 表示数据是否可信，二者不得混为一谈
 
 ## 可操作性与稳定性约束
 
 - 不得仅因为单日涨跌或评分跨线就在“买入/卖出”之间剧烈切换。
-- 操作建议必须同时参考价格位置（支撑/压力位）、量能/筹码、主力资金流向和风险事件。
-- 股价位于支撑与压力之间、资金流不明确时，优先输出“持有/震荡/观望/洗盘观察”等可执行的中性建议；`decision_type` 仍保持 `hold`。
-- 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入；接近压力且资金流出时不得追买。
-- 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
+- 操作建议必须参考价格位置（支撑/压力位）、量能和风险事件；筹码、资金流仅在 available/complete 时参与判断，disabled/not_supported/unavailable 不得作为负面证据。
+- 股价位于支撑与压力之间且价格结构/量价确认本身不足时，可优先输出“持有/震荡/观望/洗盘观察”等中性建议；资金流 unavailable 不得单独触发降级。
+- 只有在接近支撑确认或有效突破压力，且可用量价证据支持时，才能给出买入；资金流仅在 available 时用于增强/削弱确认，真实资金流出且接近压力时不得追买。
+- 只有在跌破关键支撑、真实可用数据确认主力资金持续流出、或风险显著放大时，才能给出卖出/减仓；资金流不可用不能作为卖出依据。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
-- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
+- 盘前、非交易日或未知阶段不得伪造今日盘中走势；只有关键数据出现 stale/failed/inconsistent，或 partial 明确缺少当前决策所必需的核心字段时，才需要降低 `confidence_level`。disabled/not_supported/unavailable 的可选字段、非交易日天然缺失的盘中字段，以及仅 raw_source=fallback 但实际价格 provider 可用的情况，不得自动降低置信度。"""
 
     SYSTEM_PROMPT = """你是一位{market_placeholder}投资分析师，负责生成专业的【决策仪表盘】分析报告。
 
@@ -2260,17 +2291,19 @@ class GeminiAnalyzer:
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
 5. **风险优先级**：舆情中的风险点要醒目标出
+6. **缺失证据中性化**：disabled/not_supported/unavailable 只表示证据缺口，不得自动扣分、不得写成利空、不得单独把买入降为观望
+7. **来源与质量分离**：provider/source 表示数据来自哪里；quality/status 表示数据是否可信，二者不得混为一谈
 
 ## 可操作性与稳定性约束
 
 - 不得仅因为单日涨跌或评分跨线就在“买入/卖出”之间剧烈切换。
-- 操作建议必须同时参考价格位置（支撑/压力位）、量能/筹码、主力资金流向和风险事件。
-- 股价位于支撑与压力之间、资金流不明确时，优先输出“持有/震荡/观望/洗盘观察”等可执行的中性建议；`decision_type` 仍保持 `hold`。
-- 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入；接近压力且资金流出时不得追买。
-- 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
+- 操作建议必须参考价格位置（支撑/压力位）、量能和风险事件；筹码、资金流仅在 available/complete 时参与判断，disabled/not_supported/unavailable 不得作为负面证据。
+- 股价位于支撑与压力之间且价格结构/量价确认本身不足时，可优先输出“持有/震荡/观望/洗盘观察”等中性建议；资金流 unavailable 不得单独触发降级。
+- 只有在接近支撑确认或有效突破压力，且可用量价证据支持时，才能给出买入；资金流仅在 available 时用于增强/削弱确认，真实资金流出且接近压力时不得追买。
+- 只有在跌破关键支撑、真实可用数据确认主力资金持续流出、或风险显著放大时，才能给出卖出/减仓；资金流不可用不能作为卖出依据。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
-- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
+- 盘前、非交易日或未知阶段不得伪造今日盘中走势；只有关键数据出现 stale/failed/inconsistent，或 partial 明确缺少当前决策所必需的核心字段时，才需要降低 `confidence_level`。disabled/not_supported/unavailable 的可选字段、非交易日天然缺失的盘中字段，以及仅 raw_source=fallback 但实际价格 provider 可用的情况，不得自动降低置信度。"""
 
     TEXT_SYSTEM_PROMPT = """你是一位专业的股票分析助手。
 
@@ -3838,6 +3871,67 @@ class GeminiAnalyzer:
             prompt += market_structure_section
         if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
             prompt += analysis_context_pack_summary
+        data_availability = (
+            context.get("data_availability", {})
+            if isinstance(context, dict)
+            else {}
+        )
+        if isinstance(data_availability, dict) and data_availability:
+            def _availability_status(key: str) -> str:
+                block = data_availability.get(key, {})
+                return (
+                    str(block.get("status") or "unknown")
+                    if isinstance(block, dict)
+                    else "unknown"
+                )
+
+            price_block = data_availability.get("price", {})
+            price_source = (
+                price_block.get("source", "N/A")
+                if isinstance(price_block, dict)
+                else "N/A"
+            )
+            price_raw_source = (
+                price_block.get("raw_source", "N/A")
+                if isinstance(price_block, dict)
+                else "N/A"
+            )
+            price_fallback_from = (
+                price_block.get("fallback_from", "N/A")
+                if isinstance(price_block, dict)
+                else "N/A"
+            )
+            chip_block = data_availability.get("chip_distribution", {})
+            chip_reason = (
+                chip_block.get("reason", "N/A")
+                if isinstance(chip_block, dict)
+                else "N/A"
+            )
+
+            prompt += f"""
+## 数据可用性与质量语义
+
+| 数据项 | 状态 | 来源/原因 |
+|------|------|------|
+| 价格 | **{_availability_status('price')}** | source={price_source}; raw_source={price_raw_source}; fallback_from={price_fallback_from} |
+| 完整日线 | **{_availability_status('daily_bars')}** | 最近完整交易日数据 |
+| 日线技术分析 | **{_availability_status('technical_daily')}** | 均线/趋势等日线证据 |
+| 盘中技术覆盖 | **{_availability_status('technical_intraday')}** | 当前市场阶段决定是否需要 |
+| RVOL | **{_availability_status('rvol')}** | 完整日线量价确认 |
+| 实时量比 | **{_availability_status('intraday_volume_ratio')}** | 可选盘中字段 |
+| 换手率 | **{_availability_status('turnover_rate')}** | 可选字段 |
+| 筹码分布 | **{_availability_status('chip_distribution')}** | {chip_reason} |
+
+> 数据质量语义：
+> - `available` / `complete`：正常可用证据。
+> - `disabled`：功能主动关闭，本项不参与评分，不能写成“数据缺失导致置信度下降”。
+> - `not_supported` / `unavailable`：仅表示证据不可用，属于中性缺口；不得自动扣分、不得作为利空。
+> - `stale` / `failed` / `inconsistent`：才属于真正的数据质量风险，可以降低置信度。
+> - `partial` 必须明确具体缺失字段；若完整日线、日线技术和 RVOL 可用，而只缺非交易日盘中量比/换手率，不得把整个技术面称为“partial 降级”。
+> - `raw_source=fallback` 只是底层原始标签；当 `price.status=available` 且 `price.source` 是 yfinance/其他具体 provider 时，禁止描述为“实时行情 fallback 降级”。
+> - 非交易日没有盘中覆盖是市场阶段事实，不等于抓取失败。
+"""
+
         prompt += f"""
 
 ## 📈 技术面数据
@@ -3864,6 +3958,7 @@ class GeminiAnalyzer:
 | 指标 | 数值 | 解读 |
 |------|------|------|
 | 当前价格 | {rt.get('price', 'N/A')} 元 | |
+| 行情来源 | {rt.get('source', 'N/A')} | 具体 provider；raw_source={rt.get('raw_source', 'N/A')} |
 | **量比** | **{rt.get('volume_ratio', 'N/A')}** | {rt.get('volume_ratio_desc', '')} |
 | **换手率** | **{rt.get('turnover_rate', 'N/A')}%** | |
 | 市盈率(动态) | {rt.get('pe_ratio', 'N/A')} | |
