@@ -15,6 +15,7 @@
 """
 
 import logging
+import os
 import random
 import time
 from threading import BoundedSemaphore, RLock, Thread
@@ -740,6 +741,11 @@ class DataFetcherManager:
         self._fetcher_call_locks_lock = RLock()
         self._stock_name_cache: Dict[str, str] = {}
         self._stock_name_cache_lock = RLock()
+        # Very short successful-quote reuse cache. This is not a market-data
+        # cache for minutes/hours; it only prevents duplicate HTTP calls inside
+        # one analysis pass (e.g. pipeline quote + fundamental valuation).
+        self._realtime_quote_reuse_cache: Dict[str, Tuple[float, Any]] = {}
+        self._realtime_quote_reuse_cache_lock = RLock()
         
         if fetchers:
             # 按优先级排序
@@ -774,6 +780,16 @@ class DataFetcherManager:
             self._stock_name_cache = {}
         if not hasattr(self, "_stock_name_cache_lock") or self._stock_name_cache_lock is None:
             self._stock_name_cache_lock = RLock()
+        if (
+            not hasattr(self, "_realtime_quote_reuse_cache")
+            or self._realtime_quote_reuse_cache is None
+        ):
+            self._realtime_quote_reuse_cache = {}
+        if (
+            not hasattr(self, "_realtime_quote_reuse_cache_lock")
+            or self._realtime_quote_reuse_cache_lock is None
+        ):
+            self._realtime_quote_reuse_cache_lock = RLock()
 
     def _get_fetchers_snapshot(self) -> List[BaseFetcher]:
         self._ensure_concurrency_guards()
@@ -1826,6 +1842,74 @@ class DataFetcherManager:
         setattr(quote, "is_stale", stale_seconds > int(ttl))
         return quote
     
+    @staticmethod
+    def _realtime_quote_reuse_ttl_seconds() -> float:
+        """Short same-run quote reuse TTL; default 30s, 0 disables."""
+        raw = os.getenv("REALTIME_QUOTE_REUSE_TTL_SECONDS", "30")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 30.0
+        return max(0.0, min(value, 300.0))
+
+    def _get_reused_realtime_quote(self, stock_code: str):
+        self._ensure_concurrency_guards()
+        ttl = self._realtime_quote_reuse_ttl_seconds()
+        if ttl <= 0:
+            return None
+
+        key = normalize_stock_code(stock_code)
+        now = time.monotonic()
+        with self._realtime_quote_reuse_cache_lock:
+            cached = self._realtime_quote_reuse_cache.get(key)
+            if cached is None:
+                return None
+            cached_at, quote = cached
+            age = max(0.0, now - float(cached_at))
+            if age > ttl:
+                self._realtime_quote_reuse_cache.pop(key, None)
+                return None
+
+        logger.info(
+            "[实时行情缓存] %s 命中同轮复用缓存 age=%.2fs ttl=%.0fs",
+            key,
+            age,
+            ttl,
+        )
+        return quote
+
+    def _store_reused_realtime_quote(self, stock_code: str, quote):
+        if quote is None:
+            return None
+        self._ensure_concurrency_guards()
+        ttl = self._realtime_quote_reuse_ttl_seconds()
+        if ttl <= 0:
+            return quote
+        key = normalize_stock_code(stock_code)
+        with self._realtime_quote_reuse_cache_lock:
+            self._realtime_quote_reuse_cache[key] = (
+                time.monotonic(),
+                quote,
+            )
+        return quote
+
+    def _finalize_realtime_quote(
+        self,
+        stock_code: str,
+        quote,
+        *,
+        fallback_from: Optional[str] = None,
+        provider_source: Optional[str] = None,
+        realtime_cache_ttl: Optional[int] = None,
+    ):
+        enriched = self._enrich_realtime_quote(
+            quote,
+            fallback_from=fallback_from,
+            provider_source=provider_source,
+            realtime_cache_ttl=realtime_cache_ttl,
+        )
+        return self._store_reused_realtime_quote(stock_code, enriched)
+
     def get_realtime_quote(self, stock_code: str, *, log_final_failure: bool = True):
         """
         获取实时行情数据（自动故障切换）
@@ -1861,6 +1945,10 @@ class DataFetcherManager:
             logger.debug(f"[实时行情] 功能已禁用，跳过 {stock_code}")
             return None
 
+        reused_quote = self._get_reused_realtime_quote(stock_code)
+        if reused_quote is not None:
+            return reused_quote
+
         # ----------------------------------------------------------
         # 美股 (指数 + 个股) / 港股 — 专用双源路由
         #   配置长桥后: Longbridge 首选, YFinance/AkShare 补充
@@ -1879,7 +1967,8 @@ class DataFetcherManager:
             quote = self._try_fetcher_quote(stock_code, "YfinanceFetcher")
             if quote is not None:
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: YfinanceFetcher)")
-                return self._enrich_realtime_quote(
+                return self._finalize_realtime_quote(
+                    stock_code,
                     quote,
                     provider_source="yfinance",
                     realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
@@ -1923,7 +2012,8 @@ class DataFetcherManager:
                         stock_code, primary_quote, extra_src,
                     )
             if primary_quote is not None:
-                return self._enrich_realtime_quote(
+                return self._finalize_realtime_quote(
+                    stock_code,
                     primary_quote,
                     fallback_from=fallback_from,
                     provider_source=provider_source,
@@ -2035,7 +2125,8 @@ class DataFetcherManager:
                         logger.info(f"[实时行情] {stock_code} 成功获取 (来源: {source})")
                         # If all key supplementary fields are present, return early
                         if not self._quote_needs_supplement(primary_quote):
-                            return self._enrich_realtime_quote(
+                            return self._finalize_realtime_quote(
+                                stock_code,
                                 primary_quote,
                                 fallback_from=primary_fallback_from,
                                 provider_source=primary_provider_source,
@@ -2092,7 +2183,8 @@ class DataFetcherManager:
         
         # Return primary even if some fields are still missing
         if primary_quote is not None:
-            return self._enrich_realtime_quote(
+            return self._finalize_realtime_quote(
+                stock_code,
                 primary_quote,
                 fallback_from=primary_fallback_from,
                 provider_source=primary_provider_source,
