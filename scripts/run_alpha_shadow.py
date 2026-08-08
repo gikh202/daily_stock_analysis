@@ -4,9 +4,10 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,57 @@ def _parse_json_object(value: Any) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _latest_alpha_board(store: AlphaShadowStore) -> List[Dict[str, Any]]:
+    """Latest decision per symbol, ranked for a trader's attention queue."""
+    with store.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.*
+            FROM alpha_signals s
+            JOIN (
+                SELECT code, MAX(id) AS max_id
+                FROM alpha_signals
+                GROUP BY code
+            ) latest ON latest.max_id=s.id
+            ORDER BY
+                CASE s.decision
+                    WHEN 'BUY_SETUP' THEN 0
+                    WHEN 'WATCH' THEN 1
+                    WHEN 'WAIT' THEN 2
+                    WHEN 'AVOID' THEN 3
+                    ELSE 4
+                END,
+                COALESCE(s.opportunity_score, -1) DESC,
+                COALESCE(s.risk_score, 101) ASC,
+                s.code ASC
+            """
+        ).fetchall()
+
+    board: List[Dict[str, Any]] = []
+    for row in rows:
+        plan = _parse_json_object(row["trade_plan_json"])
+        board.append(
+            {
+                "code": row["code"],
+                "analysis_created_at": row["analysis_created_at"],
+                "decision": row["decision"],
+                "quality_score": row["quality_score"],
+                "opportunity_score": row["opportunity_score"],
+                "risk_score": row["risk_score"],
+                "confidence": row["confidence"],
+                "market_regime": row["market_regime"],
+                "entry_zone": plan.get("entry_zone"),
+                "stop_loss": plan.get("stop_loss"),
+                "targets": plan.get("targets") or [],
+                "risk_reward": plan.get("risk_reward"),
+                "max_position_pct": plan.get("max_position_pct", 0.0),
+                "confirmations": plan.get("confirmations") or [],
+                "invalidation": plan.get("invalidation") or [],
+            }
+        )
+    return board
+
+
 def _write_report(
     report_dir: Path,
     *,
@@ -49,12 +101,14 @@ def _write_report(
     report_dir.mkdir(parents=True, exist_ok=True)
     scorecard = store.scorecard(min_samples=5)
     counts = store.counts()
+    board = _latest_alpha_board(store)
     payload = {
         "engine_version": ENGINE_VERSION,
         "schema_version": ALPHA_SCHEMA_VERSION,
         "feature_adapter_version": AlphaFeatureAdapter.version,
         "counts": counts,
         "run": run_stats,
+        "alpha_board": board,
         "scorecard": scorecard,
     }
     (report_dir / "latest.json").write_text(
@@ -72,13 +126,63 @@ def _write_report(
         f"- New signals this run: **{run_stats.get('new_signals', 0)}**",
         f"- New outcomes this run: **{run_stats.get('new_outcomes', 0)}**",
         "",
-        "## Scorecard",
+        "## Alpha Board",
         "",
-        "> Shadow results are descriptive only. No weights or production actions are changed automatically.",
+        "> Ranked attention queue only. V5 remains shadow-only and does not place orders or overwrite V4 advice.",
         "",
-        "| Decision | Regime | Horizon | N | Mature | Avg Return | Hit Rate | Avg MFE | Avg MAE |",
-        "|---|---|---:|---:|---|---:|---:|---:|---:|",
+        "| Symbol | Decision | Opportunity | Risk | Evidence | Regime | R:R | Max Position |",
+        "|---|---|---:|---:|---:|---|---:|---:|",
     ]
+    for item in board:
+        def number(value: Any) -> str:
+            return "N/A" if value is None else f"{float(value):.1f}"
+
+        rr = "N/A" if item.get("risk_reward") is None else f"{float(item['risk_reward']):.2f}R"
+        max_position = 100.0 * float(item.get("max_position_pct") or 0.0)
+        lines.append(
+            "| {code} | {decision} | {opportunity} | {risk} | {confidence:.0f}% | {regime} | {rr} | {position:.1f}% |".format(
+                code=item.get("code") or "-",
+                decision=item.get("decision") or "-",
+                opportunity=number(item.get("opportunity_score")),
+                risk=number(item.get("risk_score")),
+                confidence=100.0 * float(item.get("confidence") or 0.0),
+                regime=item.get("market_regime") or "unknown",
+                rr=rr,
+                position=max_position,
+            )
+        )
+    if not board:
+        lines.append("| - | WAIT | N/A | N/A | 0% | unknown | N/A | 0% |")
+
+    for item in board:
+        if item.get("decision") not in {"BUY_SETUP", "WATCH"}:
+            continue
+        lines.extend(
+            [
+                "",
+                f"### {item['code']} — {item['decision']}",
+                "",
+                f"- Entry zone: `{item.get('entry_zone') or 'N/A'}`",
+                f"- Stop: `{item.get('stop_loss') or 'N/A'}`",
+                f"- Targets: `{item.get('targets') or 'N/A'}`",
+                f"- R:R: `{item.get('risk_reward') if item.get('risk_reward') is not None else 'N/A'}`",
+                f"- Max position: `{100.0 * float(item.get('max_position_pct') or 0.0):.1f}%`",
+                f"- Confirmations: `{item.get('confirmations') or 'N/A'}`",
+                f"- Invalidation: `{item.get('invalidation') or 'N/A'}`",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Scorecard",
+            "",
+            "> Shadow results are descriptive only. No weights or production actions are changed automatically.",
+            "",
+            "| Decision | Regime | Horizon | N | Mature | Avg Return | Hit Rate | Avg MFE | Avg MAE |",
+            "|---|---|---:|---:|---|---:|---:|---:|---:|",
+        ]
+    )
     for bucket in scorecard.get("buckets", []):
         def pct(value: Any) -> str:
             return "N/A" if value is None else f"{float(value):.2f}%"
@@ -133,7 +237,7 @@ def run(
             atr=adapted.atr,
         )
 
-        # A baseline price is required for honest outcome maturation.  Persisting
+        # A baseline price is required for honest outcome maturation. Persisting
         # a signal without one would create a permanently unevaluable record.
         if adapted.current_price is None or adapted.current_price <= 0:
             skipped_unusable += 1
