@@ -1993,9 +1993,9 @@ class GeminiAnalyzer:
         },
 
         "intelligence": {
-            "latest_news": "【最新消息】近期重要新闻摘要",
-            "risk_alerts": ["风险点1：具体描述", "风险点2：具体描述"],
-            "positive_catalysts": ["利好1：具体描述", "利好2：具体描述"],
+            "latest_news": "2026-08-07 近期重要新闻摘要 [E01]",
+            "risk_alerts": ["2026-08-07 风险点：具体描述 [E02]"],
+            "positive_catalysts": ["2026-08-07 利好点：具体描述 [E03]"],
             "earnings_outlook": "业绩预期分析（基于年报预告、业绩快报等）",
             "sentiment_summary": "舆情情绪一句话总结"
         },
@@ -2183,9 +2183,9 @@ class GeminiAnalyzer:
         },
 
         "intelligence": {
-            "latest_news": "【最新消息】近期重要新闻摘要",
-            "risk_alerts": ["风险点1：具体描述", "风险点2：具体描述"],
-            "positive_catalysts": ["利好1：具体描述", "利好2：具体描述"],
+            "latest_news": "2026-08-07 近期重要新闻摘要 [E01]",
+            "risk_alerts": ["2026-08-07 风险点：具体描述 [E02]"],
+            "positive_catalysts": ["2026-08-07 利好点：具体描述 [E03]"],
             "earnings_outlook": "业绩预期分析（基于年报预告、业绩快报等）",
             "sentiment_summary": "舆情情绪一句话总结"
         },
@@ -3741,6 +3741,11 @@ class GeminiAnalyzer:
                 result.model_used = model_used
                 result.report_language = report_language
                 normalize_chip_structure_availability(result, context.get("chip"))
+                self._audit_news_evidence_references(
+                    result,
+                    news_context,
+                    code=code,
+                )
 
                 # 内容完整性校验（可选）
                 if not config.report_integrity_enabled:
@@ -3813,6 +3818,113 @@ class GeminiAnalyzer:
                 report_language=report_language,
             )
     
+    @staticmethod
+    def _extract_available_evidence_ids(
+        news_context: Optional[str],
+    ) -> List[str]:
+        if not news_context:
+            return []
+        return sorted(
+            set(re.findall(r"\[(E\d{2,3})\]", news_context))
+        )
+
+    @classmethod
+    def _audit_news_evidence_references(
+        cls,
+        result: "AnalysisResult",
+        news_context: Optional[str],
+        *,
+        code: str,
+    ) -> None:
+        """Audit Evidence-ID compliance without changing action or score."""
+        available_ids = set(
+            cls._extract_available_evidence_ids(news_context)
+        )
+        if not available_ids:
+            logger.info(
+                "[新闻证据审计] %s available=0 cited=0 "
+                "missing_ref_fields=0",
+                code,
+            )
+            return
+
+        intelligence: Dict[str, Any] = {}
+        dashboard = getattr(result, "dashboard", None)
+        if isinstance(dashboard, dict):
+            candidate = dashboard.get("intelligence")
+            if isinstance(candidate, dict):
+                intelligence = candidate
+
+        fields = {
+            "latest_news": intelligence.get("latest_news"),
+            "risk_alerts": intelligence.get("risk_alerts"),
+            "positive_catalysts": intelligence.get(
+                "positive_catalysts"
+            ),
+        }
+
+        cited_ids = set()
+        missing_ref_fields: List[str] = []
+        no_evidence_phrases = (
+            "暂无",
+            "未发现",
+            "无重大",
+            "无明显",
+            "无相关",
+            "none",
+            "no material",
+            "no significant",
+        )
+
+        for field_name, value in fields.items():
+            if isinstance(value, (list, tuple, set)):
+                entries = [
+                    str(x).strip()
+                    for x in value
+                    if str(x).strip()
+                ]
+            else:
+                value_text = str(value or "").strip()
+                entries = [value_text] if value_text else []
+
+            field_has_claim = False
+            field_has_ref = False
+
+            for entry in entries:
+                lowered = entry.lower()
+                if any(
+                    phrase in lowered
+                    for phrase in no_evidence_phrases
+                ):
+                    continue
+
+                field_has_claim = True
+                refs = set(
+                    re.findall(r"\[(E\d{2,3})\]", entry)
+                )
+                valid_refs = refs & available_ids
+                if valid_refs:
+                    field_has_ref = True
+                    cited_ids.update(valid_refs)
+
+            if field_has_claim and not field_has_ref:
+                missing_ref_fields.append(field_name)
+
+        log_fn = (
+            logger.warning
+            if missing_ref_fields
+            else logger.info
+        )
+        log_fn(
+            "[新闻证据审计] %s available=%s cited=%s "
+            "missing_ref_fields=%s fields=%s",
+            code,
+            len(available_ids),
+            len(cited_ids),
+            len(missing_ref_fields),
+            missing_ref_fields,
+        )
+
     def _format_prompt(
         self, 
         context: Dict[str, Any], 
@@ -4423,14 +4535,27 @@ class GeminiAnalyzer:
 """
         if news_context:
             prompt += f"""
-以下是 **{stock_name}({code})** 近{news_window_days}日的新闻搜索结果，请重点提取：
-1. 🚨 **风险警报**：减持、处罚、利空
-2. 🎯 **利好催化**：业绩、合同、政策
-3. 📊 **业绩预期**：年报预告、业绩快报
-4. 🕒 **时间规则（强制）**：
-   - 输出到 `risk_alerts` / `positive_catalysts` / `latest_news` 的每一条都必须带具体日期（YYYY-MM-DD）
-   - 超出近{news_window_days}日窗口的新闻一律忽略
-   - 时间未知、无法确定发布日期的新闻一律忽略
+以下是 **{stock_name}({code})** 的去重后【新闻证据链】。每条唯一证据都有 `[E01]`、`[E02]` 等 Evidence ID。
+
+请严格区分两类证据：
+1. `scope=fresh`
+   - 用于 `latest_news` / `risk_alerts` / `positive_catalysts`
+   - 必须有具体发布日期，并处于近{news_window_days}日窗口内
+2. `scope=analytical`
+   - 允许来自较长窗口的机构分析、财报背景、ETF/指数研究、持仓配置等
+   - 可用于 `earnings_outlook` / `fundamental_analysis` / `sector_position` 等背景判断
+   - 不得把旧分析报告描述成近{news_window_days}日最新事件、催化或风险
+
+### 新闻证据规则（强制）
+- `risk_alerts` / `positive_catalysts` / `latest_news` 中每一个新闻事实必须同时包含：
+  - 日期 `YYYY-MM-DD`
+  - 至少一个 Evidence ID，例如 `[E03]`
+- 证据链中不存在的事实，不得自行补充、猜测或当作已确认新闻。
+- 同一个 Evidence ID 即使命中多个搜索维度，也只能算 **一个独立事件**，严禁重复计权。
+- `scope=analytical` 的旧资料只能作为背景，不得直接充当近期催化/近期风险。
+- 时间未知的证据不得进入 `latest_news` / `risk_alerts` / `positive_catalysts`。
+- 搜索超时或某维度无结果只是中性证据缺口，不能自动降低股票评分。
+- 若没有满足条件的近期 Evidence，对应字段输出“暂无已验证的近期证据”，不要编造内容。
 
 ```
 {news_context}
@@ -4501,6 +4626,8 @@ class GeminiAnalyzer:
 - **具体狙击点位**：买入价、止损价、目标价（精确到分）
 - **检查清单**：每项用 ✅/⚠️/❌ 标记
 - **消息面时间合规**：`latest_news`、`risk_alerts`、`positive_catalysts` 不得包含超出近{news_window_days}日或时间未知的信息
+- **新闻证据可追溯**：上述三个字段中的每个新闻事实必须引用 `[E##]`；没有 Evidence ID 支撑的搜索新闻不得作为已确认事实
+- **去重证据不得重复计权**：相同 `[E##]` 即使关联多个维度，也只能计作一个独立新闻事件
 - **财报事件合规**：若结构化财报事件显示距离财报 ≤ 7 天，必须明确披露事件不确定性；财报临近不是利空，不得机械扣分或强制看空
 - **财报数据防幻觉**：只允许引用上方结构化表格中明确提供的财报日期、EPS、Surprise、EPS revisions、营收预期数值；缺失字段必须写“数据不可用”
 - **技术面一致性**：严禁把“空头排列”和“多头排列”等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”
