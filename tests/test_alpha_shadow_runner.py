@@ -94,6 +94,18 @@ def test_shadow_runner_is_end_to_end_and_idempotent(tmp_path):
     assert (reports / "latest.json").is_file()
     assert (reports / "latest.md").is_file()
 
+    payload = json.loads((reports / "latest.json").read_text(encoding="utf-8"))
+    assert payload["alpha_board"]
+    board_item = payload["alpha_board"][0]
+    assert board_item["code"] == "GOOGL"
+    assert board_item["decision"] in {"BUY_SETUP", "WATCH", "WAIT", "AVOID"}
+    assert "max_position_pct" in board_item
+    assert "risk_reward" in board_item
+
+    markdown = (reports / "latest.md").read_text(encoding="utf-8")
+    assert "## Alpha Board" in markdown
+    assert "GOOGL" in markdown
+
     second = run(
         stock_db_path=str(stock_db),
         alpha_db_path=str(alpha_db),
