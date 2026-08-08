@@ -52,11 +52,11 @@ jobs:
             src/alpha_engine/shadow_store.py \
             scripts/run_alpha_shadow.py
 
-      - name: Run Alpha tests
+      - name: Run isolated Alpha tests
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: >-
-          pytest -q
+          pytest -q --noconftest
           tests/test_alpha_engine.py
           tests/test_alpha_features.py
           tests/test_alpha_portfolio.py
