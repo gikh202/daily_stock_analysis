@@ -200,6 +200,20 @@ class MarketRegimeAdapter:
             return None
         return round(target_return - benchmark_return, 2)
 
+    @staticmethod
+    def _relative_strength_state(
+        horizon_20: Optional[float],
+        horizon_60: Optional[float],
+    ) -> str:
+        """Classify medium-term excess-return state for one benchmark."""
+        if horizon_20 is None or horizon_60 is None:
+            return "unknown"
+        if horizon_20 > 0 and horizon_60 > 0:
+            return "outperform"
+        if horizon_20 < 0 and horizon_60 < 0:
+            return "underperform"
+        return "mixed"
+
     def _classify_breadth(
         self,
         components: Dict[str, Dict[str, Any]],
@@ -487,23 +501,15 @@ class MarketRegimeAdapter:
         rs60 = horizons.get("60d", {})
         rs20_spy = self._safe_float(rs20.get("excess_vs_spy_pct"))
         rs60_spy = self._safe_float(rs60.get("excess_vs_spy_pct"))
+        rs20_qqq = self._safe_float(rs20.get("excess_vs_qqq_pct"))
+        rs60_qqq = self._safe_float(rs60.get("excess_vs_qqq_pct"))
 
-        if (
-            rs20_spy is not None
-            and rs60_spy is not None
-            and rs20_spy > 0
-            and rs60_spy > 0
-        ):
-            rs_state = "outperform"
-        elif (
-            rs20_spy is not None
-            and rs60_spy is not None
-            and rs20_spy < 0
-            and rs60_spy < 0
-        ):
-            rs_state = "underperform"
-        else:
-            rs_state = "mixed"
+        rs_vs_spy_state = self._relative_strength_state(rs20_spy, rs60_spy)
+        rs_vs_qqq_state = self._relative_strength_state(rs20_qqq, rs60_qqq)
+
+        # Backward-compatible broad-market state remains SPY-based.  The new
+        # QQQ state removes ambiguity for growth/technology names.
+        rs_state = rs_vs_spy_state
 
         if market_regime is None:
             market_regime = self.get_us_market_regime()
@@ -518,6 +524,8 @@ class MarketRegimeAdapter:
             ),
             "horizons": horizons,
             "relative_strength_state": rs_state,
+            "relative_strength_vs_spy_state": rs_vs_spy_state,
+            "relative_strength_vs_qqq_state": rs_vs_qqq_state,
             "realized_vol_20d_pct": self._realized_volatility_20d(target),
             "market_breadth": (
                 dict(market_regime.get("market_breadth", {}))
@@ -582,6 +590,8 @@ class MarketRegimeAdapter:
                     "source": "yfinance",
                     "as_of": datetime.now(timezone.utc).isoformat(),
                     "relative_strength_state": "unknown",
+                    "relative_strength_vs_spy_state": "unknown",
+                    "relative_strength_vs_qqq_state": "unknown",
                     "horizons": {},
                     "reason": f"{type(exc).__name__}: {str(exc)[:200]}",
                     "duration_ms": int(
@@ -655,6 +665,8 @@ class MarketRegimeAdapter:
                 "source": "yfinance",
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "relative_strength_state": "unknown",
+                "relative_strength_vs_spy_state": "unknown",
+                "relative_strength_vs_qqq_state": "unknown",
                 "horizons": {},
                 "reason": f"{type(exc).__name__}: {str(exc)[:200]}",
                 "duration_ms": int(
