@@ -3901,11 +3901,17 @@ class SearchService:
             if item.relevance_category in direct_categories
             or (item.relevance_score or 0) > 0
         ]
-        if meaningful_candidates:
-            dropped_zero_relevance = len(candidates) - len(meaningful_candidates)
-            filtered_results = meaningful_candidates
-        else:
-            filtered_results = candidates
+        # Accuracy first: zero-relevance results are never reintroduced merely
+        # to fill a quota.  An empty dimension is a neutral evidence gap and is
+        # safer than feeding unrelated sector/macro filler to the LLM.
+        dropped_zero_relevance = len(candidates) - len(meaningful_candidates)
+        filtered_results = meaningful_candidates
+
+        if not filtered_results and candidates:
+            logger.info(
+                "[新闻准入] %s: 所有候选均为零相关度，按中性证据缺口返回空结果",
+                log_scope,
+            )
 
         if dropped_low_quality or dropped_adult_spam or dropped_zero_relevance:
             logger.info(
@@ -4906,6 +4912,18 @@ class SearchService:
     def _evidence_dimension_priority(cls, dimension: str) -> int:
         return cls._EVIDENCE_DIMENSION_PRIORITY.get(str(dimension or ""), 50)
 
+    @staticmethod
+    def _evidence_date_rank(value: Any) -> int:
+        """Return YYYYMMDD integer for newest-first evidence ordering."""
+        text = str(value or "").strip()
+        match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", text)
+        if not match:
+            return 0
+        try:
+            return int("".join(match.groups()))
+        except (TypeError, ValueError):
+            return 0
+
     @classmethod
     def _deduplicate_intelligence_results(
         cls,
@@ -5019,7 +5037,7 @@ class SearchService:
             key=lambda row: (
                 cls._evidence_dimension_priority(row["primary_dimension"]),
                 -row["max_score"],
-                row["published_date"],
+                -cls._evidence_date_rank(row["published_date"]),
                 (row["representative"].title or "").lower(),
             )
         )
