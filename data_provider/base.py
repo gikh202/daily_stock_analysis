@@ -512,6 +512,21 @@ class BaseFetcher(ABC):
             # Step 4: 计算技术指标
             df = self._calculate_indicators(df)
 
+            # 便于 GitHub Actions 验证量价特征是否真正生成
+            if not df.empty:
+                latest = df.iloc[-1]
+                logger.info(
+                    "[量价特征] %s %s RVOL5=%s RVOL20=%s "
+                    "量能5日趋势=%s%% 短期vs20日=%s%% 成交额代理=%s",
+                    stock_code,
+                    latest.get("date"),
+                    latest.get("rvol5"),
+                    latest.get("rvol20"),
+                    latest.get("volume_trend_5d_pct"),
+                    latest.get("volume_trend_vs20_pct"),
+                    latest.get("dollar_volume_proxy"),
+                )
+
             elapsed = time.time() - request_start
             logger.info(
                 f"[{self.name}] {stock_code} 获取成功: 范围={start_date} ~ {end_date}, "
@@ -560,34 +575,109 @@ class BaseFetcher(ABC):
     
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        计算技术指标
-        
-        计算指标：
-        - MA5, MA10, MA20: 移动平均线
-        - Volume_Ratio: 量比（今日成交量 / 5日平均成交量）
+        计算技术指标。
+
+        价格指标：
+        - ma5 / ma10 / ma20
+
+        量价指标：
+        - volume_ratio / rvol5:
+          当日成交量 ÷ 前 5 个交易日平均成交量
+        - rvol20:
+          当日成交量 ÷ 前 20 个交易日平均成交量
+        - volume_ma5 / volume_ma20:
+          5 日、20 日平均成交量
+        - volume_trend_5d_pct:
+          最近 5 日平均成交量相对“再前 5 日”平均成交量的变化率
+        - volume_trend_vs20_pct:
+          最近 5 日平均成交量相对 20 日平均成交量的偏离率
+        - dollar_volume_proxy:
+          收盘价 × 成交量。用于美股流动性/成交活跃度比较，
+          是美元成交额近似值，不等同于逐笔成交额精确求和。
+
+        注意：
+        volume_ratio 保留原项目字段名与原口径，避免影响现有下游逻辑；
+        rvol5 是它的显式别名。
         """
         df = df.copy()
-        
+
+        # 数值化，避免部分数据源返回字符串导致 rolling 计算异常
+        for col in ('close', 'volume'):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
         # 移动平均线
         df['ma5'] = df['close'].rolling(window=5, min_periods=1).mean()
         df['ma10'] = df['close'].rolling(window=10, min_periods=1).mean()
         df['ma20'] = df['close'].rolling(window=20, min_periods=1).mean()
-        
-        # 量比：当日成交量 / 5日平均成交量
-        # 注意：此处的 volume_ratio 是“日线成交量 / 前5日均量(shift 1)”的相对倍数，
-        # 与部分交易软件口径的“分时量比（同一时刻对比）”不同，含义更接近“放量倍数”。
-        # 该行为目前保留（按需求不改逻辑）。
-        avg_volume_5 = df['volume'].rolling(window=5, min_periods=1).mean()
-        df['volume_ratio'] = df['volume'] / avg_volume_5.shift(1)
-        df['volume_ratio'] = df['volume_ratio'].fillna(1.0)
-        
-        # 保留2位小数
-        for col in ['ma5', 'ma10', 'ma20', 'volume_ratio']:
+
+        volume = df['volume'].replace(0, np.nan)
+
+        # 当前 5/20 日平均成交量
+        df['volume_ma5'] = volume.rolling(window=5, min_periods=1).mean()
+        df['volume_ma20'] = volume.rolling(window=20, min_periods=1).mean()
+
+        # RVOL 使用“前 N 日”均量，避免今日成交量进入分母稀释信号
+        prev_volume_ma5 = volume.rolling(window=5, min_periods=3).mean().shift(1)
+        prev_volume_ma20 = volume.rolling(window=20, min_periods=10).mean().shift(1)
+
+        df['rvol5'] = volume / prev_volume_ma5
+        df['rvol20'] = volume / prev_volume_ma20
+
+        # 保留原项目 volume_ratio 字段，等价于 RVOL5。
+        # 早期样本不足时沿用旧行为：1.0 表示中性。
+        df['volume_ratio'] = df['rvol5'].fillna(1.0)
+
+        # 成交量趋势：最近 5 日均量 vs 再前 5 日均量
+        previous_5d_avg = df['volume_ma5'].shift(5)
+        df['volume_trend_5d_pct'] = (
+            (df['volume_ma5'] / previous_5d_avg - 1.0) * 100.0
+        )
+
+        # 短期量能相对 20 日基准
+        df['volume_trend_vs20_pct'] = (
+            (df['volume_ma5'] / df['volume_ma20'] - 1.0) * 100.0
+        )
+
+        # 美股日成交额近似（USD）：close * volume
+        # 使用 proxy 命名，避免误认为逐笔成交额精确求和。
+        df['dollar_volume_proxy'] = df['close'] * volume
+
+        # 清理无穷值，避免后续 JSON/LLM 上下文出现 inf
+        feature_cols = [
+            'rvol5',
+            'rvol20',
+            'volume_ratio',
+            'volume_ma5',
+            'volume_ma20',
+            'volume_trend_5d_pct',
+            'volume_trend_vs20_pct',
+            'dollar_volume_proxy',
+        ]
+        for col in feature_cols:
+            if col in df.columns:
+                df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+
+        # 展示型指标保留 2 位；成交量/成交额代理保留整数
+        for col in [
+            'ma5',
+            'ma10',
+            'ma20',
+            'volume_ratio',
+            'rvol5',
+            'rvol20',
+            'volume_trend_5d_pct',
+            'volume_trend_vs20_pct',
+        ]:
             if col in df.columns:
                 df[col] = df[col].round(2)
-        
+
+        for col in ['volume_ma5', 'volume_ma20', 'dollar_volume_proxy']:
+            if col in df.columns:
+                df[col] = df[col].round(0)
+
         return df
-    
+
     @staticmethod
     def random_sleep(min_seconds: float = 1.0, max_seconds: float = 3.0) -> None:
         """
