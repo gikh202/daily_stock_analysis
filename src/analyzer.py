@@ -13,6 +13,7 @@ A股自选股智能分析系统 - AI分析层
 import json
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -3135,8 +3136,34 @@ class GeminiAnalyzer:
         requested_temperature = generation_config.get('temperature', 0.7)
         requested_timeout = generation_config.get("timeout")
 
-        models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
-        models_to_try = [m for m in models_to_try if m]
+        configured_fallback_models = list(
+            getattr(config, "litellm_fallback_models", []) or []
+        )
+        env_fallback_models = [
+            item.strip()
+            for item in os.getenv("LITELLM_FALLBACK_MODELS", "").split(",")
+            if item.strip()
+        ]
+
+        # Config 理论上应当已经解析 LITELLM_FALLBACK_MODELS。
+        # 这里额外读取环境变量作为保险，避免 workflow 明明配置了 fallback，
+        # 但运行时 Config 没有正确透传，导致始终只重试主模型。
+        fallback_models: List[str] = []
+        for candidate in configured_fallback_models + env_fallback_models:
+            if candidate and candidate != config.litellm_model and candidate not in fallback_models:
+                fallback_models.append(candidate)
+
+        models_to_try = [
+            model
+            for model in [config.litellm_model, *fallback_models]
+            if model
+        ]
+
+        logger.info(
+            "[LLM故障转移] 调用计划: primary=%s, fallbacks=%s",
+            config.litellm_model,
+            fallback_models or [],
+        )
 
         use_channel_router = self._has_channel_config(config)
 
@@ -3146,9 +3173,21 @@ class GeminiAnalyzer:
         last_usage: Dict[str, Any] = {}
         effective_system_prompt = system_prompt or self.TEXT_SYSTEM_PROMPT
         router_model_names = set(get_configured_llm_models(config.llm_model_list))
-        for model in models_to_try:
+        for model_index, model in enumerate(models_to_try):
             origins = route_deployment_origins(config.llm_model_list, model)
-            model_stream = bool(stream and not origins.has_hermes)
+
+            # 仅主模型尝试 streaming。
+            # 主模型 stream 失败后，现有逻辑会自动对同一模型再试一次 non-stream；
+            # 如果仍失败，再切换到 fallback，并直接使用 non-stream，提高稳定性。
+            is_primary_model = model_index == 0
+            model_stream = bool(stream and is_primary_model and not origins.has_hermes)
+
+            if model_index > 0:
+                logger.warning(
+                    "[LLM故障转移] 切换备用模型: %s -> %s",
+                    models_to_try[model_index - 1],
+                    model,
+                )
             recovery_model_list = config.llm_model_list
             legacy_router_model_list = getattr(self, "_legacy_router_model_list", None) or []
             if legacy_router_model_list and model == config.litellm_model and not use_channel_router:
@@ -3320,9 +3359,25 @@ class GeminiAnalyzer:
                 raise ValueError("LLM returned empty response")
 
             except Exception as e:
-                safe_error = self._sanitize_litellm_exception_text(e, config=config, model=model)
+                safe_error = self._sanitize_litellm_exception_text(
+                    e,
+                    config=config,
+                    model=model,
+                )
                 logger.warning("[LiteLLM] %s failed: %s", model, safe_error)
                 last_error = RuntimeError(f"{type(e).__name__}: {safe_error}")
+
+                if model_index + 1 < len(models_to_try):
+                    logger.warning(
+                        "[LLM故障转移] %s 失败，准备切换到 %s",
+                        model,
+                        models_to_try[model_index + 1],
+                    )
+                else:
+                    logger.error(
+                        "[LLM故障转移] 所有模型均失败，最后失败模型=%s",
+                        model,
+                    )
                 continue
 
         raise _AllModelsFailedError(
