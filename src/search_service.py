@@ -23,7 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any, Optional, Tuple
 from itertools import cycle
-from urllib.parse import parse_qsl, unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 import requests
 from newspaper import Article, Config
 from tenacity import (
@@ -385,6 +385,10 @@ class SearchResult:
     relevance_score: Optional[int] = None
     relevance_category: Optional[str] = None
     relevance_reasons: Optional[List[str]] = None
+    evidence_id: Optional[str] = None
+    evidence_dimensions: Optional[List[str]] = None
+    evidence_scope: Optional[str] = None  # fresh / analytical
+    evidence_duplicate_count: int = 0
     
     def to_text(self) -> str:
         """转换为文本格式"""
@@ -397,7 +401,18 @@ class SearchResult:
         if self.relevance_reasons:
             relevance_parts.append(f"依据: {'；'.join(self.relevance_reasons[:3])}")
         relevance_str = f"\n关联度: {'; '.join(relevance_parts)}" if relevance_parts else ""
-        return f"【{self.source}】{self.title}{date_str}\n{self.snippet}{relevance_str}"
+        evidence_parts: List[str] = []
+        if self.evidence_id:
+            evidence_parts.append(self.evidence_id)
+        if self.evidence_scope:
+            evidence_parts.append(f"scope={self.evidence_scope}")
+        if self.evidence_dimensions:
+            evidence_parts.append(f"dims={','.join(self.evidence_dimensions)}")
+        evidence_str = f"\n证据: {'; '.join(evidence_parts)}" if evidence_parts else ""
+        return (
+            f"【{self.source}】{self.title}{date_str}\n"
+            f"{self.snippet}{relevance_str}{evidence_str}"
+        )
 
 
 @dataclass 
@@ -4819,6 +4834,211 @@ class SearchService:
             error_message="事件搜索失败"
         )
     
+    _EVIDENCE_DIMENSION_PRIORITY = {
+        "risk_check": 0,
+        "announcements": 1,
+        "latest_news": 2,
+        "earnings": 3,
+        "market_analysis": 4,
+        "fund_analysis": 4,
+        "tracking_risk": 5,
+        "index_outlook": 6,
+        "holdings_allocation": 7,
+        "industry": 8,
+    }
+
+    _EVIDENCE_FRESH_DIMENSIONS = {
+        "latest_news",
+        "risk_check",
+        "announcements",
+    }
+
+    _EVIDENCE_TRACKING_QUERY_KEYS = {
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "utm_id", "gclid", "fbclid", "msclkid", "yclid", "_ga",
+        "ref", "ref_src", "source", "campaign",
+    }
+
+    @classmethod
+    def _canonical_evidence_url(cls, raw_url: str) -> str:
+        """Normalize URL so tracking variants of one article deduplicate."""
+        value = unquote(str(raw_url or "").strip())
+        if not value:
+            return ""
+
+        try:
+            parsed = urlparse(value)
+        except Exception:
+            return value.lower().rstrip("/")
+
+        if not parsed.netloc:
+            return value.lower().rstrip("/")
+
+        netloc = parsed.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+
+        path = re.sub(r"/+$", "", parsed.path or "") or "/"
+        kept_query = []
+        for key, val in parse_qsl(parsed.query, keep_blank_values=False):
+            normalized_key = key.strip().lower()
+            if (
+                normalized_key in cls._EVIDENCE_TRACKING_QUERY_KEYS
+                or normalized_key.startswith("utm_")
+            ):
+                continue
+            kept_query.append((key, val))
+
+        query = urlencode(sorted(kept_query), doseq=True)
+        scheme = (parsed.scheme or "https").lower()
+        return urlunparse((scheme, netloc, path, "", query, ""))
+
+    @staticmethod
+    def _evidence_title_fingerprint(title: str) -> str:
+        """Conservative exact-title fingerprint for syndication duplicates."""
+        value = unquote(str(title or "")).lower()
+        value = re.sub(r"https?://\S+", " ", value)
+        value = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
+
+    @classmethod
+    def _evidence_dimension_priority(cls, dimension: str) -> int:
+        return cls._EVIDENCE_DIMENSION_PRIORITY.get(str(dimension or ""), 50)
+
+    @classmethod
+    def _deduplicate_intelligence_results(
+        cls,
+        intel_results: Dict[str, SearchResponse],
+        *,
+        stock_code: str,
+    ) -> Dict[str, SearchResponse]:
+        """Cross-dimension dedup + stable Evidence IDs.
+
+        One article can match several search dimensions, but it appears only once
+        in the final evidence chain. All matched dimensions are retained as
+        metadata so the model cannot count one event several times.
+        """
+        if not intel_results:
+            return intel_results
+
+        groups: List[Dict[str, Any]] = []
+        url_to_group: Dict[str, int] = {}
+        title_to_group: Dict[str, int] = {}
+        raw_count = 0
+
+        for dimension, response in intel_results.items():
+            if not response or not response.success or not response.results:
+                continue
+
+            for item in response.results:
+                raw_count += 1
+                canonical_url = cls._canonical_evidence_url(item.url)
+                title_fp = cls._evidence_title_fingerprint(item.title)
+
+                group_index: Optional[int] = None
+                if canonical_url and canonical_url in url_to_group:
+                    group_index = url_to_group[canonical_url]
+                elif len(title_fp) >= 18 and title_fp in title_to_group:
+                    group_index = title_to_group[title_fp]
+
+                record = {
+                    "dimension": dimension,
+                    "item": item,
+                    "canonical_url": canonical_url,
+                    "title_fp": title_fp,
+                }
+
+                if group_index is None:
+                    group_index = len(groups)
+                    groups.append({"records": [record]})
+                else:
+                    groups[group_index]["records"].append(record)
+
+                if canonical_url:
+                    url_to_group[canonical_url] = group_index
+                if len(title_fp) >= 18:
+                    title_to_group[title_fp] = group_index
+
+        deduped: Dict[str, SearchResponse] = {}
+        for dimension, response in intel_results.items():
+            deduped[dimension] = SearchResponse(
+                query=response.query,
+                results=[],
+                provider=response.provider,
+                success=response.success,
+                error_message=response.error_message,
+                search_time=response.search_time,
+            )
+
+        evidence_rows: List[Dict[str, Any]] = []
+
+        for group in groups:
+            records = group["records"]
+            dimensions = sorted(
+                {str(record["dimension"]) for record in records},
+                key=lambda dim: (cls._evidence_dimension_priority(dim), dim),
+            )
+            primary_dimension = (
+                dimensions[0] if dimensions else str(records[0]["dimension"])
+            )
+
+            representative_record = max(
+                records,
+                key=lambda record: (
+                    int(record["item"].relevance_score or 0),
+                    -cls._evidence_dimension_priority(record["dimension"]),
+                    len(record["item"].snippet or ""),
+                    len(record["item"].title or ""),
+                ),
+            )
+            representative = representative_record["item"]
+
+            canonical_url = representative_record.get("canonical_url") or ""
+            if canonical_url:
+                representative.url = canonical_url
+
+            representative.evidence_dimensions = dimensions
+            representative.evidence_scope = (
+                "fresh"
+                if any(dim in cls._EVIDENCE_FRESH_DIMENSIONS for dim in dimensions)
+                else "analytical"
+            )
+            representative.evidence_duplicate_count = max(len(records) - 1, 0)
+
+            evidence_rows.append(
+                {
+                    "primary_dimension": primary_dimension,
+                    "representative": representative,
+                    "max_score": int(representative.relevance_score or 0),
+                    "published_date": representative.published_date or "",
+                }
+            )
+
+        evidence_rows.sort(
+            key=lambda row: (
+                cls._evidence_dimension_priority(row["primary_dimension"]),
+                -row["max_score"],
+                row["published_date"],
+                (row["representative"].title or "").lower(),
+            )
+        )
+
+        for index, row in enumerate(evidence_rows, 1):
+            item = row["representative"]
+            item.evidence_id = f"E{index:02d}"
+            deduped[row["primary_dimension"]].results.append(item)
+
+        logger.info(
+            "[新闻证据去重] %s raw=%s unique=%s duplicates_removed=%s dimensions=%s",
+            stock_code,
+            raw_count,
+            len(evidence_rows),
+            max(raw_count - len(evidence_rows), 0),
+            {dim: len(resp.results) for dim, resp in deduped.items()},
+        )
+        return deduped
+
     def search_comprehensive_intel(
         self,
         stock_code: str,
@@ -5148,80 +5368,116 @@ class SearchService:
             # 短暂延迟避免请求过快
             time.sleep(0.5)
         
+        results = self._deduplicate_intelligence_results(
+            results,
+            stock_code=stock_code,
+        )
+
         return results
     
-    def format_intel_report(self, intel_results: Dict[str, SearchResponse], stock_name: str) -> str:
-        """
-        格式化情报搜索结果为报告
-        
-        Args:
-            intel_results: 多维度搜索结果
-            stock_name: 股票名称
-            
-        Returns:
-            格式化的情报报告文本
-        """
-        lines = [f"【{stock_name} 情报搜索结果】"]
-        
-        # 维度展示顺序
-        display_order = [
-            'latest_news',
-            'announcements',
-            'market_analysis',
-            'risk_check',
-            'earnings',
-            'industry',
-            'fund_analysis',
-            'tracking_risk',
-            'index_outlook',
-            'holdings_allocation',
-        ]
+    def format_intel_report(
+        self,
+        intel_results: Dict[str, SearchResponse],
+        stock_name: str,
+    ) -> str:
+        """Format deduplicated intelligence as one traceable evidence chain."""
+        if not intel_results:
+            return f"【{stock_name} 情报证据链】\n未找到相关信息"
 
         dim_labels = {
-            'latest_news': '📰 最新消息',
-            'announcements': '📋 公司公告',
-            'market_analysis': '📈 机构分析',
-            'risk_check': '⚠️ 风险排查',
-            'earnings': '📊 业绩预期',
-            'industry': '🏭 行业分析',
-            'fund_analysis': '📈 基金/指数分析',
-            'tracking_risk': '⚠️ 跟踪与流动性风险',
-            'index_outlook': '📊 指数/成分展望',
-            'holdings_allocation': '🏭 持仓与行业配置',
+            'latest_news': '最新消息',
+            'announcements': '公司公告',
+            'market_analysis': '机构分析',
+            'risk_check': '风险排查',
+            'earnings': '业绩预期',
+            'industry': '行业分析',
+            'fund_analysis': '基金/指数分析',
+            'tracking_risk': '跟踪与流动性风险',
+            'index_outlook': '指数/成分展望',
+            'holdings_allocation': '持仓与行业配置',
         }
 
-        for dim_name in display_order:
-            if dim_name not in intel_results:
-                continue
-                
-            resp = intel_results[dim_name]
-            
-            # 获取维度描述
-            dim_desc = dim_labels.get(dim_name, dim_name)
-            
-            lines.append(f"\n{dim_desc} (来源: {resp.provider}):")
-            if resp.success and resp.results:
-                # 增加显示条数
-                for i, r in enumerate(resp.results[:4], 1):
-                    date_str = f" [{r.published_date}]" if r.published_date else ""
-                    lines.append(f"  {i}. {r.title}{date_str}")
-                    # 如果摘要太短，可能信息量不足
-                    snippet = r.snippet[:150] if len(r.snippet) > 20 else r.snippet
-                    lines.append(f"     {snippet}...")
-                    if r.relevance_category or r.relevance_reasons:
-                        relevance_parts = []
-                        if r.relevance_category:
-                            relevance_parts.append(r.relevance_category)
-                        if r.relevance_score is not None:
-                            relevance_parts.append(f"score={r.relevance_score}")
-                        if r.relevance_reasons:
-                            relevance_parts.append(f"依据: {'；'.join(r.relevance_reasons[:3])}")
-                        lines.append(f"     关联度: {'; '.join(relevance_parts)}")
-            else:
-                lines.append("  未找到相关信息")
-        
+        evidence_items: List[SearchResult] = []
+        coverage: Dict[str, int] = {}
+
+        for dimension, response in intel_results.items():
+            count = 0
+            if response and response.success and response.results:
+                evidence_items.extend(response.results)
+                count = len(response.results)
+            coverage[dimension] = count
+
+        evidence_items.sort(
+            key=lambda item: (
+                int(re.sub(r"\D", "", item.evidence_id or "9999") or 9999),
+                -(item.relevance_score or 0),
+            )
+        )
+
+        lines = [
+            f"【{stock_name} 情报证据链】",
+            "说明：同一新闻跨多个搜索维度只保留一次；重要新闻结论请引用对应 Evidence ID。",
+            "scope=fresh 表示近期事件证据；scope=analytical 表示较长窗口的研究/背景证据。",
+        ]
+
+        coverage_parts = [
+            f"{dim_labels.get(dim, dim)}={count}"
+            for dim, count in coverage.items()
+            if count
+        ]
+        if coverage_parts:
+            lines.append("去重后维度覆盖: " + "，".join(coverage_parts))
+
+        if not evidence_items:
+            lines.append("未找到可用的去重后情报证据。")
+            return "\n".join(lines)
+
+        lines.append("\n【Evidence List】")
+
+        for item in evidence_items:
+            eid = item.evidence_id or "E??"
+            date_str = item.published_date or "日期未知"
+            scope = item.evidence_scope or "unknown"
+            dims = [
+                dim_labels.get(dim, dim)
+                for dim in (item.evidence_dimensions or [])
+            ]
+            category = item.relevance_category or "uncategorized"
+            score = (
+                item.relevance_score
+                if item.relevance_score is not None
+                else "N/A"
+            )
+
+            lines.append(
+                f"\n[{eid}] date={date_str} | source={item.source or 'unknown'} "
+                f"| scope={scope} | category={category} | relevance={score}"
+            )
+            if dims:
+                lines.append("维度: " + " / ".join(dims))
+            if item.evidence_duplicate_count:
+                lines.append(
+                    f"跨维度重复: 已合并 "
+                    f"{int(item.evidence_duplicate_count)} 条重复命中"
+                )
+
+            lines.append(f"标题: {item.title}")
+
+            snippet = (item.snippet or "").strip()
+            if snippet:
+                lines.append(f"摘要: {snippet[:260]}")
+
+            if item.url:
+                lines.append(f"URL: {item.url}")
+
+            if item.relevance_reasons:
+                lines.append(
+                    "相关度依据: "
+                    + "；".join(item.relevance_reasons[:3])
+                )
+
         return "\n".join(lines)
-    
+
     def batch_search(
         self,
         stocks: List[Dict[str, str]],
