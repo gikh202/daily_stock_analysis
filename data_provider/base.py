@@ -30,6 +30,7 @@ from src.services.market_symbol_utils import is_suffix_market_symbol
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
+from .sec_edgar_fundamental_adapter import SecEdgarFundamentalAdapter
 from .realtime_types import CircuitBreaker
 
 # 配置日志
