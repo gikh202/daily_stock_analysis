@@ -1,0 +1,189 @@
+name: V5 Alpha Backtest
+
+on:
+  pull_request:
+    paths:
+      - 'src/alpha_engine/**'
+      - 'scripts/run_alpha_shadow.py'
+      - 'scripts/run_alpha_validation.py'
+      - 'scripts/run_alpha_backtest.py'
+      - 'tests/test_alpha_*.py'
+      - '.github/workflows/02-alpha-backtest.yml'
+  push:
+    branches:
+      - 'feature/v5-alpha-validation'
+    paths:
+      - 'src/alpha_engine/**'
+      - 'scripts/run_alpha_shadow.py'
+      - 'scripts/run_alpha_validation.py'
+      - 'scripts/run_alpha_backtest.py'
+      - 'tests/test_alpha_*.py'
+      - '.github/workflows/02-alpha-backtest.yml'
+  schedule:
+    # Weekly research replay after the Friday US session has settled.
+    - cron: '45 0 * * 6'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Maximum historical analysis snapshots to replay'
+        required: false
+        default: '5000'
+        type: string
+      min_samples:
+        description: 'Minimum matured samples for the research gate'
+        required: false
+        default: '20'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+concurrency:
+  group: v5-alpha-backtest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  historical-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Prepare directories
+        run: mkdir -p data alpha_data alpha_reports/backtest
+
+      - name: Restore latest valid production analysis cache
+        uses: actions/cache/restore@v5
+        with:
+          path: data/
+          key: alpha-backtest-stock-source-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-analysis-data-${{ runner.os }}-
+
+      - name: Validate historical source database
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = 'data/stock_analysis.db'
+          if not os.path.isfile(path):
+              raise SystemExit('stock_analysis.db missing; historical replay cannot run')
+          if os.path.getsize(path) < 4096:
+              raise SystemExit('stock_analysis.db unexpectedly small')
+
+          conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+          try:
+              row = conn.execute('PRAGMA quick_check').fetchone()
+              quick = str(row[0]).strip().lower() if row else ''
+              tables = {
+                  r[0]
+                  for r in conn.execute(
+                      "SELECT name FROM sqlite_master WHERE type='table'"
+                  )
+              }
+              history = (
+                  int(conn.execute('SELECT COUNT(*) FROM analysis_history').fetchone()[0])
+                  if 'analysis_history' in tables else 0
+              )
+              bars = (
+                  int(conn.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])
+                  if 'stock_daily' in tables else 0
+              )
+          finally:
+              conn.close()
+
+          if quick != 'ok':
+              raise SystemExit(f'stock_analysis.db quick_check failed: {quick!r}')
+          missing = {'analysis_history', 'stock_daily'} - tables
+          if missing:
+              raise SystemExit(f'missing required tables: {sorted(missing)}')
+          if history <= 0:
+              raise SystemExit('analysis_history is empty; no historical snapshots to replay')
+          if bars <= 0:
+              raise SystemExit('stock_daily is empty; no future bars to mature outcomes')
+          print(f'historical source: PASS history={history} daily_bars={bars}')
+          PY
+
+      - name: Run isolated historical replay
+        env:
+          BACKTEST_LIMIT: ${{ github.event.inputs.limit || '5000' }}
+          BACKTEST_MIN_SAMPLES: ${{ github.event.inputs.min_samples || '20' }}
+        run: |
+          python scripts/run_alpha_backtest.py \
+            --stock-db data/stock_analysis.db \
+            --backtest-db alpha_data/alpha_backtest.db \
+            --report-dir alpha_reports/backtest \
+            --limit "${BACKTEST_LIMIT}" \
+            --min-samples "${BACKTEST_MIN_SAMPLES}" \
+            --primary-horizon 5
+
+      - name: Validate backtest outputs
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sqlite3
+
+          db_path = 'alpha_data/alpha_backtest.db'
+          summary_path = 'alpha_reports/backtest/backtest_summary.json'
+          markdown_path = 'alpha_reports/backtest/backtest_summary.md'
+          run_path = 'alpha_reports/backtest/backtest_run.json'
+          for path in (db_path, summary_path, markdown_path, run_path):
+              if not os.path.isfile(path):
+                  raise SystemExit(f'missing backtest output: {path}')
+
+          conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=10)
+          try:
+              row = conn.execute('PRAGMA quick_check').fetchone()
+              quick = str(row[0]).strip().lower() if row else ''
+              signals = int(conn.execute('SELECT COUNT(*) FROM alpha_signals').fetchone()[0])
+              outcomes = int(conn.execute('SELECT COUNT(*) FROM alpha_outcomes').fetchone()[0])
+          finally:
+              conn.close()
+          if quick != 'ok':
+              raise SystemExit(f'alpha_backtest.db quick_check failed: {quick!r}')
+          if signals <= 0:
+              raise SystemExit('historical replay generated zero Alpha signals')
+
+          with open(summary_path, encoding='utf-8') as f:
+              summary = json.load(f)
+          with open(run_path, encoding='utf-8') as f:
+              run = json.load(f)
+          if summary.get('research_gate', {}).get('production_effect') != 'none':
+              raise SystemExit('validation report must remain shadow-only')
+          evidence = run.get('evidence_state', 'unknown')
+          if evidence != 'measurable':
+              print(
+                  '::warning::Historical replay infrastructure passed, but '
+                  f'performance evidence is not yet measurable: {evidence}'
+              )
+          print(
+              'backtest infrastructure: PASS '
+              f'signals={signals} outcomes={outcomes} '
+              f'evidence={evidence} '
+              f"gate={summary.get('research_gate', {}).get('status')}"
+          )
+          PY
+
+      - name: Upload historical replay artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: alpha-backtest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            alpha_reports/backtest/
+            alpha_data/alpha_backtest.db
+          if-no-files-found: warn
+          retention-days: 30

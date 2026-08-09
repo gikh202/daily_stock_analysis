@@ -7,9 +7,11 @@ on:
   push:
     branches:
       - 'feature/v5-alpha-engine'
+      - 'feature/v5-alpha-validation'
     paths:
       - 'src/alpha_engine/**'
       - 'scripts/run_alpha_shadow.py'
+      - 'scripts/run_alpha_validation.py'
       - '.github/workflows/01-alpha-shadow.yml'
   schedule:
     # Fallback run after the US post-close workflow window.
@@ -136,6 +138,14 @@ jobs:
             --alpha-db alpha_data/alpha_shadow.db \
             --report-dir alpha_reports \
             --limit 5000
+
+      - name: Generate V5 Alpha validation report
+        run: |
+          python scripts/run_alpha_validation.py \
+            --alpha-db alpha_data/alpha_shadow.db \
+            --report-dir alpha_reports \
+            --min-samples 20 \
+            --primary-horizon 5
 
       - name: Validate Alpha shadow database
         id: validate-alpha

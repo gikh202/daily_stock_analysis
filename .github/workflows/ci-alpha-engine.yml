@@ -5,18 +5,25 @@ on:
     paths:
       - 'src/alpha_engine/**'
       - 'scripts/run_alpha_shadow.py'
+      - 'scripts/run_alpha_validation.py'
+      - 'scripts/run_alpha_backtest.py'
       - 'tests/test_alpha_*.py'
       - '.github/workflows/ci-alpha-engine.yml'
       - '.github/workflows/01-alpha-shadow.yml'
+      - '.github/workflows/02-alpha-backtest.yml'
   push:
     branches:
       - 'feature/v5-alpha-engine'
+      - 'feature/v5-alpha-validation'
     paths:
       - 'src/alpha_engine/**'
       - 'scripts/run_alpha_shadow.py'
+      - 'scripts/run_alpha_validation.py'
+      - 'scripts/run_alpha_backtest.py'
       - 'tests/test_alpha_*.py'
       - '.github/workflows/ci-alpha-engine.yml'
       - '.github/workflows/01-alpha-shadow.yml'
+      - '.github/workflows/02-alpha-backtest.yml'
 
 permissions:
   contents: read
@@ -50,7 +57,10 @@ jobs:
             src/alpha_engine/features.py \
             src/alpha_engine/portfolio.py \
             src/alpha_engine/shadow_store.py \
-            scripts/run_alpha_shadow.py
+            src/alpha_engine/validation.py \
+            scripts/run_alpha_shadow.py \
+            scripts/run_alpha_validation.py \
+            scripts/run_alpha_backtest.py
 
       - name: Run isolated Alpha tests
         env:
@@ -63,3 +73,4 @@ jobs:
           tests/test_alpha_shadow_store.py
           tests/test_alpha_history_scan.py
           tests/test_alpha_shadow_runner.py
+          tests/test_alpha_validation.py
