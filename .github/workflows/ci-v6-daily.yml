@@ -46,7 +46,7 @@ on:
       - '.github/workflows/04-v6-accuracy-weekly.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PYTHONPATH: ${{ github.workspace }}
@@ -58,6 +58,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -105,3 +108,51 @@ jobs:
             tests/test_v6_lab_replay.py \
             tests/test_alpha_engine.py \
             tests/test_alpha_validation.py
+
+      - name: One-shot register Accuracy Lab env and changelog
+        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feature/v6-2-accuracy-lab' }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          env_path = Path('.env.example')
+          env_text = env_path.read_text(encoding='utf-8')
+          if 'V6_ACCURACY_LAB_COST_BPS=' not in env_text:
+              marker = '# ===================================\n# 回测配置（可选）\n# ==================================='
+              block = '''# ===================================
+# V6.2 Accuracy Lab（美股研究层，可选）
+# ===================================
+# BUY_SETUP 执行回测往返成本，单位 bps；默认 10 = 0.10%
+V6_ACCURACY_LAB_COST_BPS=10
+# BUY_SETUP 执行回测最大未来交易日持仓窗口
+V6_ACCURACY_LAB_MAX_HOLDING_BARS=20
+# Challenger 进入人工晋级研究所需最小“非重叠”成熟样本数
+V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES=100
+
+'''
+              if marker not in env_text:
+                  raise SystemExit('backtest marker missing in .env.example')
+              env_path.write_text(env_text.replace(marker, block + marker, 1), encoding='utf-8')
+
+          changelog_path = Path('docs/CHANGELOG.md')
+          changelog = changelog_path.read_text(encoding='utf-8')
+          entry = ('- [新功能] V6.2 Accuracy Lab 新增非重叠样本与 Wilson 95% 置信区间、'
+                   'BUY_SETUP 保守 OHLC 执行回测、版本化 execution policy、Champion/Challenger shadow、'
+                   '严格 no-lookahead 历史回放和每周准确率研究工作流；生产 Champion 不自动调参或晋级。\n')
+          if entry not in changelog:
+              marker = '## [Unreleased]\n'
+              if marker not in changelog:
+                  raise SystemExit('[Unreleased] marker missing in docs/CHANGELOG.md')
+              changelog_path.write_text(changelog.replace(marker, marker + '\n' + entry, 1), encoding='utf-8')
+          PY
+
+          if git diff --quiet -- .env.example docs/CHANGELOG.md; then
+            echo 'No registration changes required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .env.example docs/CHANGELOG.md
+          git commit -m 'docs(v6): register V6.2 Accuracy Lab configuration'
+          git push origin HEAD:feature/v6-2-accuracy-lab
