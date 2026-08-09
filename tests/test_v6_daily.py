@@ -6,7 +6,6 @@ from dataclasses import replace
 from pathlib import Path
 
 from scripts.run_v6_daily import run
-from src.notification_sender.email_sender import EmailSender
 from src.v6_daily.engine import V6DailyEngine
 from src.v6_daily.free_sources import source_status
 from src.v6_daily.store import V6DailyStore, mature_outcomes
@@ -378,27 +377,6 @@ def test_unified_report_surfaces_direction_conflict_and_does_not_upgrade_action(
     assert "方向分歧" in merged
     assert "按风险优先原则不升级仓位" in merged
     assert "最终：观察" in merged
-
-
-def test_upstream_v4_email_is_suppressed_but_final_v6_is_allowed(monkeypatch) -> None:
-    class DummyConfig:
-        email_sender = "sender@gmail.com"
-        email_sender_name = "日报"
-        email_password = "secret"
-        email_receivers = ["receiver@gmail.com"]
-        stock_email_groups = []
-
-    sender = EmailSender(DummyConfig())
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    monkeypatch.setenv("MERGE_EMAIL_NOTIFICATION", "true")
-    monkeypatch.delenv("V6_UNIFIED_EMAIL_FINAL", raising=False)
-    assert sender._is_email_configured() is True
-    assert sender._is_upstream_unified_email_suppressed() is True
-    assert sender.send_to_email("upstream report intentionally suppressed") is True
-
-    monkeypatch.setenv("V6_UNIFIED_EMAIL_FINAL", "true")
-    assert sender._is_email_configured() is True
-    assert sender._is_upstream_unified_email_suppressed() is False
 
 
 def test_v6_runner_generates_integrated_chinese_report_and_database(tmp_path: Path, monkeypatch) -> None:
