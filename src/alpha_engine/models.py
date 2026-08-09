@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,8 @@ class AlphaDecision:
     quality_score: Optional[float]
     opportunity_score: Optional[float]
     risk_score: Optional[float]
+    # Compatibility field retained in the V5 shadow schema. Semantically this
+    # is evidence coverage, not a calibrated probability that the forecast wins.
     confidence: float
     decision: str
     features: AlphaFeatures
@@ -45,3 +47,8 @@ class AlphaDecision:
     reasons: Tuple[str, ...] = ()
     limitations: Tuple[str, ...] = ()
     diagnostics: Dict[str, float] = field(default_factory=dict)
+
+    @property
+    def evidence_coverage(self) -> float:
+        """Observed evidence coverage in [0, 1], never a win probability."""
+        return float(self.confidence)
