@@ -10,8 +10,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from .shadow_store import ALPHA_SCHEMA_VERSION, AlphaShadowStore
 
 
-VALIDATION_VERSION = "v5.1-validation.1"
-DEFAULT_MIN_SAMPLES = 20
+VALIDATION_VERSION = "v6.0-validation.1"
+DEFAULT_MIN_SAMPLES = 50
 DEFAULT_PRIMARY_HORIZON = 5
 
 
@@ -28,7 +28,6 @@ def _round(value: Optional[float], digits: int = 4) -> Optional[float]:
 
 
 def _average_ranks(values: Sequence[float]) -> List[float]:
-    """Return 1-based average ranks with deterministic tie handling."""
     indexed = sorted(enumerate(values), key=lambda item: (item[1], item[0]))
     ranks = [0.0] * len(values)
     cursor = 0
@@ -69,20 +68,19 @@ def _spearman(pairs: Iterable[Tuple[Any, Any]]) -> Tuple[Optional[float], int]:
         return None, len(clean)
     xs = [pair[0] for pair in clean]
     ys = [pair[1] for pair in clean]
-    coefficient = _pearson(_average_ranks(xs), _average_ranks(ys))
-    return coefficient, len(clean)
+    return _pearson(_average_ranks(xs), _average_ranks(ys)), len(clean)
 
 
-def _signed_strategy_return(decision: str, return_pct: Any) -> Optional[float]:
+def _strategy_return(decision: str, return_pct: Any) -> Optional[float]:
+    """Executable long-only research return.
+
+    AVOID means no position. It must never be inverted and counted as a short.
+    A future explicit SHORT_SETUP can add inverse-return semantics separately.
+    """
     value = _finite(return_pct)
     if value is None:
         return None
-    normalized = str(decision or "").strip().upper()
-    if normalized == "BUY_SETUP":
-        return value
-    if normalized == "AVOID":
-        return -value
-    return None
+    return value if str(decision or "").strip().upper() == "BUY_SETUP" else None
 
 
 def _profit_factor(returns: Sequence[float]) -> Tuple[Optional[float], bool]:
@@ -94,12 +92,6 @@ def _profit_factor(returns: Sequence[float]) -> Tuple[Optional[float], bool]:
 
 
 def _max_drawdown_proxy_pct(returns: Sequence[float]) -> Optional[float]:
-    """Sequence drawdown proxy over signal returns, not a portfolio equity curve.
-
-    Outcomes can overlap in time, so this metric must not be presented as a true
-    executable portfolio drawdown. It is still useful for spotting unstable
-    signal sequences during shadow validation.
-    """
     if not returns:
         return None
     equity = 1.0
@@ -114,7 +106,6 @@ def _max_drawdown_proxy_pct(returns: Sequence[float]) -> Optional[float]:
 
 
 def _sharpe_like(returns: Sequence[float], horizon_days: int) -> Optional[float]:
-    """Annualized signal-return Sharpe proxy; not a portfolio Sharpe ratio."""
     if len(returns) < 2:
         return None
     deviation = statistics.stdev(returns)
@@ -134,11 +125,7 @@ def build_validation_summary(
     min_samples: int = DEFAULT_MIN_SAMPLES,
     primary_horizon: int = DEFAULT_PRIMARY_HORIZON,
 ) -> Dict[str, Any]:
-    """Build deterministic, read-only research metrics from matured outcomes.
-
-    The summary deliberately separates *signal research* from execution. It does
-    not change Alpha weights, V4 advice, position sizes, or production actions.
-    """
+    """Build deterministic, read-only research metrics from matured outcomes."""
     minimum = max(3, int(min_samples))
     with store.connect() as conn:
         rows = conn.execute(
@@ -175,42 +162,51 @@ def build_validation_summary(
     for horizon_days in sorted(grouped):
         bucket = grouped[horizon_days]
         strategy_returns: List[float] = []
-        directional_hits: List[int] = []
         raw_returns: List[float] = []
-        confidence_pairs: List[Tuple[float, int]] = []
+        overall_directional_hits: List[int] = []
+        buy_hits: List[int] = []
+        avoid_hits: List[int] = []
+        avoided_returns: List[float] = []
+        evidence_values: List[float] = []
 
         for row in bucket:
+            decision = str(row["decision"] or "").strip().upper()
             raw = _finite(row["return_pct"])
             if raw is not None:
                 raw_returns.append(raw)
-            signed = _signed_strategy_return(row["decision"], row["return_pct"])
-            if signed is not None:
-                strategy_returns.append(signed)
-            if row["directional_hit"] is not None:
-                hit = int(row["directional_hit"])
-                directional_hits.append(hit)
-                confidence = _finite(row["confidence"])
-                if confidence is not None:
-                    confidence_pairs.append((confidence, hit))
+            executable = _strategy_return(decision, raw)
+            if executable is not None:
+                strategy_returns.append(executable)
+
+            hit = None if row["directional_hit"] is None else int(row["directional_hit"])
+            if hit is not None:
+                overall_directional_hits.append(hit)
+                if decision == "BUY_SETUP":
+                    buy_hits.append(hit)
+                elif decision == "AVOID":
+                    avoid_hits.append(hit)
+
+            if decision == "AVOID" and raw is not None:
+                avoided_returns.append(raw)
+
+            evidence = _finite(row["confidence"])
+            if evidence is not None:
+                evidence_values.append(evidence)
 
         opportunity_ic, opportunity_ic_samples = _spearman(
             (row["opportunity_score"], row["return_pct"]) for row in bucket
         )
         profit_factor, profit_factor_unbounded = _profit_factor(strategy_returns)
-        hit_rate = (
+
+        def hit_rate(values: Sequence[int]) -> Optional[float]:
+            return None if not values else 100.0 * sum(values) / len(values)
+
+        avoid_negative = [value for value in avoided_returns if value <= 0]
+        false_avoid = [value for value in avoided_returns if value > 0]
+        avg_avoided_downside = (
             None
-            if not directional_hits
-            else 100.0 * sum(directional_hits) / len(directional_hits)
-        )
-        avg_confidence = (
-            None
-            if not confidence_pairs
-            else 100.0 * statistics.fmean(pair[0] for pair in confidence_pairs)
-        )
-        calibration_gap = (
-            None
-            if avg_confidence is None or hit_rate is None
-            else avg_confidence - hit_rate
+            if not avoid_negative
+            else statistics.fmean(-value for value in avoid_negative)
         )
 
         horizons.append(
@@ -218,8 +214,22 @@ def build_validation_summary(
                 "horizon_days": horizon_days,
                 "samples": len(bucket),
                 "mature": len(bucket) >= minimum,
-                "directional_samples": len(directional_hits),
-                "directional_hit_rate_pct": _round(hit_rate, 2),
+                "directional_samples": len(overall_directional_hits),
+                "directional_hit_rate_pct": _round(hit_rate(overall_directional_hits), 2),
+                "buy_samples": len(strategy_returns),
+                "buy_directional_samples": len(buy_hits),
+                "buy_directional_hit_rate_pct": _round(hit_rate(buy_hits), 2),
+                "avoidance_samples": len(avoided_returns),
+                "avoidance_hit_rate_pct": _round(hit_rate(avoid_hits), 2),
+                "false_avoid_rate_pct": _round(
+                    100.0 * len(false_avoid) / len(avoided_returns)
+                    if avoided_returns else None,
+                    2,
+                ),
+                "avg_avoided_return_pct": _round(
+                    statistics.fmean(avoided_returns) if avoided_returns else None
+                ),
+                "avg_avoided_downside_pct": _round(avg_avoided_downside),
                 "avg_raw_return_pct": _round(
                     statistics.fmean(raw_returns) if raw_returns else None
                 ),
@@ -241,22 +251,21 @@ def build_validation_summary(
                 ),
                 "opportunity_ic_spearman": _round(opportunity_ic, 4),
                 "opportunity_ic_samples": opportunity_ic_samples,
-                "avg_directional_confidence_pct": _round(avg_confidence, 2),
-                "confidence_calibration_gap_pct": _round(calibration_gap, 2),
+                "avg_evidence_coverage_pct": _round(
+                    100.0 * statistics.fmean(evidence_values) if evidence_values else None,
+                    2,
+                ),
             }
         )
 
-    selected = None
-    for item in horizons:
-        if int(item["horizon_days"]) == int(primary_horizon):
-            selected = item
-            break
-    if selected is None and horizons:
-        selected = horizons[0]
+    selected = next(
+        (item for item in horizons if int(item["horizon_days"]) == int(primary_horizon)),
+        horizons[0] if horizons else None,
+    )
 
     checks: Dict[str, Optional[bool]] = {
         "sample_size": None,
-        "directional_hit_rate": None,
+        "buy_directional_hit_rate": None,
         "profit_factor": None,
         "drawdown_proxy": None,
         "opportunity_ic": None,
@@ -264,10 +273,10 @@ def build_validation_summary(
     status = "insufficient_data"
     if selected is not None:
         checks["sample_size"] = selected["samples"] >= minimum
-        checks["directional_hit_rate"] = (
-            selected["directional_samples"] >= minimum
-            and selected["directional_hit_rate_pct"] is not None
-            and selected["directional_hit_rate_pct"] >= 52.0
+        checks["buy_directional_hit_rate"] = (
+            selected["buy_directional_samples"] >= minimum
+            and selected["buy_directional_hit_rate_pct"] is not None
+            and selected["buy_directional_hit_rate_pct"] >= 52.0
         )
         checks["profit_factor"] = (
             selected["strategy_samples"] >= minimum
@@ -311,7 +320,7 @@ def build_validation_summary(
             "checks": checks,
             "thresholds": {
                 "minimum_samples": minimum,
-                "directional_hit_rate_pct": 52.0,
+                "buy_directional_hit_rate_pct": 52.0,
                 "profit_factor": 1.20,
                 "sequence_max_drawdown_proxy_pct": 20.0,
                 "opportunity_ic_spearman": 0.03,
@@ -322,7 +331,9 @@ def build_validation_summary(
         "methodology_notes": [
             "All outcomes use trading bars strictly after the original analysis date.",
             "Opportunity IC is Spearman rank correlation versus future raw return.",
-            "BUY_SETUP uses long return; AVOID uses inverse return; WATCH/WAIT are excluded from strategy-return metrics.",
+            "BUY_SETUP is the only long strategy-return sample; WATCH/WAIT/AVOID are not positions.",
+            "AVOID is evaluated separately as avoidance accuracy and is never treated as an implicit short.",
+            "The legacy confidence column is interpreted as evidence coverage, not calibrated win probability.",
             "Sharpe and drawdown are signal-sequence proxies because horizon outcomes can overlap; they are not executable portfolio statistics.",
             "Research gate is descriptive only and never changes V4 advice, Alpha weights, or order execution.",
         ],
@@ -339,7 +350,7 @@ def _format_number(value: Any, digits: int = 3) -> str:
     return "N/A" if number is None else f"{number:.{digits}f}"
 
 
-def render_validation_markdown(summary: Dict[str, Any], *, title: str = "V5 Alpha Validation") -> str:
+def render_validation_markdown(summary: Dict[str, Any], *, title: str = "V6 Alpha Validation") -> str:
     coverage = summary.get("coverage") or {}
     gate = summary.get("research_gate") or {}
     checks = gate.get("checks") or {}
@@ -351,14 +362,20 @@ def render_validation_markdown(summary: Dict[str, Any], *, title: str = "V5 Alph
         f"- Evaluated signals: **{coverage.get('evaluated_signals', 0)}** ({_format_pct(coverage.get('evaluated_signal_pct'))})",
         f"- Mature outcomes: **{coverage.get('outcomes', 0)}**",
         f"- Research gate: **{gate.get('status', 'insufficient_data')}**",
-        "- Production effect: **none (shadow-only)**",
+        "- Production effect: **none (shadow/research only)**",
         "",
         "## Research Gate",
         "",
         "| Check | Result |",
         "|---|---|",
     ]
-    for name in ("sample_size", "directional_hit_rate", "profit_factor", "drawdown_proxy", "opportunity_ic"):
+    for name in (
+        "sample_size",
+        "buy_directional_hit_rate",
+        "profit_factor",
+        "drawdown_proxy",
+        "opportunity_ic",
+    ):
         value = checks.get(name)
         rendered = "N/A" if value is None else ("PASS" if value else "HOLD")
         lines.append(f"| {name} | {rendered} |")
@@ -368,26 +385,28 @@ def render_validation_markdown(summary: Dict[str, Any], *, title: str = "V5 Alph
             "",
             "## Horizon Metrics",
             "",
-            "| Horizon | N | Hit Rate | Avg Strategy | Profit Factor | IC | Sharpe Proxy | DD Proxy |",
-            "|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Horizon | N | BUY N | BUY Hit | Avoid N | Avoid Hit | Avg BUY | Profit Factor | IC | Evidence |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for item in summary.get("horizons") or []:
         profit_factor = "∞" if item.get("profit_factor_unbounded") else _format_number(item.get("profit_factor"))
         lines.append(
-            "| {horizon}D | {samples} | {hit} | {avg} | {pf} | {ic} | {sharpe} | {dd} |".format(
+            "| {horizon}D | {samples} | {buy_n} | {buy_hit} | {avoid_n} | {avoid_hit} | {avg} | {pf} | {ic} | {evidence} |".format(
                 horizon=item.get("horizon_days"),
                 samples=item.get("samples", 0),
-                hit=_format_pct(item.get("directional_hit_rate_pct")),
+                buy_n=item.get("buy_samples", 0),
+                buy_hit=_format_pct(item.get("buy_directional_hit_rate_pct")),
+                avoid_n=item.get("avoidance_samples", 0),
+                avoid_hit=_format_pct(item.get("avoidance_hit_rate_pct")),
                 avg=_format_pct(item.get("avg_strategy_return_pct")),
                 pf=profit_factor,
                 ic=_format_number(item.get("opportunity_ic_spearman"), 4),
-                sharpe=_format_number(item.get("signal_sharpe_proxy"), 3),
-                dd=_format_pct(item.get("sequence_max_drawdown_proxy_pct")),
+                evidence=_format_pct(item.get("avg_evidence_coverage_pct")),
             )
         )
     if not summary.get("horizons"):
-        lines.append("| - | 0 | N/A | N/A | N/A | N/A | N/A | N/A |")
+        lines.append("| - | 0 | 0 | N/A | 0 | N/A | N/A | N/A | N/A | N/A |")
 
     lines.extend(["", "## Methodology", ""])
     for note in summary.get("methodology_notes") or []:
@@ -402,7 +421,7 @@ def write_validation_report(
     min_samples: int = DEFAULT_MIN_SAMPLES,
     primary_horizon: int = DEFAULT_PRIMARY_HORIZON,
     stem: str = "validation_latest",
-    title: str = "V5 Alpha Validation",
+    title: str = "V6 Alpha Validation",
 ) -> Dict[str, Any]:
     output = Path(report_dir)
     output.mkdir(parents=True, exist_ok=True)
