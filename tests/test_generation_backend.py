@@ -156,7 +156,10 @@ def test_litellm_backend_capabilities_and_result_normalization() -> None:
         usage={"provider": "gemini", "total_tokens": 7},
     )
     assert received["prompt"] == "prompt"
-    assert received["generation_config"] == {"max_tokens": 128}
+    assert received["generation_config"] == {
+        "max_tokens": 128,
+        "temperature": pytest.approx(0.2),
+    }
     assert received["kwargs"]["system_prompt"] == "system"
     assert received["kwargs"]["stream"] is True
     assert callable(received["kwargs"]["stream_progress_callback"])
