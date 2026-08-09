@@ -172,7 +172,7 @@ V6_FREE_SOURCE_ENRICHMENT=true
 
 The workflow defaults this flag to `true`, but no SEC/FRED call is made when the corresponding credential/identity is absent. Failures are best-effort and cannot fail the deterministic V6 engine.
 
-The existing repository can continue using its already-supported YFinance, Brave, Finnhub, SerpAPI and other providers. V6 adds no mandatory paid API.
+The existing repository continues using its already-supported YFinance market data plus configured search providers such as SerpAPI or Brave. V6 adds no mandatory paid API.
 
 ## GitHub Actions settings
 
