@@ -110,7 +110,7 @@ jobs:
             tests/test_alpha_validation.py
 
       - name: One-shot register Accuracy Lab env and changelog
-        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feature/v6-2-accuracy-lab' }}
+        if: ${{ github.event_name == 'push' && github.ref_name == 'feature/v6-2-accuracy-lab' }}
         shell: bash
         run: |
           python - <<'PY'
