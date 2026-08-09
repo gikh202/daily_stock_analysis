@@ -53,6 +53,13 @@ def _env_truthy(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _default_report_subject() -> str:
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    if _env_truthy("V6_UNIFIED_EMAIL_FINAL", "false"):
+        return f"📈 AI 美股综合日报 - {date_str}"
+    return f"📈 股票智能分析报告 - {date_str}"
+
+
 class EmailSender:
     
     def __init__(self, config: Config):
@@ -176,10 +183,9 @@ class EmailSender:
         server: Optional[smtplib.SMTP] = None
         
         try:
-            # 生成主题
+            # 生成主题；只有最终 V6 综合日报使用新主题，其他场景保持向后兼容。
             if subject is None:
-                date_str = datetime.now().strftime('%Y-%m-%d')
-                subject = f"📈 AI 美股综合日报 - {date_str}"
+                subject = _default_report_subject()
 
             sanitized_content = strip_hidden_markdown_metadata(content).strip()
             
@@ -252,8 +258,7 @@ class EmailSender:
         receivers = receivers or self._email_config['receivers']
         server: Optional[smtplib.SMTP] = None
         try:
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            subject = f"📈 AI 美股综合日报 - {date_str}"
+            subject = _default_report_subject()
             msg = MIMEMultipart('related')
             msg['Subject'] = Header(subject, 'utf-8')
             msg['From'] = self._format_sender_address(sender)
