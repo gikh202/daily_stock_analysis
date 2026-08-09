@@ -6,6 +6,7 @@ Email 发送提醒服务
 1. 通过 SMTP 发送 Email 消息
 """
 import logging
+import os
 from typing import Optional, List
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -48,6 +49,10 @@ SMTP_CONFIGS = {
 }
 
 
+def _env_truthy(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class EmailSender:
     
     def __init__(self, config: Config):
@@ -66,7 +71,18 @@ class EmailSender:
         self._stock_email_groups = getattr(config, 'stock_email_groups', None) or []
         
     def _is_email_configured(self) -> bool:
-        """检查邮件配置是否完整（只需邮箱和授权码）"""
+        """检查邮件配置是否完整，并支持 V4→V6 单封综合日报模式。"""
+        # 00-daily-analysis.yml 已默认注入 MERGE_EMAIL_NOTIFICATION=true。
+        # 在 GitHub Actions 中启用该模式时，V4 仍生成报告/数据库/Artifact，
+        # 但不直接发送邮件；随后 V6 workflow 下载同一次 V4 Artifact，合并后
+        # 再发送唯一的最终中文综合日报。V6 workflow 不注入这个上游开关。
+        if (
+            os.getenv("GITHUB_ACTIONS") == "true"
+            and _env_truthy("MERGE_EMAIL_NOTIFICATION", "false")
+            and not _env_truthy("V6_UNIFIED_EMAIL_FINAL", "false")
+        ):
+            logger.info("统一日报模式已启用：跳过上游 V4 邮件，等待 V6 综合日报统一发送")
+            return False
         return bool(self._email_config['sender'] and self._email_config['password'])
     
     def get_receivers_for_stocks(self, stock_codes: List[str]) -> List[str]:
@@ -151,7 +167,7 @@ class EmailSender:
             是否发送成功
         """
         if not self._is_email_configured():
-            logger.warning("邮件配置不完整，跳过推送")
+            logger.warning("邮件配置不完整或当前处于上游免发模式，跳过推送")
             return False
         
         sender = self._email_config['sender']
@@ -163,7 +179,7 @@ class EmailSender:
             # 生成主题
             if subject is None:
                 date_str = datetime.now().strftime('%Y-%m-%d')
-                subject = f"📈 股票智能分析报告 - {date_str}"
+                subject = f"📈 AI 美股综合日报 - {date_str}"
 
             sanitized_content = strip_hidden_markdown_metadata(content).strip()
             
@@ -237,7 +253,7 @@ class EmailSender:
         server: Optional[smtplib.SMTP] = None
         try:
             date_str = datetime.now().strftime('%Y-%m-%d')
-            subject = f"📈 股票智能分析报告 - {date_str}"
+            subject = f"📈 AI 美股综合日报 - {date_str}"
             msg = MIMEMultipart('related')
             msg['Subject'] = Header(subject, 'utf-8')
             msg['From'] = self._format_sender_address(sender)
