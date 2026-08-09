@@ -159,16 +159,29 @@ class LiteLLMGenerationBackend(GenerationBackend):
                 "[LLM结构修复] configured model chain returned content but failed "
                 "validation; retrying once with evidence-aware repair prompt"
             )
-            text, model, usage = self._completion_callable(
-                repair_prompt,
-                repair_generation_config,
-                system_prompt=system_prompt,
-                # Repair JSON non-streaming to avoid partial-object failure modes.
-                stream=False,
-                stream_progress_callback=stream_progress_callback,
-                response_validator=response_validator,
-                audit_context=audit_context,
-            )
+            try:
+                text, model, usage = self._completion_callable(
+                    repair_prompt,
+                    repair_generation_config,
+                    system_prompt=system_prompt,
+                    # Repair JSON non-streaming to avoid partial-object failure modes.
+                    stream=False,
+                    stream_progress_callback=stream_progress_callback,
+                    response_validator=response_validator,
+                    audit_context=audit_context,
+                )
+            except Exception as repair_exc:
+                # Preserve the pre-existing analyzer safety contract. Before this
+                # repair layer, an all-model validation failure carrying a usable
+                # `last_response_text` was handled by deterministic post-gates in
+                # `analyze()`. A failed optional repair must never replace that
+                # recoverable response with a newer transport/empty-output error.
+                logger.warning(
+                    "[LLM结构修复] repair attempt failed; preserving original "
+                    "validated-response fallback for deterministic post-gates: %s",
+                    type(repair_exc).__name__,
+                )
+                raise exc
 
         provider = str((usage or {}).get("provider") or _provider_from_model(model))
         diagnostics = (
