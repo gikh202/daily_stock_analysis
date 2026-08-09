@@ -355,7 +355,13 @@ def run(
         min_samples=max(3, int(min_samples)),
         report_date=report_date,
         public_context=public_context,
-        accuracy_lab=accuracy_lab,
+    )
+    # Keep the existing report writer stable while exposing V6.2 research data
+    # to the unified report and machine-readable daily payload.
+    payload["accuracy_lab"] = accuracy_lab
+    (Path(report_dir) / "v6_daily_latest.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
     )
 
     unified_report = _finalize_report(
