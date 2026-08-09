@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict
 
@@ -24,10 +24,28 @@ from src.v6_daily.unified_report import count_v4_structured_records
 
 
 logger = logging.getLogger("v6_daily")
+MAX_CURRENT_EXTERNAL_CONTEXT_AGE_DAYS = 4
 
 
 def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _is_current_external_context_safe(effective_trade_date: str | None) -> bool:
+    """Current SEC/FRED snapshots may only score a recent effective trade date.
+
+    Historical records are deliberately excluded because the public-source
+    fetch performed by this daily runner is a *current* snapshot, not a
+    point-in-time historical snapshot. This prevents current filings/rates from
+    leaking into backfilled signals whose future outcomes are already known.
+    """
+    text = str(effective_trade_date or "").strip()[:10]
+    try:
+        trade_date = datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    age_days = (date.today() - trade_date).days
+    return 0 <= age_days <= MAX_CURRENT_EXTERNAL_CONTEXT_AGE_DAYS
 
 
 def _notify(report_path: Path, codes: list[str]) -> Dict[str, Any]:
@@ -128,27 +146,66 @@ def run(
     )
     public_context = fetch_free_context(source_codes)
 
-    new_signals = 0
-    skipped_existing = 0
-    skipped_same_trade_date = 0
+    # First build every usable signal WITHOUT the newly fetched SEC/FRED
+    # snapshot. This establishes the effective date independently of current
+    # external evidence and lets us identify the true newest trade-date bucket.
+    provisional: list[tuple[Dict[str, Any], Any]] = []
     skipped_unusable = 0
-
     for record in records:
         history_id = int(record.get("id") or 0)
         if history_id <= 0:
             skipped_unusable += 1
             continue
-        if store.has_analysis_history_id(history_id):
-            skipped_existing += 1
-            continue
         signal = engine.from_analysis_record(
             record,
             primary_model=primary_model,
-            external_context=public_context,
+            external_context=None,
         )
         if signal is None:
             skipped_unusable += 1
             continue
+        provisional.append((record, signal))
+
+    effective_dates = [
+        str(signal.effective_trade_date or "")
+        for _, signal in provisional
+        if str(signal.effective_trade_date or "")
+    ]
+    latest_effective_date = max(effective_dates) if effective_dates else None
+    external_numeric_date = (
+        latest_effective_date
+        if latest_effective_date
+        and _is_current_external_context_safe(latest_effective_date)
+        else None
+    )
+    if latest_effective_date and external_numeric_date is None:
+        logger.warning(
+            "[V6.1] 最新有效交易日 %s 距当前过久；SEC/FRED 当前快照仅展示，不参与历史数值回填",
+            latest_effective_date,
+        )
+
+    new_signals = 0
+    skipped_existing = 0
+    skipped_same_trade_date = 0
+    for record, provisional_signal in provisional:
+        history_id = int(record.get("id") or 0)
+        if store.has_analysis_history_id(history_id):
+            skipped_existing += 1
+            continue
+
+        signal = provisional_signal
+        if (
+            external_numeric_date is not None
+            and signal.effective_trade_date == external_numeric_date
+        ):
+            enriched = engine.from_analysis_record(
+                record,
+                primary_model=primary_model,
+                external_context=public_context,
+            )
+            if enriched is not None:
+                signal = enriched
+
         if store.has_signal_key(signal.code, signal.effective_trade_date, engine.version):
             skipped_same_trade_date += 1
             continue
@@ -159,7 +216,7 @@ def run(
                 for name, item in signal.horizon_forecasts.items()
             )
             logger.info(
-                "[V6.1] history_id=%s code=%s type=%s decision=%s horizons=[%s] opportunity=%s risk=%s evidence=%.2f llm=%s",
+                "[V6.1] history_id=%s code=%s type=%s decision=%s horizons=[%s] opportunity=%s risk=%s evidence=%.2f llm=%s external_numeric=%s",
                 signal.analysis_history_id,
                 signal.code,
                 signal.instrument_type,
@@ -169,6 +226,7 @@ def run(
                 signal.risk_score,
                 signal.evidence_coverage,
                 signal.llm_health,
+                signal.effective_trade_date == external_numeric_date,
             )
 
     maturation = mature_outcomes(store, stock_db_path)
@@ -192,6 +250,8 @@ def run(
         "not_yet_mature": maturation["not_yet_mature"],
         "quick_check": quick,
         "free_source_enrichment": (public_context.get("status") or {}).get("enabled", False),
+        "external_numeric_trade_date": external_numeric_date,
+        "external_backfill_policy": "current snapshot scores newest recent trade date only",
     }
     report_date = datetime.now().strftime("%Y-%m-%d")
     payload = write_daily_report(
