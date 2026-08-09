@@ -33,7 +33,7 @@ env:
 jobs:
   v6-daily-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -44,8 +44,11 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install test dependency
-        run: python -m pip install --upgrade pytest
+      - name: Install repository test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade pytest
 
       - name: Compile V6 modules
         run: |
