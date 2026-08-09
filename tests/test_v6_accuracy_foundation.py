@@ -215,7 +215,9 @@ def _series_with_future(multiplier: float) -> dict:
     for day in range(1, 101):
         date = f"2025-{((day - 1) // 28) + 1:02d}-{((day - 1) % 28) + 1:02d}"
         base = 100.0 + day * 0.3
-        future_adjustment = 0.0 if day <= 70 else (day - 70) * multiplier
+        # The selected as-of point below is day 71. Only mutate observations
+        # after that point so any score change would be a real future-data leak.
+        future_adjustment = 0.0 if day <= 71 else (day - 71) * multiplier
         result["MSFT"].append({"date": date, "close": base + future_adjustment, "high": base + 1, "low": base - 1, "volume": 1_000_000 + day})
         result["SPY"].append({"date": date, "close": 100 + day * 0.15, "high": 0, "low": 0, "volume": 1})
         result["QQQ"].append({"date": date, "close": 100 + day * 0.20, "high": 0, "low": 0, "volume": 1})
