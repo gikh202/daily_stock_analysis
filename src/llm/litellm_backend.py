@@ -171,6 +171,11 @@ class LiteLLMGenerationBackend(GenerationBackend):
             )
 
         provider = str((usage or {}).get("provider") or _provider_from_model(model))
+        diagnostics = (
+            {"validator_repair_used": True}
+            if validator_repair_used
+            else {}
+        )
         return GenerationResult(
             text=text,
             model=model,
@@ -178,5 +183,5 @@ class LiteLLMGenerationBackend(GenerationBackend):
             backend=self.backend_id,
             usage=usage or {},
             raw=None,
-            diagnostics={"validator_repair_used": validator_repair_used},
+            diagnostics=diagnostics,
         )
