@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -20,14 +21,16 @@ from .accuracy import (
 )
 
 
-ACCURACY_LAB_VERSION = "v6.2-accuracy-lab.1"
+ACCURACY_LAB_VERSION = "v6.2-accuracy-lab.2"
 DEFAULT_COST_BPS = 10.0
 DEFAULT_MAX_HOLDING_BARS = 20
 DEFAULT_PROMOTION_MIN_SAMPLES = 100
+SHADOW_VARIANT_REVISION = "v1"
+EXECUTION_MODEL_REVISION = "daily-ohlc-v2"
 
 # Research-only challengers. They never modify the production champion forecast.
-# Each variant perturbs the current deterministic evidence mix and is evaluated
-# in shadow mode on exactly the same future bars as the champion.
+# Variant identity is versioned when persisted; changing multipliers requires a
+# revision bump so incompatible historical samples are never silently pooled.
 SHADOW_VARIANT_MULTIPLIERS: Dict[str, Dict[str, float]] = {
     "trend_guard": {
         "trend": 1.35,
@@ -65,17 +68,16 @@ def _finite(value: Any) -> Optional[float]:
     return number if math.isfinite(number) else None
 
 
-def _mean(values: Iterable[Any]) -> Optional[float]:
-    clean = [value for value in (_finite(item) for item in values) if value is not None]
-    return None if not clean else statistics.fmean(clean)
-
-
 def _round(value: Optional[float], digits: int = 4) -> Optional[float]:
     return None if value is None else round(float(value), digits)
 
 
-def wilson_interval(successes: int, total: int, z: float = 1.959963984540054) -> tuple[Optional[float], Optional[float]]:
-    """95% Wilson interval for a binomial hit rate, returned as percentages."""
+def wilson_interval(
+    successes: int,
+    total: int,
+    z: float = 1.959963984540054,
+) -> tuple[Optional[float], Optional[float]]:
+    """Return the two-sided 95% Wilson binomial interval as percentages."""
     n = int(total)
     if n <= 0:
         return None, None
@@ -85,7 +87,10 @@ def wilson_interval(successes: int, total: int, z: float = 1.959963984540054) ->
     denominator = 1.0 + z2 / n
     center = (p + z2 / (2.0 * n)) / denominator
     half = z * math.sqrt((p * (1.0 - p) + z2 / (4.0 * n)) / n) / denominator
-    return round(100.0 * max(0.0, center - half), 2), round(100.0 * min(1.0, center + half), 2)
+    return (
+        round(100.0 * max(0.0, center - half), 2),
+        round(100.0 * min(1.0, center + half), 2),
+    )
 
 
 def _profile_with_multipliers(
@@ -109,14 +114,22 @@ def _profile_with_multipliers(
 
 
 def shadow_profiles(instrument_type: str) -> Dict[str, Dict[int, Dict[str, float]]]:
-    base = ETF_HORIZON_WEIGHTS if str(instrument_type or "").upper() == "ETF" else STOCK_HORIZON_WEIGHTS
+    base = (
+        ETF_HORIZON_WEIGHTS
+        if str(instrument_type or "").strip().upper() == "ETF"
+        else STOCK_HORIZON_WEIGHTS
+    )
     return {
         name: _profile_with_multipliers(base, multipliers)
         for name, multipliers in SHADOW_VARIANT_MULTIPLIERS.items()
     }
 
 
-def build_shadow_forecasts(features: AlphaFeatures, *, instrument_type: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def build_shadow_forecasts(
+    features: AlphaFeatures,
+    *,
+    instrument_type: str,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     result: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for variant, profile in shadow_profiles(instrument_type).items():
         blocks: Dict[str, Dict[str, Any]] = {}
@@ -134,6 +147,31 @@ def build_shadow_forecasts(features: AlphaFeatures, *, instrument_type: str) -> 
     return result
 
 
+def _variant_identity(name: str, weights: Mapping[str, float]) -> str:
+    canonical = json.dumps(
+        {str(key): float(value) for key, value in sorted(weights.items())},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
+    return f"{str(name)}@{SHADOW_VARIANT_REVISION}-{digest}"
+
+
+def execution_policy_key(*, cost_bps: float, max_holding_bars: int) -> str:
+    """Stable research identity for trade outcomes.
+
+    Any execution-model or parameter change produces a different primary-key
+    value, preventing strategy metrics from mixing incompatible samples.
+    """
+    return (
+        f"{EXECUTION_MODEL_REVISION}"
+        f"|hold={max(1, int(max_holding_bars))}"
+        f"|round_trip_cost_bps={max(0.0, float(cost_bps)):.4f}"
+        "|entry_bar_target=deferred"
+        "|same_bar=stop_first"
+    )
+
+
 def _connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -142,8 +180,42 @@ def _connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(conn, table):
+        return set()
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _migrate_legacy_trade_table(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "v6_trade_outcomes"):
+        return
+    columns = _columns(conn, "v6_trade_outcomes")
+    if "execution_policy" in columns:
+        return
+
+    # An early V6.2 branch used signal_id as the only primary key, which would
+    # permanently mix samples after execution settings changed. Preserve that
+    # table for audit, then create the policy-versioned production schema.
+    base = "v6_trade_outcomes_legacy"
+    legacy = base
+    suffix = 1
+    while _table_exists(conn, legacy):
+        suffix += 1
+        legacy = f"{base}_{suffix}"
+    conn.execute(f"ALTER TABLE v6_trade_outcomes RENAME TO {legacy}")
+
+
 def ensure_accuracy_lab_schema(v6_db_path: str | Path) -> None:
     with _connect(v6_db_path) as conn:
+        _migrate_legacy_trade_table(conn)
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS v6_shadow_forecasts (
@@ -174,7 +246,8 @@ def ensure_accuracy_lab_schema(v6_db_path: str | Path) -> None:
             );
 
             CREATE TABLE IF NOT EXISTS v6_trade_outcomes (
-                signal_id INTEGER PRIMARY KEY,
+                signal_id INTEGER NOT NULL,
+                execution_policy TEXT NOT NULL,
                 evaluated_at TEXT NOT NULL,
                 status TEXT NOT NULL,
                 entry_trade_date TEXT,
@@ -189,6 +262,8 @@ def ensure_accuracy_lab_schema(v6_db_path: str | Path) -> None:
                 mfe_pct REAL,
                 mae_pct REAL,
                 cost_bps REAL NOT NULL,
+                max_holding_bars INTEGER NOT NULL,
+                PRIMARY KEY(signal_id, execution_policy),
                 FOREIGN KEY(signal_id) REFERENCES v6_signals(id) ON DELETE CASCADE
             );
 
@@ -196,8 +271,8 @@ def ensure_accuracy_lab_schema(v6_db_path: str | Path) -> None:
                 ON v6_shadow_forecasts(variant, horizon_days, signal_id);
             CREATE INDEX IF NOT EXISTS ix_v6_shadow_outcomes_eval
                 ON v6_shadow_outcomes(evaluated_at);
-            CREATE INDEX IF NOT EXISTS ix_v6_trade_outcomes_status
-                ON v6_trade_outcomes(status, evaluated_at);
+            CREATE INDEX IF NOT EXISTS ix_v6_trade_outcomes_policy
+                ON v6_trade_outcomes(execution_policy, status, evaluated_at);
             """
         )
 
@@ -229,8 +304,10 @@ def persist_shadow_forecasts(v6_db_path: str | Path) -> int:
                 features,
                 instrument_type=str(signal["instrument_type"] or "STOCK"),
             )
-            for variant, blocks in variants.items():
+            for variant_name, blocks in variants.items():
                 for block in blocks.values():
+                    weights = block.get("weights") or {}
+                    variant = _variant_identity(variant_name, weights)
                     cursor = conn.execute(
                         """
                         INSERT OR IGNORE INTO v6_shadow_forecasts(
@@ -239,10 +316,14 @@ def persist_shadow_forecasts(v6_db_path: str | Path) -> int:
                         ) VALUES (?,?,?,?,?,?,?,?)
                         """,
                         (
-                            int(signal["id"]), variant, int(block["horizon_days"]), _utc_now(),
-                            _finite(block.get("score")), str(block.get("direction") or "neutral"),
+                            int(signal["id"]),
+                            variant,
+                            int(block["horizon_days"]),
+                            _utc_now(),
+                            _finite(block.get("score")),
+                            str(block.get("direction") or "neutral"),
                             float(block.get("evidence_coverage") or 0.0),
-                            json.dumps(block.get("weights") or {}, sort_keys=True, separators=(",", ":")),
+                            json.dumps(weights, sort_keys=True, separators=(",", ":")),
                         ),
                     )
                     inserted += max(0, int(cursor.rowcount))
@@ -254,30 +335,45 @@ def _stock_columns(stock_db_path: str | Path) -> set[str]:
         return {str(row[1]) for row in conn.execute("PRAGMA table_info(stock_daily)").fetchall()}
 
 
-def _future_bars(stock_db_path: str | Path, *, code: str, analysis_date: str, needed: int) -> list[Dict[str, Any]]:
+def _future_bars(
+    stock_db_path: str | Path,
+    *,
+    code: str,
+    analysis_date: str,
+    needed: int,
+) -> list[Dict[str, Any]]:
     columns = _stock_columns(stock_db_path)
     if not {"code", "date", "close"}.issubset(columns):
         return []
     fields = [name for name in ("date", "open", "high", "low", "close") if name in columns]
     with _connect(stock_db_path) as conn:
         rows = conn.execute(
-            f"SELECT {','.join(fields)} FROM stock_daily WHERE code=? AND date>? ORDER BY date ASC LIMIT ?",
+            f"SELECT {','.join(fields)} FROM stock_daily "
+            "WHERE code=? AND date>? ORDER BY date ASC LIMIT ?",
             (str(code), str(analysis_date), max(1, int(needed))),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
-def _benchmark_return(stock_db_path: str | Path, *, code: str, analysis_date: str, horizon: int) -> Optional[float]:
+def _benchmark_return(
+    stock_db_path: str | Path,
+    *,
+    code: str,
+    analysis_date: str,
+    horizon: int,
+) -> Optional[float]:
     columns = _stock_columns(stock_db_path)
     if not {"code", "date", "close"}.issubset(columns):
         return None
     with _connect(stock_db_path) as conn:
         start = conn.execute(
-            "SELECT close FROM stock_daily WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1",
+            "SELECT close FROM stock_daily WHERE code=? AND date<=? "
+            "ORDER BY date DESC LIMIT 1",
             (str(code), str(analysis_date)),
         ).fetchone()
         future = conn.execute(
-            "SELECT close FROM stock_daily WHERE code=? AND date>? ORDER BY date ASC LIMIT ?",
+            "SELECT close FROM stock_daily WHERE code=? AND date>? "
+            "ORDER BY date ASC LIMIT ?",
             (str(code), str(analysis_date), int(horizon)),
         ).fetchall()
     if start is None or len(future) < int(horizon):
@@ -313,7 +409,9 @@ def mature_shadow_outcomes(
 
         for row in rows:
             horizon = int(row["horizon_days"])
-            analysis_date = str(row["effective_trade_date"] or row["analysis_created_at"] or "")[:10]
+            analysis_date = str(
+                row["effective_trade_date"] or row["analysis_created_at"] or ""
+            )[:10]
             start = _finite(row["baseline_price"])
             if not analysis_date or start is None or start <= 0:
                 pending += 1
@@ -355,9 +453,15 @@ def mature_shadow_outcomes(
                 ) VALUES (?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    int(row["id"]), _utc_now(), str(bars[-1].get("date") or ""),
-                    start, end, round(return_pct, 6), hit,
-                    _round(spy_return, 6), _round(excess, 6),
+                    int(row["id"]),
+                    _utc_now(),
+                    str(bars[-1].get("date") or ""),
+                    start,
+                    end,
+                    round(return_pct, 6),
+                    hit,
+                    _round(spy_return, 6),
+                    _round(excess, 6),
                 ),
             )
             evaluated += max(0, int(cursor.rowcount))
@@ -381,10 +485,10 @@ def _parse_plan(raw: str) -> Optional[Dict[str, Any]]:
     high = _finite(zone[1])
     stop = _finite(plan.get("stop_loss"))
     target = _finite(targets[0])
-    if None in {low, high, stop, target}:
+    if low is None or high is None or stop is None or target is None:
         return None
     entry_low, entry_high = sorted((float(low), float(high)))
-    if entry_low <= 0 or entry_high <= 0 or float(stop) <= 0 or float(target) <= 0:
+    if entry_low <= 0 or entry_high <= 0 or stop <= 0 or target <= 0:
         return None
     return {
         "entry_low": entry_low,
@@ -394,7 +498,11 @@ def _parse_plan(raw: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _bar_value(bar: Mapping[str, Any], key: str, fallback: Optional[float] = None) -> Optional[float]:
+def _bar_value(
+    bar: Mapping[str, Any],
+    key: str,
+    fallback: Optional[float] = None,
+) -> Optional[float]:
     value = _finite(bar.get(key))
     return fallback if value is None else value
 
@@ -405,17 +513,18 @@ def simulate_long_trade(
     *,
     cost_bps: float = DEFAULT_COST_BPS,
 ) -> Dict[str, Any]:
-    """Conservative OHLC execution simulation for a BUY_SETUP trade plan.
+    """Conservative daily-OHLC execution simulation for a BUY_SETUP plan.
 
-    Entry requires the future bar range to overlap the planned entry zone. When
-    stop and first target are both touched in the same daily bar, stop is assumed
-    first to avoid optimistic intrabar ordering. `cost_bps` is a round-trip cost.
+    Daily bars do not reveal intrabar ordering. To prevent optimistic target
+    credit before an entry actually occurred, the entry bar may trigger a stop
+    but can never trigger a target. From the next bar onward, simultaneous stop
+    and target touches are resolved as stop-first.
     """
     entry_low = _finite(plan.get("entry_low"))
     entry_high = _finite(plan.get("entry_high"))
     stop = _finite(plan.get("stop"))
     target = _finite(plan.get("target"))
-    if None in {entry_low, entry_high, stop, target}:
+    if entry_low is None or entry_high is None or stop is None or target is None:
         return {"status": "invalid_plan"}
     entry_low = float(entry_low)
     entry_high = float(entry_high)
@@ -445,6 +554,7 @@ def simulate_long_trade(
         if low > high:
             low, high = high, low
 
+        entered_this_bar = False
         if entry_price is None:
             if high < entry_low or low > entry_high:
                 continue
@@ -459,18 +569,29 @@ def simulate_long_trade(
             entry_price = float(fill)
             entry_index = index
             entry_date = str(bar.get("date") or "")
+            entered_this_bar = True
 
         max_high = high if max_high is None else max(max_high, high)
         min_low = low if min_low is None else min(min_low, low)
 
         hit_stop = low <= stop
-        hit_target = high >= target
+        # Never credit a target on the entry bar: the bar may have hit its high
+        # before falling/rising into the entry zone, and OHLC cannot prove order.
+        hit_target = (not entered_this_bar) and high >= target
+
         if hit_stop and hit_target:
-            # Conservative daily-bar ambiguity rule.
-            exit_price = min(stop, open_price) if open_price is not None and open_price < stop else stop
+            exit_price = (
+                min(stop, open_price)
+                if open_price is not None and open_price < stop
+                else stop
+            )
             exit_reason = "stop_and_target_same_bar_stop_first"
         elif hit_stop:
-            exit_price = min(stop, open_price) if open_price is not None and open_price < stop else stop
+            exit_price = (
+                min(stop, open_price)
+                if open_price is not None and open_price < stop
+                else stop
+            )
             exit_reason = "stop"
         elif hit_target:
             exit_price = target
@@ -501,7 +622,9 @@ def simulate_long_trade(
     cost_per_share = entry_price * max(0.0, float(cost_bps)) / 10000.0
     r_multiple = None
     if risk_per_share > 0:
-        r_multiple = (float(exit_price) - entry_price - cost_per_share) / risk_per_share
+        r_multiple = (
+            float(exit_price) - entry_price - cost_per_share
+        ) / risk_per_share
     mfe = None if max_high is None else (max_high / entry_price - 1.0) * 100.0
     mae = None if min_low is None else (min_low / entry_price - 1.0) * 100.0
     return {
@@ -526,23 +649,35 @@ def mature_trade_outcomes(
     *,
     max_holding_bars: int = DEFAULT_MAX_HOLDING_BARS,
     cost_bps: float = DEFAULT_COST_BPS,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     ensure_accuracy_lab_schema(v6_db_path)
     evaluated = 0
     pending = 0
     max_holding = max(1, int(max_holding_bars))
+    cost = max(0.0, float(cost_bps))
+    policy = execution_policy_key(
+        cost_bps=cost,
+        max_holding_bars=max_holding,
+    )
+
     with _connect(v6_db_path) as conn:
         signals = conn.execute(
             """
-            SELECT s.id, s.code, s.effective_trade_date, s.analysis_created_at, s.trade_plan_json
+            SELECT s.id, s.code, s.effective_trade_date,
+                   s.analysis_created_at, s.trade_plan_json
             FROM v6_signals s
-            LEFT JOIN v6_trade_outcomes t ON t.signal_id=s.id
+            LEFT JOIN v6_trade_outcomes t
+              ON t.signal_id=s.id AND t.execution_policy=?
             WHERE s.decision='BUY_SETUP' AND t.signal_id IS NULL
             ORDER BY s.id
-            """
+            """,
+            (policy,),
         ).fetchall()
+
         for signal in signals:
-            analysis_date = str(signal["effective_trade_date"] or signal["analysis_created_at"] or "")[:10]
+            analysis_date = str(
+                signal["effective_trade_date"] or signal["analysis_created_at"] or ""
+            )[:10]
             plan = _parse_plan(str(signal["trade_plan_json"] or "{}"))
             if not analysis_date or plan is None:
                 result = {"status": "invalid_plan"}
@@ -556,32 +691,53 @@ def mature_trade_outcomes(
                 if len(bars) < max_holding:
                     pending += 1
                     continue
-                result = simulate_long_trade(bars, plan, cost_bps=cost_bps)
+                result = simulate_long_trade(bars, plan, cost_bps=cost)
 
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO v6_trade_outcomes(
-                    signal_id, evaluated_at, status, entry_trade_date, exit_trade_date,
-                    entry_price, exit_price, return_pct, r_multiple, win, exit_reason,
-                    holding_bars, mfe_pct, mae_pct, cost_bps
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    signal_id, execution_policy, evaluated_at, status,
+                    entry_trade_date, exit_trade_date, entry_price, exit_price,
+                    return_pct, r_multiple, win, exit_reason, holding_bars,
+                    mfe_pct, mae_pct, cost_bps, max_holding_bars
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    int(signal["id"]), _utc_now(), str(result.get("status") or "unknown"),
-                    result.get("entry_trade_date"), result.get("exit_trade_date"),
-                    _finite(result.get("entry_price")), _finite(result.get("exit_price")),
-                    _finite(result.get("return_pct")), _finite(result.get("r_multiple")),
-                    result.get("win"), result.get("exit_reason"), result.get("holding_bars"),
-                    _finite(result.get("mfe_pct")), _finite(result.get("mae_pct")),
-                    float(cost_bps),
+                    int(signal["id"]),
+                    policy,
+                    _utc_now(),
+                    str(result.get("status") or "unknown"),
+                    result.get("entry_trade_date"),
+                    result.get("exit_trade_date"),
+                    _finite(result.get("entry_price")),
+                    _finite(result.get("exit_price")),
+                    _finite(result.get("return_pct")),
+                    _finite(result.get("r_multiple")),
+                    result.get("win"),
+                    result.get("exit_reason"),
+                    result.get("holding_bars"),
+                    _finite(result.get("mfe_pct")),
+                    _finite(result.get("mae_pct")),
+                    cost,
+                    max_holding,
                 ),
             )
             evaluated += max(0, int(cursor.rowcount))
-    return {"evaluated": evaluated, "not_yet_mature": pending}
+
+    return {
+        "evaluated": evaluated,
+        "not_yet_mature": pending,
+        "execution_policy": policy,
+    }
 
 
-def _date_indices(stock_db_path: str | Path, codes: Sequence[str]) -> Dict[str, Dict[str, int]]:
-    wanted = tuple(dict.fromkeys(str(code).upper() for code in codes if str(code).strip()))
+def _date_indices(
+    stock_db_path: str | Path,
+    codes: Sequence[str],
+) -> Dict[str, Dict[str, int]]:
+    wanted = tuple(
+        dict.fromkeys(str(code).upper() for code in codes if str(code).strip())
+    )
     if not wanted:
         return {}
     columns = _stock_columns(stock_db_path)
@@ -590,7 +746,8 @@ def _date_indices(stock_db_path: str | Path, codes: Sequence[str]) -> Dict[str, 
     placeholders = ",".join("?" for _ in wanted)
     with _connect(stock_db_path) as conn:
         rows = conn.execute(
-            f"SELECT code,date FROM stock_daily WHERE code IN ({placeholders}) ORDER BY code,date",
+            f"SELECT code,date FROM stock_daily WHERE code IN ({placeholders}) "
+            "ORDER BY code,date",
             wanted,
         ).fetchall()
     result: Dict[str, Dict[str, int]] = {}
@@ -604,10 +761,22 @@ def _date_indices(stock_db_path: str | Path, codes: Sequence[str]) -> Dict[str, 
     return result
 
 
-def _non_overlapping(rows: Sequence[Mapping[str, Any]], *, horizon: int, date_indices: Mapping[str, Mapping[str, int]]) -> list[Mapping[str, Any]]:
+def _non_overlapping(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    horizon: int,
+    date_indices: Mapping[str, Mapping[str, int]],
+) -> list[Mapping[str, Any]]:
     selected: list[Mapping[str, Any]] = []
     last_index: Dict[str, int] = {}
-    for row in sorted(rows, key=lambda item: (str(item.get("code") or ""), str(item.get("effective_trade_date") or ""), int(item.get("signal_id") or 0))):
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("code") or ""),
+            str(item.get("effective_trade_date") or ""),
+            int(item.get("signal_id") or 0),
+        ),
+    ):
         code = str(row.get("code") or "").upper()
         date_text = str(row.get("effective_trade_date") or "")[:10]
         current = (date_indices.get(code) or {}).get(date_text)
@@ -621,23 +790,37 @@ def _non_overlapping(rows: Sequence[Mapping[str, Any]], *, horizon: int, date_in
 
 
 def _hit_metrics(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    hits = [int(row.get("directional_hit")) for row in rows if row.get("directional_hit") is not None]
+    hits = [
+        int(row.get("directional_hit"))
+        for row in rows
+        if row.get("directional_hit") is not None
+    ]
     successes = sum(hits)
     total = len(hits)
     lower, upper = wilson_interval(successes, total)
-    returns = [_finite(row.get("return_pct")) for row in rows]
-    clean_returns = [value for value in returns if value is not None]
-    excess = [_finite(row.get("excess_vs_spy_pct")) for row in rows]
-    clean_excess = [value for value in excess if value is not None]
+    returns = [
+        value
+        for value in (_finite(row.get("return_pct")) for row in rows)
+        if value is not None
+    ]
+    excess = [
+        value
+        for value in (_finite(row.get("excess_vs_spy_pct")) for row in rows)
+        if value is not None
+    ]
     return {
         "samples": len(rows),
         "directional_samples": total,
         "directional_hits": successes,
-        "directional_hit_rate_pct": None if total == 0 else round(100.0 * successes / total, 2),
+        "directional_hit_rate_pct": (
+            None if total == 0 else round(100.0 * successes / total, 2)
+        ),
         "hit_rate_ci95_low_pct": lower,
         "hit_rate_ci95_high_pct": upper,
-        "avg_return_pct": None if not clean_returns else round(statistics.fmean(clean_returns), 4),
-        "avg_excess_vs_spy_pct": None if not clean_excess else round(statistics.fmean(clean_excess), 4),
+        "avg_return_pct": None if not returns else round(statistics.fmean(returns), 4),
+        "avg_excess_vs_spy_pct": (
+            None if not excess else round(statistics.fmean(excess), 4)
+        ),
     }
 
 
@@ -655,9 +838,9 @@ def _champion_rows(v6_db_path: str | Path) -> list[Dict[str, Any]]:
     with _connect(v6_db_path) as conn:
         rows = conn.execute(
             """
-            SELECT s.id AS signal_id, s.code, s.effective_trade_date, s.instrument_type,
-                   s.market_regime, o.horizon_days, o.return_pct, o.directional_hit,
-                   o.excess_vs_spy_pct
+            SELECT s.id AS signal_id, s.code, s.effective_trade_date,
+                   s.instrument_type, s.market_regime, o.horizon_days,
+                   o.return_pct, o.directional_hit, o.excess_vs_spy_pct
             FROM v6_outcomes o
             JOIN v6_signals s ON s.id=o.signal_id
             ORDER BY o.horizon_days, s.code, s.effective_trade_date, s.id
@@ -670,25 +853,29 @@ def _shadow_rows(v6_db_path: str | Path) -> list[Dict[str, Any]]:
     with _connect(v6_db_path) as conn:
         rows = conn.execute(
             """
-            SELECT s.id AS signal_id, s.code, s.effective_trade_date, s.instrument_type,
-                   s.market_regime, f.variant, f.horizon_days, o.return_pct,
-                   o.directional_hit, o.excess_vs_spy_pct
+            SELECT s.id AS signal_id, s.code, s.effective_trade_date,
+                   s.instrument_type, s.market_regime, f.variant,
+                   f.horizon_days, o.return_pct, o.directional_hit,
+                   o.excess_vs_spy_pct
             FROM v6_shadow_outcomes o
             JOIN v6_shadow_forecasts f ON f.id=o.shadow_forecast_id
             JOIN v6_signals s ON s.id=f.signal_id
-            ORDER BY f.variant, f.horizon_days, s.code, s.effective_trade_date, s.id
+            ORDER BY f.variant, f.horizon_days,
+                     s.code, s.effective_trade_date, s.id
             """
         ).fetchall()
     return [dict(row) for row in rows]
 
 
-def _group_breakdown(rows: Sequence[Mapping[str, Any]], field: str) -> list[Dict[str, Any]]:
+def _group_breakdown(
+    rows: Sequence[Mapping[str, Any]],
+    field: str,
+) -> list[Dict[str, Any]]:
     result: list[Dict[str, Any]] = []
     values = sorted({str(row.get(field) or "unknown") for row in rows})
     for value in values:
         group = [row for row in rows if str(row.get(field) or "unknown") == value]
-        metrics = _hit_metrics(group)
-        result.append({"name": value, **metrics})
+        result.append({"name": value, **_hit_metrics(group)})
     return result
 
 
@@ -698,18 +885,32 @@ def _champion_metrics(
     stock_db_path: str | Path,
     min_samples: int,
 ) -> list[Dict[str, Any]]:
-    codes = [str(row.get("code") or "") for row in rows]
-    indices = _date_indices(stock_db_path, codes)
+    indices = _date_indices(
+        stock_db_path,
+        [str(row.get("code") or "") for row in rows],
+    )
     result: list[Dict[str, Any]] = []
-    for horizon in sorted({int(row.get("horizon_days") or 0) for row in rows if int(row.get("horizon_days") or 0) > 0}):
-        bucket = [row for row in rows if int(row.get("horizon_days") or 0) == horizon]
-        raw = _hit_metrics(bucket)
-        independent_rows = _non_overlapping(bucket, horizon=horizon, date_indices=indices)
+    horizons = sorted(
+        {
+            int(row.get("horizon_days") or 0)
+            for row in rows
+            if int(row.get("horizon_days") or 0) > 0
+        }
+    )
+    for horizon in horizons:
+        bucket = [
+            row for row in rows if int(row.get("horizon_days") or 0) == horizon
+        ]
+        independent_rows = _non_overlapping(
+            bucket,
+            horizon=horizon,
+            date_indices=indices,
+        )
         independent = _hit_metrics(independent_rows)
         result.append(
             {
                 "horizon_days": horizon,
-                "raw": raw,
+                "raw": _hit_metrics(bucket),
                 "non_overlapping": independent,
                 "research_state": _research_state(independent, min_samples),
                 "by_instrument": _group_breakdown(bucket, "instrument_type"),
@@ -726,19 +927,41 @@ def _shadow_metrics(
     champion: Sequence[Mapping[str, Any]],
     promotion_min_samples: int,
 ) -> list[Dict[str, Any]]:
-    codes = [str(row.get("code") or "") for row in rows]
-    indices = _date_indices(stock_db_path, codes)
-    champion_by_horizon = {int(item.get("horizon_days") or 0): item for item in champion}
+    indices = _date_indices(
+        stock_db_path,
+        [str(row.get("code") or "") for row in rows],
+    )
+    champion_by_horizon = {
+        int(item.get("horizon_days") or 0): item for item in champion
+    }
     result: list[Dict[str, Any]] = []
-    variants = sorted({str(row.get("variant") or "") for row in rows if str(row.get("variant") or "")})
+    variants = sorted(
+        {str(row.get("variant") or "") for row in rows if str(row.get("variant") or "")}
+    )
     for variant in variants:
-        for horizon in sorted({int(row.get("horizon_days") or 0) for row in rows if row.get("variant") == variant}):
-            bucket = [row for row in rows if str(row.get("variant") or "") == variant and int(row.get("horizon_days") or 0) == horizon]
-            raw = _hit_metrics(bucket)
-            independent_rows = _non_overlapping(bucket, horizon=horizon, date_indices=indices)
+        horizons = sorted(
+            {
+                int(row.get("horizon_days") or 0)
+                for row in rows
+                if str(row.get("variant") or "") == variant
+            }
+        )
+        for horizon in horizons:
+            bucket = [
+                row
+                for row in rows
+                if str(row.get("variant") or "") == variant
+                and int(row.get("horizon_days") or 0) == horizon
+            ]
+            independent_rows = _non_overlapping(
+                bucket,
+                horizon=horizon,
+                date_indices=indices,
+            )
             independent = _hit_metrics(independent_rows)
             champion_item = champion_by_horizon.get(horizon) or {}
             champion_ind = champion_item.get("non_overlapping") or {}
+
             challenger_hit = _finite(independent.get("directional_hit_rate_pct"))
             champion_hit = _finite(champion_ind.get("directional_hit_rate_pct"))
             challenger_low = _finite(independent.get("hit_rate_ci95_low_pct"))
@@ -746,10 +969,16 @@ def _shadow_metrics(
             challenger_excess = _finite(independent.get("avg_excess_vs_spy_pct"))
             champion_excess = _finite(champion_ind.get("avg_excess_vs_spy_pct"))
             enough = (
-                int(independent.get("directional_samples") or 0) >= int(promotion_min_samples)
-                and int(champion_ind.get("directional_samples") or 0) >= int(promotion_min_samples)
+                int(independent.get("directional_samples") or 0)
+                >= int(promotion_min_samples)
+                and int(champion_ind.get("directional_samples") or 0)
+                >= int(promotion_min_samples)
             )
-            hit_delta = None if challenger_hit is None or champion_hit is None else challenger_hit - champion_hit
+            hit_delta = (
+                None
+                if challenger_hit is None or champion_hit is None
+                else challenger_hit - champion_hit
+            )
             excess_ok = (
                 challenger_excess is None
                 or champion_excess is None
@@ -770,7 +999,7 @@ def _shadow_metrics(
                 {
                     "variant": variant,
                     "horizon_days": horizon,
-                    "raw": raw,
+                    "raw": _hit_metrics(bucket),
                     "non_overlapping": independent,
                     "hit_rate_delta_vs_champion_pp": _round(hit_delta, 2),
                     "promotion_candidate": promotion_candidate,
@@ -793,46 +1022,109 @@ def _max_drawdown(returns_pct: Sequence[float]) -> Optional[float]:
     return round(100.0 * max_dd, 4)
 
 
-def _strategy_metrics(v6_db_path: str | Path, min_samples: int) -> Dict[str, Any]:
+def _trade_metrics(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    filled = [
+        row
+        for row in rows
+        if str(row.get("status") or "") == "filled"
+        and _finite(row.get("return_pct")) is not None
+    ]
+    returns = [float(row["return_pct"]) for row in filled]
+    wins = sum(int(row.get("win") or 0) for row in filled)
+    lower, upper = wilson_interval(wins, len(filled))
+    positive = sum(value for value in returns if value > 0)
+    negative = abs(sum(value for value in returns if value < 0))
+    profit_factor = None if negative <= 0 else positive / negative
+    r_values = [
+        value
+        for value in (_finite(row.get("r_multiple")) for row in filled)
+        if value is not None
+    ]
+    target_hits = sum(
+        1 for row in filled if str(row.get("exit_reason") or "") == "target1"
+    )
+    stop_hits = sum(
+        1 for row in filled if "stop" in str(row.get("exit_reason") or "")
+    )
+    return {
+        "evaluated_plans": len(rows),
+        "filled_trades": len(filled),
+        "unfilled_or_invalid": len(rows) - len(filled),
+        "win_rate_pct": (
+            None if not filled else round(100.0 * wins / len(filled), 2)
+        ),
+        "win_rate_ci95_low_pct": lower,
+        "win_rate_ci95_high_pct": upper,
+        "avg_return_pct": (
+            None if not returns else round(statistics.fmean(returns), 4)
+        ),
+        "median_return_pct": (
+            None if not returns else round(statistics.median(returns), 4)
+        ),
+        "avg_r_multiple": (
+            None if not r_values else round(statistics.fmean(r_values), 4)
+        ),
+        "profit_factor": (
+            None if profit_factor is None else round(profit_factor, 4)
+        ),
+        "max_drawdown_pct": _max_drawdown(returns),
+        "target1_hit_rate_pct": (
+            None if not filled else round(100.0 * target_hits / len(filled), 2)
+        ),
+        "stop_hit_rate_pct": (
+            None if not filled else round(100.0 * stop_hits / len(filled), 2)
+        ),
+    }
+
+
+def _trade_group_breakdown(
+    rows: Sequence[Mapping[str, Any]],
+    field: str,
+) -> list[Dict[str, Any]]:
+    result: list[Dict[str, Any]] = []
+    values = sorted({str(row.get(field) or "unknown") for row in rows})
+    for value in values:
+        group = [row for row in rows if str(row.get(field) or "unknown") == value]
+        result.append({"name": value, **_trade_metrics(group)})
+    return result
+
+
+def _strategy_metrics(
+    v6_db_path: str | Path,
+    min_samples: int,
+    *,
+    execution_policy: str,
+) -> Dict[str, Any]:
     with _connect(v6_db_path) as conn:
         rows = conn.execute(
             """
             SELECT t.*, s.code, s.instrument_type, s.market_regime
             FROM v6_trade_outcomes t
             JOIN v6_signals s ON s.id=t.signal_id
+            WHERE t.execution_policy=?
             ORDER BY COALESCE(t.entry_trade_date, t.evaluated_at), t.signal_id
-            """
+            """,
+            (execution_policy,),
         ).fetchall()
     items = [dict(row) for row in rows]
-    filled = [item for item in items if str(item.get("status") or "") == "filled" and _finite(item.get("return_pct")) is not None]
-    returns = [float(item["return_pct"]) for item in filled]
-    wins = sum(int(item.get("win") or 0) for item in filled)
-    lower, upper = wilson_interval(wins, len(filled))
-    positive = sum(value for value in returns if value > 0)
-    negative = abs(sum(value for value in returns if value < 0))
-    profit_factor = None if negative <= 0 else positive / negative
-    r_values = [value for value in (_finite(item.get("r_multiple")) for item in filled) if value is not None]
-    target_hits = sum(1 for item in filled if str(item.get("exit_reason") or "") == "target1")
-    stop_hits = sum(1 for item in filled if "stop" in str(item.get("exit_reason") or ""))
-    return {
-        "status": "measurable" if len(filled) >= max(3, int(min_samples)) else "insufficient_data",
-        "evaluated_plans": len(items),
-        "filled_trades": len(filled),
-        "unfilled_or_invalid": len(items) - len(filled),
-        "win_rate_pct": None if not filled else round(100.0 * wins / len(filled), 2),
-        "win_rate_ci95_low_pct": lower,
-        "win_rate_ci95_high_pct": upper,
-        "avg_return_pct": None if not returns else round(statistics.fmean(returns), 4),
-        "median_return_pct": None if not returns else round(statistics.median(returns), 4),
-        "avg_r_multiple": None if not r_values else round(statistics.fmean(r_values), 4),
-        "profit_factor": None if profit_factor is None else round(profit_factor, 4),
-        "max_drawdown_pct": _max_drawdown(returns),
-        "target1_hit_rate_pct": None if not filled else round(100.0 * target_hits / len(filled), 2),
-        "stop_hit_rate_pct": None if not filled else round(100.0 * stop_hits / len(filled), 2),
-        "by_instrument": _group_breakdown(filled, "instrument_type"),
-        "by_market_regime": _group_breakdown(filled, "market_regime"),
-        "execution_policy": "BUY_SETUP only; first target; conservative stop-first on same-bar ambiguity",
-    }
+    core = _trade_metrics(items)
+    core.update(
+        {
+            "status": (
+                "measurable"
+                if int(core.get("filled_trades") or 0) >= max(3, int(min_samples))
+                else "insufficient_data"
+            ),
+            "execution_policy": execution_policy,
+            "by_instrument": _trade_group_breakdown(items, "instrument_type"),
+            "by_market_regime": _trade_group_breakdown(items, "market_regime"),
+            "execution_policy_description": (
+                "BUY_SETUP only; target deferred on entry bar; stop-first on "
+                "later same-bar ambiguity"
+            ),
+        }
+    )
+    return core
 
 
 def build_accuracy_lab_report(
@@ -844,9 +1136,12 @@ def build_accuracy_lab_report(
     cost_bps: float = DEFAULT_COST_BPS,
     max_holding_bars: int = DEFAULT_MAX_HOLDING_BARS,
 ) -> Dict[str, Any]:
-    champion_rows = _champion_rows(v6_db_path)
+    policy_key = execution_policy_key(
+        cost_bps=cost_bps,
+        max_holding_bars=max_holding_bars,
+    )
     champion = _champion_metrics(
-        champion_rows,
+        _champion_rows(v6_db_path),
         stock_db_path=stock_db_path,
         min_samples=min_samples,
     )
@@ -864,20 +1159,40 @@ def build_accuracy_lab_report(
     return {
         "version": ACCURACY_LAB_VERSION,
         "generated_at": _utc_now(),
-        "status": "measurable" if any(item.get("research_state") != "insufficient_data" for item in champion) else "insufficient_data",
+        "status": (
+            "measurable"
+            if any(
+                item.get("research_state") != "insufficient_data"
+                for item in champion
+            )
+            else "insufficient_data"
+        ),
         "minimum_samples": max(3, int(min_samples)),
-        "promotion_min_samples": max(int(promotion_min_samples), int(min_samples)),
+        "promotion_min_samples": max(
+            int(promotion_min_samples),
+            int(min_samples),
+        ),
         "champion": champion,
         "challengers": shadow,
         "promotion_candidates": candidates,
-        "strategy": _strategy_metrics(v6_db_path, min_samples),
+        "strategy": _strategy_metrics(
+            v6_db_path,
+            min_samples,
+            execution_policy=policy_key,
+        ),
         "policy": {
             "auto_promotion": False,
             "auto_weight_tuning": False,
             "non_overlapping_validation": True,
             "confidence_interval": "Wilson 95%",
-            "promotion_rule": "research-only; requires >=2pp non-overlap hit-rate lift, non-inferior CI lower bound, lower bound >50%, and no worse SPY excess when available",
-            "transaction_cost_bps_round_trip": float(cost_bps),
+            "shadow_variant_revision": SHADOW_VARIANT_REVISION,
+            "execution_policy": policy_key,
+            "promotion_rule": (
+                "research-only; requires >=2pp non-overlap hit-rate lift, "
+                "non-inferior CI lower bound, lower bound >50%, and no worse "
+                "SPY excess when available"
+            ),
+            "transaction_cost_bps_round_trip": max(0.0, float(cost_bps)),
             "trade_max_holding_bars": max(1, int(max_holding_bars)),
         },
     }
@@ -904,14 +1219,20 @@ def render_accuracy_lab_markdown(payload: Mapping[str, Any]) -> str:
         independent = item.get("non_overlapping") or {}
         low = independent.get("hit_rate_ci95_low_pct")
         high = independent.get("hit_rate_ci95_high_pct")
-        ci = "N/A" if low is None or high is None else f"{low:.1f}%–{high:.1f}%"
+        ci = (
+            "N/A"
+            if low is None or high is None
+            else f"{float(low):.1f}%–{float(high):.1f}%"
+        )
+        raw_hit = raw.get("directional_hit_rate_pct")
+        hit = independent.get("directional_hit_rate_pct")
         lines.append(
             "| {h}D | {rn} | {rh} | {n} | {hit} | {ci} | {state} |".format(
                 h=item.get("horizon_days"),
                 rn=raw.get("directional_samples", 0),
-                rh="N/A" if raw.get("directional_hit_rate_pct") is None else f"{raw.get('directional_hit_rate_pct'):.1f}%",
+                rh="N/A" if raw_hit is None else f"{float(raw_hit):.1f}%",
                 n=independent.get("directional_samples", 0),
-                hit="N/A" if independent.get("directional_hit_rate_pct") is None else f"{independent.get('directional_hit_rate_pct'):.1f}%",
+                hit="N/A" if hit is None else f"{float(hit):.1f}%",
                 ci=ci,
                 state=item.get("research_state"),
             )
@@ -919,13 +1240,15 @@ def render_accuracy_lab_markdown(payload: Mapping[str, Any]) -> str:
     if not champion:
         lines.append("| - | 0 | N/A | 0 | N/A | N/A | insufficient_data |")
 
-    lines.extend([
-        "",
-        "## Challenger Shadow",
-        "",
-        "| 变体 | 周期 | 非重叠N | 命中 | 相对Champion | 候选晋级 |",
-        "|---|---:|---:|---:|---:|---|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Challenger Shadow",
+            "",
+            "| 变体 | 周期 | 非重叠N | 命中 | 相对Champion | 候选晋级 |",
+            "|---|---:|---:|---:|---:|---|",
+        ]
+    )
     challengers = list(payload.get("challengers") or [])
     for item in challengers:
         independent = item.get("non_overlapping") or {}
@@ -938,43 +1261,60 @@ def render_accuracy_lab_markdown(payload: Mapping[str, Any]) -> str:
                 n=independent.get("directional_samples", 0),
                 hit="N/A" if hit is None else f"{float(hit):.1f}%",
                 delta="N/A" if delta is None else f"{float(delta):+.1f}pp",
-                candidate="是（仅研究）" if item.get("promotion_candidate") else "否",
+                candidate=(
+                    "是（仅研究）" if item.get("promotion_candidate") else "否"
+                ),
             )
         )
     if not challengers:
         lines.append("| - | - | 0 | N/A | N/A | 否 |")
 
     strategy = payload.get("strategy") or {}
-    lines.extend([
-        "",
-        "## BUY_SETUP 执行回测",
-        "",
-        f"- 已成交样本：**{strategy.get('filled_trades', 0)}**",
-        f"- 胜率：**{strategy.get('win_rate_pct') if strategy.get('win_rate_pct') is not None else 'N/A'}**",
-        f"- 平均收益：**{strategy.get('avg_return_pct') if strategy.get('avg_return_pct') is not None else 'N/A'}%**",
-        f"- 平均 R：**{strategy.get('avg_r_multiple') if strategy.get('avg_r_multiple') is not None else 'N/A'}**",
-        f"- Profit Factor：**{strategy.get('profit_factor') if strategy.get('profit_factor') is not None else 'N/A'}**",
-        f"- 最大回撤：**{strategy.get('max_drawdown_pct') if strategy.get('max_drawdown_pct') is not None else 'N/A'}%**",
-        "",
-        "## 方法与安全门",
-        "",
-        "- 方向命中率同时展示全部成熟样本与按交易周期去重后的非重叠样本。",
-        "- 95% 置信区间使用 Wilson 区间；样本不足时不把点估计当作稳定胜率。",
-        "- Challenger 与 Champion 同步影子预测，绝不直接改变正式日报的预测权重。",
-        "- BUY_SETUP 执行回测使用未来 OHLC，若同一日同时触发止损和目标，按止损先发生处理。",
-        "- 当前只允许输出研究候选；自动调权和自动晋级明确关闭。",
-        "",
-        f"*Generated by {payload.get('version', ACCURACY_LAB_VERSION)} at {payload.get('generated_at', '-')}*",
-    ])
+    win_rate = strategy.get("win_rate_pct")
+    avg_return = strategy.get("avg_return_pct")
+    avg_r = strategy.get("avg_r_multiple")
+    profit_factor = strategy.get("profit_factor")
+    max_dd = strategy.get("max_drawdown_pct")
+    lines.extend(
+        [
+            "",
+            "## BUY_SETUP 执行回测",
+            "",
+            f"- 执行策略版本：`{strategy.get('execution_policy', '-')}`",
+            f"- 已成交样本：**{strategy.get('filled_trades', 0)}**",
+            f"- 胜率：**{'N/A' if win_rate is None else str(win_rate) + '%'}**",
+            f"- 平均收益：**{'N/A' if avg_return is None else str(avg_return) + '%'}**",
+            f"- 平均 R：**{'N/A' if avg_r is None else avg_r}**",
+            f"- Profit Factor：**{'N/A' if profit_factor is None else profit_factor}**",
+            f"- 最大回撤：**{'N/A' if max_dd is None else str(max_dd) + '%'}**",
+            "",
+            "## 方法与安全门",
+            "",
+            "- 方向命中率同时展示全部成熟样本与按交易周期去重后的非重叠样本。",
+            "- 95% 置信区间使用 Wilson 区间；样本不足时不把点估计当作稳定胜率。",
+            "- Challenger 与 Champion 同步影子预测，绝不直接改变正式日报的预测权重。",
+            "- BUY_SETUP 入场 bar 不允许记目标命中；后续同 bar 止损/目标冲突按止损优先。",
+            "- cost/持仓周期/执行模型进入 execution_policy 主键，不会混用不同规则的历史样本。",
+            "- 当前只允许输出研究候选；自动调权和自动晋级明确关闭。",
+            "",
+            f"*Generated by {payload.get('version', ACCURACY_LAB_VERSION)} at {payload.get('generated_at', '-')}*",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
-def write_accuracy_lab_report(payload: Mapping[str, Any], report_dir: str | Path) -> Dict[str, str]:
+def write_accuracy_lab_report(
+    payload: Mapping[str, Any],
+    report_dir: str | Path,
+) -> Dict[str, str]:
     output = Path(report_dir)
     output.mkdir(parents=True, exist_ok=True)
     json_path = output / "v6_accuracy_lab.json"
     md_path = output / "v6_accuracy_lab.md"
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     md_path.write_text(render_accuracy_lab_markdown(payload), encoding="utf-8")
     return {"json": str(json_path), "markdown": str(md_path)}
 
@@ -1012,6 +1352,12 @@ def run_accuracy_lab(
         "shadow_not_yet_mature": shadow_maturation["not_yet_mature"],
         "new_trade_outcomes": trade_maturation["evaluated"],
         "trade_not_yet_mature": trade_maturation["not_yet_mature"],
+        "execution_policy": trade_maturation["execution_policy"],
     }
-    payload["artifacts"] = write_accuracy_lab_report(payload, report_dir)
+    output = Path(report_dir)
+    payload["artifacts"] = {
+        "json": str(output / "v6_accuracy_lab.json"),
+        "markdown": str(output / "v6_accuracy_lab.md"),
+    }
+    write_accuracy_lab_report(payload, report_dir)
     return payload
