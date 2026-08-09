@@ -159,11 +159,20 @@ jobs:
 
           with open(summary_path, encoding='utf-8') as f:
               summary = json.load(f)
+          with open(run_path, encoding='utf-8') as f:
+              run = json.load(f)
           if summary.get('research_gate', {}).get('production_effect') != 'none':
               raise SystemExit('validation report must remain shadow-only')
+          evidence = run.get('evidence_state', 'unknown')
+          if evidence != 'measurable':
+              print(
+                  '::warning::Historical replay infrastructure passed, but '
+                  f'performance evidence is not yet measurable: {evidence}'
+              )
           print(
-              'backtest outputs: PASS '
+              'backtest infrastructure: PASS '
               f'signals={signals} outcomes={outcomes} '
+              f'evidence={evidence} '
               f"gate={summary.get('research_gate', {}).get('status')}"
           )
           PY
