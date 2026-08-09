@@ -152,8 +152,9 @@ def test_v6_store_matures_by_future_trading_bars(tmp_path: Path) -> None:
     assert stats["evaluated"] == 3
     assert stats["not_yet_mature"] == 0
     scorecard = store.scoreboard(min_samples=3)
-    assert scorecard["status"] == "measurable"
+    assert scorecard["status"] == "insufficient_data"
     assert {item["horizon_days"] for item in scorecard["horizons"]} == {5, 10, 20}
+    assert all(item["samples"] == 1 for item in scorecard["horizons"])
     assert all(item["directional_hit_rate_pct"] == 100.0 for item in scorecard["horizons"])
 
 
