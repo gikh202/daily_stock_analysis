@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .unified_report import build_unified_chinese_report as _build_v60_report
@@ -7,6 +8,9 @@ from .unified_report import build_unified_chinese_report as _build_v60_report
 
 _DIRECTION = {"bullish": "看多", "neutral": "中性", "bearish": "看空"}
 _TYPE = {"STOCK": "个股", "ETF": "ETF"}
+
+
+_EMAIL_SUBJECT_META_RE = re.compile(r"^\[dsa-email-subject\]:\s+#\s+\(([^)\n]+)\)\s*$", re.MULTILINE)
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -96,6 +100,217 @@ def _accuracy_section(payload: Mapping[str, Any]) -> str:
                 )
             )
     return "\n".join(lines) + "\n"
+
+
+def _priority_rows(report: str) -> list[list[str]]:
+    match = re.search(
+        r"(?ms)^### 最终优先级\s*\n\s*"
+        r"(?P<table>\| 排名 .*?)(?=^## 2\. 今日变化|^## V6\.1|^## 3\.)",
+        report,
+    )
+    if not match:
+        return []
+    rows: list[list[str]] = []
+    for line in match.group("table").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or "---" in stripped or "排名" in stripped:
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) >= 10:
+            rows.append(cells)
+    return rows
+
+
+def _compact_priority_table(rows: Sequence[Sequence[str]]) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "### 今日动作",
+        "",
+        "| 标的 | 动作 | 主预测 | 量化方向 | 机会 | 风险 |",
+        "|---|---|---|---|---:|---:|",
+    ]
+    for cells in rows:
+        lines.append(
+            f"| {cells[1]} | {cells[2]} | {cells[4]} | {cells[5]} | {cells[7]} | {cells[8]} |"
+        )
+    return "\n".join(lines)
+
+
+def _email_subject(report: str, rows: Sequence[Sequence[str]]) -> str:
+    date_match = re.search(r"^# .*?·\s*(\d{4}-\d{2}-\d{2})\s*$", report, re.MULTILINE)
+    date_text = date_match.group(1) if date_match else ""
+    date_short = date_text[5:] if date_text else ""
+    highlights = [f"{cells[1]} {cells[2]}" for cells in rows[:2]]
+    middle = " · ".join(highlights)
+    if middle and date_short:
+        return f"美股决策日报｜{middle}｜{date_short}"
+    if middle:
+        return f"美股决策日报｜{middle}"
+    if date_text:
+        return f"美股决策日报｜{date_text}"
+    return "美股决策日报"
+
+
+def _compact_validation(section: str) -> str:
+    status_match = re.search(r"状态：\*\*([^*]+)\*\*", section)
+    minimum_match = re.search(r"最小样本门槛：\*\*(\d+)\*\*", section)
+    status = status_match.group(1).strip() if status_match else "数据不足"
+    minimum = minimum_match.group(1) if minimum_match else "50"
+
+    rows: list[tuple[str, str, str]] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or "---" in stripped or "周期" in stripped:
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) >= 3 and cells[0].endswith("D"):
+            rows.append((cells[0], cells[1], cells[2]))
+
+    has_samples = any(str(sample).strip() not in {"", "0"} for _, sample, _ in rows)
+    if not has_samples:
+        return ""
+
+    lines = [
+        "## 预测可信度",
+        "",
+        f"- 当前：**{status}**；每个周期至少 **{minimum}** 个成熟样本后再判断稳定命中率。",
+        "",
+        "| 周期 | 成熟样本 | 方向命中率 |",
+        "|---:|---:|---:|",
+    ]
+    for horizon, sample, hit in rows:
+        lines.append(f"| {horizon} | {sample} | {hit} |")
+    return "\n".join(lines)
+
+
+def build_investor_email_markdown(report: str) -> str:
+    """Convert the full V6 research report into a concise stock-only email view.
+
+    The full Markdown/JSON artifacts keep diagnostics, source health and validation
+    details.  The email intentionally removes implementation/runtime noise and
+    keeps only market context, stock decisions, multi-horizon forecasts, trade
+    plans, catalysts/risks and meaningful historical validation.
+    """
+    text = str(report or "").replace("\r\n", "\n").strip()
+    if not text:
+        return text
+
+    rows = _priority_rows(text)
+    subject = _email_subject(text, rows)
+
+    # Remove the implementation-oriented opening paragraph; the body should read
+    # like an investment brief rather than a system architecture document.
+    text = re.sub(r"(?m)^> 本报告不是 V4 与 V6.*\n?", "", text)
+    text = text.replace("# AI 美股综合日报", "# 美股决策日报")
+    text = text.replace("## 1. 今日最终总览", "## 今日概览")
+    text = text.replace("- V6 平均机会分 / 风险分：", "- 平均机会分 / 风险分：")
+    text = re.sub(r"(?m)^- 平均证据覆盖率：.*\n?", "", text)
+
+    # Replace the very wide implementation table with a mobile-friendly action table.
+    priority_match = re.search(
+        r"(?ms)^### 最终优先级\s*\n\s*"
+        r"\| 排名 .*?(?=^## 2\. 今日变化|^## V6\.1|^## 3\.)",
+        text,
+    )
+    compact_priority = _compact_priority_table(rows)
+    if priority_match and compact_priority:
+        text = text[: priority_match.start()] + compact_priority + "\n\n" + text[priority_match.end() :]
+
+    # Hide a no-op change section; keep it only when something actually changed.
+    changes = re.search(r"(?ms)^## 2\. 今日变化\s*\n(?P<body>.*?)(?=^## )", text)
+    if changes:
+        if "本轮没有达到 5 分变化阈值" in changes.group("body"):
+            text = text[: changes.start()] + text[changes.end() :]
+        else:
+            replacement = changes.group(0).replace("## 2. 今日变化", "## 较上次变化", 1)
+            text = text[: changes.start()] + replacement + text[changes.end() :]
+
+    text = text.replace("## V6.1 多周期确定性预测", "## 多周期预测")
+    text = re.sub(
+        r"(?m)^> 5D、10D、20D 使用不同的确定性权重；.*$",
+        "> 5D / 10D / 20D 分别观察短、中、稍长周期；分数用于相对比较，不直接等同于胜率。",
+        text,
+    )
+
+    # Raw macro/source diagnostics remain in JSON artifacts, not in the inbox.
+    text = re.sub(
+        r"(?ms)^### FRED 宏观风险\s*\n.*?(?=^### SEC CompanyFacts 基本面|^## 3\.)",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"(?ms)^### SEC CompanyFacts 基本面\s*\n.*?(?=^## 3\.)",
+        "",
+        text,
+    )
+
+    text = text.replace("## 3. 标的融合分析", "## 标的详解")
+    replacements = (
+        ("V4 投研摘要", "投研摘要"),
+        ("V6 确定性视角", "量化视角"),
+        ("V6 因子", "关键因子"),
+        ("V4 预测依据", "预测依据"),
+        ("融合交易计划", "交易计划"),
+        ("V6 最大仓位上限", "最大仓位上限"),
+        ("V4 仓位参考", "仓位参考"),
+        ("V4 价格参考", "价格参考"),
+        ("V6确定性方向", "量化方向"),
+        ("V4 ", ""),
+        ("V6 ", ""),
+    )
+    for old, new in replacements:
+        text = text.replace(old, new)
+
+    # Remove operational/model/source-health sections from email.
+    text = re.sub(
+        r"(?ms)^## 4\. 大模型与数据健康度\s*\n.*?(?=^## 6\. 预测验证看板)",
+        "",
+        text,
+    )
+
+    scoreboard = re.search(
+        r"(?ms)^## 6\. 预测验证看板\s*\n(?P<body>.*?)(?=^## 7\. 运行健康度|\Z)",
+        text,
+    )
+    if scoreboard:
+        compact = _compact_validation(scoreboard.group("body"))
+        text = text[: scoreboard.start()] + (compact + "\n\n" if compact else "") + text[scoreboard.end() :]
+
+    text = re.sub(r"(?ms)^## 7\. 运行健康度\s*\n.*\Z", "", text)
+
+    # Remove any implementation-only limitation line that may have survived
+    # inside a stock card. Stock-specific data/price limitations are preserved.
+    filtered: list[str] = []
+    technical_markers = (
+        "LLM",
+        "SQLite",
+        "SEC/FRED",
+        "SEC CompanyFacts",
+        "FRED ",
+        "数值评分",
+        "生成器：",
+        "engine_version",
+    )
+    for line in text.splitlines():
+        if any(marker in line for marker in technical_markers):
+            continue
+        filtered.append(line)
+    text = "\n".join(filtered)
+
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    text += (
+        "\n\n---\n\n"
+        "> 风险提示：本邮件用于研究与交易计划，不构成自动下单指令；"
+        "非交易时段的入场、止损和目标位需在下一交易日结合最新价格重新确认。"
+    )
+    return f"[dsa-email-subject]: # ({subject})\n{text}\n"
+
+
+def extract_investor_email_subject(markdown: str) -> Optional[str]:
+    """Read the hidden subject generated by ``build_investor_email_markdown``."""
+    match = _EMAIL_SUBJECT_META_RE.search(str(markdown or ""))
+    return match.group(1).strip() if match else None
 
 
 def build_accuracy_unified_report(
