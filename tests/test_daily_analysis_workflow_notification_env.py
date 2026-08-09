@@ -86,6 +86,7 @@ def test_daily_analysis_keeps_deferred_behavior_switches_unmapped() -> None:
 
 
 def test_daily_analysis_maps_merge_email_notification_with_safe_default() -> None:
+    # MERGE_EMAIL_NOTIFICATION is an active workflow switch now, not a deferred mapping.
     env = _load_daily_analysis_env()
 
     expression = str(env["MERGE_EMAIL_NOTIFICATION"])
