@@ -15,11 +15,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.alpha_engine.shadow_store import read_analysis_records
+from src.v6_daily.accuracy_report import build_accuracy_unified_report
 from src.v6_daily.engine import V6DailyEngine
 from src.v6_daily.free_sources import fetch_free_context
 from src.v6_daily.report import write_daily_report
 from src.v6_daily.store import V6DailyStore, mature_outcomes
-from src.v6_daily.unified_report import build_unified_chinese_report, count_v4_structured_records
+from src.v6_daily.unified_report import count_v4_structured_records
 
 
 logger = logging.getLogger("v6_daily")
@@ -83,7 +84,7 @@ def _finalize_report(
     else:
         logger.warning("[V6] 未发现 V4 结构化投研记录；最终报告不会回退为 V4/V6 原文拼接")
 
-    unified = build_unified_chinese_report(
+    unified = build_accuracy_unified_report(
         v6_markdown,
         v4_markdown,
         v6_payload=v6_payload,
@@ -94,7 +95,7 @@ def _finalize_report(
     dated_path.write_text(unified, encoding="utf-8")
     return {
         "language": "zh",
-        "fusion_mode": "structured_v4_v6",
+        "fusion_mode": "structured_v4_v6_accuracy",
         "v4_merged": structured_count > 0,
         "v4_structured_records": structured_count,
         "v4_report": str(v4_path) if v4_markdown and v4_path is not None else None,
@@ -117,8 +118,6 @@ def run(
     engine = V6DailyEngine()
     records = read_analysis_records(stock_db_path, limit=max(1, int(limit)))
 
-    # V6.1 fetches official/free context before scoring so the exact evidence
-    # used by the signal can be persisted. Any source failure remains best-effort.
     source_codes = list(
         dict.fromkeys(
             str(record.get("code") or "").strip().upper()
