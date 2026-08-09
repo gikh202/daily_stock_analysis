@@ -78,6 +78,18 @@ def _spearman(pairs: Iterable[Tuple[Any, Any]]) -> Tuple[Optional[float], int]:
     return _pearson(_average_ranks(xs), _average_ranks(ys)), len(clean)
 
 
+def _return_hit_rate(rows: Sequence[sqlite3.Row], *, positive: bool) -> Optional[float]:
+    returns = [
+        value
+        for value in (_finite(row["return_pct"]) for row in rows)
+        if value is not None
+    ]
+    if not returns:
+        return None
+    hits = sum(1 for value in returns if (value > 0.0 if positive else value <= 0.0))
+    return round(100.0 * hits / len(returns), 2)
+
+
 class V6DailyStore:
     """Independent V6 persistence so production V4 storage stays untouched."""
 
@@ -391,6 +403,7 @@ class V6DailyStore:
             returns = [float(row["return_pct"]) for row in bucket if row["return_pct"] is not None]
             buy_rows = [row for row in bucket if row["decision"] == "BUY_SETUP"]
             avoid_rows = [row for row in bucket if row["decision"] == "AVOID"]
+            avoided_returns = [float(row["return_pct"]) for row in avoid_rows if row["return_pct"] is not None]
             score_ic, score_ic_n = _spearman(
                 (row["forecast_score"], row["return_pct"]) for row in bucket
             )
@@ -406,9 +419,11 @@ class V6DailyStore:
                     "directional_hit_rate_pct": None if not hits else round(100.0 * sum(hits) / len(hits), 2),
                     "avg_return_pct": None if not returns else round(statistics.fmean(returns), 4),
                     "buy_setup_samples": len(buy_rows),
-                    "buy_setup_hit_rate_pct": self._decision_hit_rate(buy_rows),
+                    "buy_setup_hit_rate_pct": _return_hit_rate(buy_rows, positive=True),
                     "avoidance_samples": len(avoid_rows),
-                    "avoidance_hit_rate_pct": self._decision_hit_rate(avoid_rows),
+                    "avoidance_hit_rate_pct": _return_hit_rate(avoid_rows, positive=False),
+                    "false_avoid_rate_pct": None if not avoided_returns else round(100.0 * sum(1 for value in avoided_returns if value > 0.0) / len(avoided_returns), 2),
+                    "avg_avoided_return_pct": None if not avoided_returns else round(statistics.fmean(avoided_returns), 4),
                     "forecast_score_ic_spearman": None if score_ic is None else round(score_ic, 4),
                     "forecast_score_ic_samples": score_ic_n,
                     "opportunity_ic_spearman": None if opp_ic is None else round(opp_ic, 4),
@@ -422,11 +437,6 @@ class V6DailyStore:
             "status": "measurable" if any(item["mature"] for item in horizons) else "insufficient_data",
             "horizons": horizons,
         }
-
-    @staticmethod
-    def _decision_hit_rate(rows: Sequence[sqlite3.Row]) -> Optional[float]:
-        hits = [int(row["directional_hit"]) for row in rows if row["directional_hit"] is not None]
-        return None if not hits else round(100.0 * sum(hits) / len(hits), 2)
 
 
 def _future_bars(
@@ -486,6 +496,7 @@ def mature_outcomes(
         if start is None or start <= 0:
             pending += len(needed)
             continue
+
         for horizon in needed:
             if len(bars) < horizon:
                 pending += 1
@@ -509,4 +520,5 @@ def mature_outcomes(
                 neutral_band_pct=neutral_band_pct,
             ):
                 evaluated += 1
+
     return {"evaluated": evaluated, "not_yet_mature": pending}
