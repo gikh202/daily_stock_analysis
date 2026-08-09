@@ -93,7 +93,7 @@ Discord 长报告发送复用现有分片链路：单条 `content` 运行时不�
 | `FEISHU_APP_SECRET` | minimal | feishu | Secret | - |
 | `FEISHU_CHAT_ID` | minimal | feishu | Variable or Secret | - |
 | `FEISHU_RECEIVE_ID_TYPE` | advanced | feishu | Variable or Secret | - |
-| `FEISHU_DOMAIN` | advanced | feishu | Variable or Secret | - |
+| `FEISHU_DOMAIN` | advanced | feishu | Variable or Secret | `feishu` |
 | `FEISHU_SEND_AS_FILE` | advanced | feishu | Variable or Secret | - |
 | `ASTRBOT_URL` | minimal | astrbot | Secret | - |
 | `ASTRBOT_TOKEN` | advanced | astrbot | Secret | - |
@@ -113,7 +113,7 @@ Discord 长报告发送复用现有分片链路：单条 `content` 运行时不�
 
 <!-- notification-actions-env-table:end -->
 
-默认 workflow 仍不映射 `MARKDOWN_TO_IMAGE_CHANNELS` 与 `MERGE_EMAIL_NOTIFICATION`。它们是发送形态或聚合行为开关，不是渠道凭证；在 Actions 中自动开始读取同名 Secret/Variable 会引入额外行为变化。
+默认 workflow 仍不映射 `MARKDOWN_TO_IMAGE_CHANNELS`。`MERGE_EMAIL_NOTIFICATION` 已显式映射为 Repository Variable，并在未配置时默认 `true`，用于保持单封聚合邮件行为。
 
 ## 图片报告分享模板
 
@@ -318,7 +318,7 @@ Docker 场景可通过 `--env-file .env` / Compose `env_file` 注入通知相关
 
 默认 `00-daily-analysis.yml` 只读取表格中显式映射的 Secret / Variable。新增 repository Secret 或 Variable 后，只有变量名已经出现在 workflow `env:` 中才会进入运行进程；`STOCK_GROUP_N` / `EMAIL_GROUP_N` 这类任意编号变量不会自动导入。
 
-Secret 适合 token、password、webhook URL 等敏感项；Variable 适合 `WECHAT_MSG_TYPE`、`EMAIL_SENDER_NAME`、路由、降噪窗口和时区这类非敏感行为配置。`MARKDOWN_TO_IMAGE_CHANNELS` 与 `MERGE_EMAIL_NOTIFICATION` 默认不映射，如需在自己的 fork 中使用，应显式修改 workflow 并补充对应测试。
+Secret 适合 token、password、webhook URL 等敏感项；Variable 适合 `WECHAT_MSG_TYPE`、`EMAIL_SENDER_NAME`、路由、降噪窗口和时区这类非敏感行为配置。`MARKDOWN_TO_IMAGE_CHANNELS` 默认不映射；`MERGE_EMAIL_NOTIFICATION` 已映射为 Variable，并默认 `true`。如需图片化通知，应在自己的 fork 中显式补充对应 workflow 映射和测试。
 
 ## Desktop
 
