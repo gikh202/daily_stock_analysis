@@ -5,7 +5,7 @@ import math
 import os
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -36,10 +36,28 @@ def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
 
-def _get_json(url: str, *, headers: Optional[Dict[str, str]] = None, timeout: float = 10.0) -> Any:
+def _get_json(
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = 10.0,
+) -> Any:
     request = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _latest_non_missing_observation(payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    observations = payload.get("observations")
+    if not isinstance(observations, list):
+        return None
+    for item in observations:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("value") or "").strip()
+        if value and value != ".":
+            return {"date": str(item.get("date") or ""), "value": value}
+    return None
 
 
 def _recent_sec_filings(payload: Dict[str, Any], *, limit: int = 6) -> list[Dict[str, str]]:
@@ -70,7 +88,11 @@ def _recent_sec_filings(payload: Dict[str, Any], *, limit: int = 6) -> list[Dict
     return result
 
 
-def _fact_rows(companyfacts: Mapping[str, Any], tags: Sequence[str], unit_candidates: Sequence[str]) -> list[Dict[str, Any]]:
+def _fact_rows(
+    companyfacts: Mapping[str, Any],
+    tags: Sequence[str],
+    unit_candidates: Sequence[str],
+) -> list[Dict[str, Any]]:
     facts = companyfacts.get("facts")
     us_gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
     if not isinstance(us_gaap, dict):
@@ -84,7 +106,7 @@ def _fact_rows(companyfacts: Mapping[str, Any], tags: Sequence[str], unit_candid
             rows = units.get(unit)
             if not isinstance(rows, list):
                 continue
-            clean = []
+            clean: list[Dict[str, Any]] = []
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -96,13 +118,18 @@ def _fact_rows(companyfacts: Mapping[str, Any], tags: Sequence[str], unit_candid
                     continue
                 item = dict(row)
                 item["val"] = value
+                item["fact_tag"] = tag
                 clean.append(item)
             if clean:
                 return clean
     return []
 
 
-def _annual_values(companyfacts: Mapping[str, Any], tags: Sequence[str], units: Sequence[str] = ("USD",)) -> list[Dict[str, Any]]:
+def _annual_values(
+    companyfacts: Mapping[str, Any],
+    tags: Sequence[str],
+    units: Sequence[str] = ("USD",),
+) -> list[Dict[str, Any]]:
     rows = _fact_rows(companyfacts, tags, units)
     by_end: Dict[str, Dict[str, Any]] = {}
     for row in rows:
@@ -112,15 +139,92 @@ def _annual_values(companyfacts: Mapping[str, Any], tags: Sequence[str], units: 
         previous = by_end.get(end)
         if previous is None or str(row.get("filed") or "") > str(previous.get("filed") or ""):
             by_end[end] = row
-    return sorted(by_end.values(), key=lambda item: str(item.get("end") or ""), reverse=True)
+    return sorted(
+        by_end.values(),
+        key=lambda item: str(item.get("end") or ""),
+        reverse=True,
+    )
 
 
-def _latest_instant(companyfacts: Mapping[str, Any], tags: Sequence[str], units: Sequence[str] = ("USD",)) -> Optional[Dict[str, Any]]:
+def _latest_instant(
+    companyfacts: Mapping[str, Any],
+    tags: Sequence[str],
+    units: Sequence[str] = ("USD",),
+) -> Optional[Dict[str, Any]]:
     rows = _fact_rows(companyfacts, tags, units)
     if not rows:
         return None
-    rows.sort(key=lambda item: (str(item.get("end") or ""), str(item.get("filed") or "")), reverse=True)
+    rows.sort(
+        key=lambda item: (
+            str(item.get("end") or ""),
+            str(item.get("filed") or ""),
+        ),
+        reverse=True,
+    )
     return rows[0]
+
+
+def _latest_total_debt(companyfacts: Mapping[str, Any]) -> Tuple[Optional[float], Optional[str], str, bool]:
+    """Return debt without silently dropping the noncurrent portion.
+
+    Prefer a total-debt concept. When the filer splits current and noncurrent
+    maturities, sum values only when they refer to the same reporting date.
+    Partial values are returned for display but marked incomplete so they do not
+    contribute a full balance-sheet quality component.
+    """
+    total = _latest_instant(
+        companyfacts,
+        (
+            "LongTermDebtAndFinanceLeaseObligations",
+            "LongTermDebt",
+            "DebtAndFinanceLeaseObligations",
+        ),
+    )
+    if total:
+        return (
+            _finite(total.get("val")),
+            str(total.get("end") or "") or None,
+            str(total.get("fact_tag") or "total_debt"),
+            True,
+        )
+
+    current = _latest_instant(
+        companyfacts,
+        (
+            "LongTermDebtAndFinanceLeaseObligationsCurrent",
+            "LongTermDebtCurrent",
+            "CurrentPortionOfLongTermDebt",
+        ),
+    )
+    noncurrent = _latest_instant(
+        companyfacts,
+        (
+            "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
+            "LongTermDebtNoncurrent",
+        ),
+    )
+    current_value = _finite(current.get("val")) if current else None
+    noncurrent_value = _finite(noncurrent.get("val")) if noncurrent else None
+    current_end = str(current.get("end") or "") if current else ""
+    noncurrent_end = str(noncurrent.get("end") or "") if noncurrent else ""
+
+    if (
+        current_value is not None
+        and noncurrent_value is not None
+        and current_end
+        and current_end == noncurrent_end
+    ):
+        return (
+            current_value + noncurrent_value,
+            current_end,
+            "current_plus_noncurrent_long_term_debt",
+            True,
+        )
+    if noncurrent_value is not None:
+        return noncurrent_value, noncurrent_end or None, "noncurrent_debt_partial", False
+    if current_value is not None:
+        return current_value, current_end or None, "current_debt_partial", False
+    return None, None, "unavailable", False
 
 
 def _growth(series: Sequence[Mapping[str, Any]]) -> Optional[float]:
@@ -154,35 +258,52 @@ def _score_margin(value: Optional[float]) -> Optional[float]:
 def _fundamental_snapshot(companyfacts: Mapping[str, Any]) -> Dict[str, Any]:
     revenue = _annual_values(
         companyfacts,
-        ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"),
+        (
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "Revenues",
+            "SalesRevenueNet",
+        ),
     )
     operating_income = _annual_values(companyfacts, ("OperatingIncomeLoss",))
     net_income = _annual_values(companyfacts, ("NetIncomeLoss", "ProfitLoss"))
-    ocf = _annual_values(companyfacts, ("NetCashProvidedByUsedInOperatingActivities",))
+    ocf = _annual_values(
+        companyfacts,
+        ("NetCashProvidedByUsedInOperatingActivities",),
+    )
     capex = _annual_values(
         companyfacts,
-        ("PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsForProceedsFromProductiveAssets"),
+        (
+            "PaymentsToAcquirePropertyPlantAndEquipment",
+            "PaymentsForProceedsFromProductiveAssets",
+        ),
     )
     shares = _annual_values(
         companyfacts,
-        ("WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingBasic"),
+        (
+            "WeightedAverageNumberOfDilutedSharesOutstanding",
+            "WeightedAverageNumberOfSharesOutstandingBasic",
+        ),
         ("shares",),
     )
     cash_row = _latest_instant(
         companyfacts,
-        ("CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"),
+        (
+            "CashAndCashEquivalentsAtCarryingValue",
+            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        ),
     )
-    debt_row = _latest_instant(
-        companyfacts,
-        ("LongTermDebtAndFinanceLeaseObligationsCurrent", "LongTermDebtCurrent", "LongTermDebtNoncurrent"),
-    )
+    debt, debt_date, debt_source, debt_complete = _latest_total_debt(companyfacts)
 
     revenue_latest = _finite(revenue[0].get("val")) if revenue else None
     op_latest = _finite(operating_income[0].get("val")) if operating_income else None
     net_latest = _finite(net_income[0].get("val")) if net_income else None
     ocf_latest = _finite(ocf[0].get("val")) if ocf else None
     capex_latest = _finite(capex[0].get("val")) if capex else None
-    fcf = None if ocf_latest is None or capex_latest is None else ocf_latest - abs(capex_latest)
+    fcf = (
+        None
+        if ocf_latest is None or capex_latest is None
+        else ocf_latest - abs(capex_latest)
+    )
 
     revenue_growth = _growth(revenue)
     operating_income_growth = _growth(operating_income)
@@ -192,7 +313,6 @@ def _fundamental_snapshot(companyfacts: Mapping[str, Any]) -> Dict[str, Any]:
     fcf_margin = _ratio(fcf, revenue_latest)
     dilution = _growth(shares)
     cash = _finite(cash_row.get("val")) if cash_row else None
-    debt = _finite(debt_row.get("val")) if debt_row else None
 
     components: Dict[str, Optional[float]] = {
         "revenue_growth": _score_growth(revenue_growth),
@@ -203,9 +323,12 @@ def _fundamental_snapshot(companyfacts: Mapping[str, Any]) -> Dict[str, Any]:
         "balance_sheet": None,
         "dilution": None,
     }
-    if cash is not None and debt is not None:
-        ratio = cash / max(abs(debt), 1.0)
-        components["balance_sheet"] = round(_clamp(35.0 + 45.0 * math.tanh(ratio / 1.5)), 2)
+    if cash is not None and debt is not None and debt_complete:
+        cash_to_debt = cash / max(abs(debt), 1.0)
+        components["balance_sheet"] = round(
+            _clamp(35.0 + 45.0 * math.tanh(cash_to_debt / 1.5)),
+            2,
+        )
     if dilution is not None:
         components["dilution"] = round(_clamp(75.0 - 6.0 * dilution), 2)
 
@@ -223,6 +346,9 @@ def _fundamental_snapshot(companyfacts: Mapping[str, Any]) -> Dict[str, Any]:
         "fcf_margin_pct": fcf_margin,
         "cash": cash,
         "debt": debt,
+        "debt_date": debt_date,
+        "debt_source": debt_source,
+        "debt_complete": debt_complete,
         "diluted_shares_yoy_pct": dilution,
         "components": components,
         "source": "SEC CompanyFacts/XBRL",
@@ -238,12 +364,11 @@ def _series_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
         if not isinstance(item, dict):
             continue
         value = _finite(item.get("value"))
-        date = str(item.get("date") or "")
-        if value is not None and date:
-            values.append((date, value))
+        date_value = str(item.get("date") or "")
+        if value is not None and date_value:
+            values.append((date_value, value))
     if not values:
         return {}
-    # API is requested newest-first.
     current = values[0][1]
     history = [value for _, value in values]
     percentile = 100.0 * sum(1 for value in history if value <= current) / len(history)
@@ -279,19 +404,28 @@ def _fred_derived(series: Mapping[str, Any]) -> Dict[str, Any]:
     }
     if d10 is not None:
         rate_level = _clamp((d10 - 2.0) / 4.0 * 100.0)
-        rate_change = 50.0 if d10_change is None else _clamp(50.0 + d10_change * 100.0)
+        rate_change = (
+            50.0
+            if d10_change is None
+            else _clamp(50.0 + d10_change * 100.0)
+        )
         inversion = 75.0 if curve is not None and curve < 0 else 35.0
-        components["rates"] = 0.45 * rate_level + 0.30 * rate_change + 0.25 * inversion
+        components["rates"] = (
+            0.45 * rate_level + 0.30 * rate_change + 0.25 * inversion
+        )
 
-    weighted = []
+    weighted: list[tuple[float, float]] = []
     for name, weight in (("volatility", 0.45), ("credit", 0.35), ("rates", 0.20)):
         component = components[name]
         if component is not None:
             weighted.append((component, weight))
     macro_risk = None
     if weighted:
-        total = sum(weight for _, weight in weighted)
-        macro_risk = round(sum(value_ * weight for value_, weight in weighted) / total, 2)
+        total_weight = sum(weight for _, weight in weighted)
+        macro_risk = round(
+            sum(component * weight for component, weight in weighted) / total_weight,
+            2,
+        )
 
     return {
         "macro_risk_score": macro_risk,
@@ -299,7 +433,10 @@ def _fred_derived(series: Mapping[str, Any]) -> Dict[str, Any]:
         "dgs10_change_5obs": d10_change,
         "hy_oas_change_5obs": hy_change,
         "vix_change_5obs": vix_change,
-        "components": {key: None if value_ is None else round(value_, 2) for key, value_ in components.items()},
+        "components": {
+            key: None if component is None else round(component, 2)
+            for key, component in components.items()
+        },
     }
 
 
@@ -309,7 +446,7 @@ def source_status() -> Dict[str, Any]:
         "sec": {
             "configured": bool(os.getenv("SEC_USER_AGENT", "").strip()),
             "cost": "free",
-            "role": "official filing metadata plus deterministic CompanyFacts fundamentals",
+            "role": "official filing metadata plus coverage-gated CompanyFacts fundamentals",
         },
         "fred": {
             "configured": bool(os.getenv("FRED_API_KEY", "").strip()),
@@ -325,7 +462,11 @@ def source_status() -> Dict[str, Any]:
 
 
 def fetch_free_context(codes: Iterable[str]) -> Dict[str, Any]:
-    """Best-effort structured public-data enrichment; failures never abort V6."""
+    """Best-effort current public-data snapshot; failures never abort V6.
+
+    The daily runner is responsible for ensuring this *current* snapshot is not
+    numerically injected into historical/backfilled signals.
+    """
     status = source_status()
     result: Dict[str, Any] = {"status": status, "sec": {}, "fred": {}}
     if not status["enabled"]:
@@ -345,21 +486,29 @@ def fetch_free_context(codes: Iterable[str]) -> Dict[str, Any]:
                     cik = item.get("cik_str")
                     if ticker and cik is not None:
                         ticker_map[ticker] = f"{int(cik):010d}"
-            normalized = list(dict.fromkeys(str(code or "").strip().upper() for code in codes))[:30]
+            normalized = list(
+                dict.fromkeys(str(code or "").strip().upper() for code in codes)
+            )[:30]
             for code in normalized:
                 cik = ticker_map.get(code)
                 if not cik:
                     continue
                 item: Dict[str, Any] = {"cik": cik}
                 try:
-                    submissions = _get_json(SEC_SUBMISSIONS_URL.format(cik=cik), headers=headers)
+                    submissions = _get_json(
+                        SEC_SUBMISSIONS_URL.format(cik=cik),
+                        headers=headers,
+                    )
                     if isinstance(submissions, dict):
                         item["company"] = submissions.get("name")
                         item["recent_filings"] = _recent_sec_filings(submissions)
                 except Exception as exc:
                     item["filings_error"] = f"{type(exc).__name__}: {exc}"
                 try:
-                    facts = _get_json(SEC_COMPANYFACTS_URL.format(cik=cik), headers=headers)
+                    facts = _get_json(
+                        SEC_COMPANYFACTS_URL.format(cik=cik),
+                        headers=headers,
+                    )
                     if isinstance(facts, dict):
                         item["fundamentals"] = _fundamental_snapshot(facts)
                 except Exception as exc:
@@ -383,10 +532,23 @@ def fetch_free_context(codes: Iterable[str]) -> Dict[str, Any]:
                     }
                 )
                 payload = _get_json(f"{FRED_OBSERVATIONS_URL}?{query}")
-                summary = _series_summary(payload if isinstance(payload, dict) else {})
-                series[series_id] = {"label": label, "summary": summary, "latest": {"date": summary.get("date"), "value": summary.get("value")} if summary else None}
+                summary = _series_summary(
+                    payload if isinstance(payload, dict) else {}
+                )
+                series[series_id] = {
+                    "label": label,
+                    "summary": summary,
+                    "latest": (
+                        {"date": summary.get("date"), "value": summary.get("value")}
+                        if summary
+                        else None
+                    ),
+                }
             except Exception as exc:
-                series[series_id] = {"label": label, "error": f"{type(exc).__name__}: {exc}"}
+                series[series_id] = {
+                    "label": label,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
         result["fred"] = dict(series)
         result["fred"]["derived"] = _fred_derived(series)
 
