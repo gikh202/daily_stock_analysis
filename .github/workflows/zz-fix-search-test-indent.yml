@@ -1,0 +1,60 @@
+name: Fix search test indentation
+
+on:
+  push:
+    branches:
+      - agent/v6-accuracy-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: agent/v6-accuracy-foundation
+          fetch-depth: 0
+
+      - name: Repair malformed class-method indentation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import py_compile
+
+          path = Path("tests/test_search_news_freshness.py")
+          lines = path.read_text(encoding="utf-8").splitlines()
+          targets = [
+              "test_search_comprehensive_intel_etf_analytical_dimensions_keep_unknown_dates",
+              "test_etf_index_outlook_keeps_unknown_dates",
+          ]
+
+          for target in targets:
+              marker = f"    def {target}("
+              start = next((i for i, line in enumerate(lines) if line.startswith(marker)), None)
+              if start is None:
+                  raise RuntimeError(f"missing function: {target}")
+              end = next(
+                  (i for i in range(start + 1, len(lines)) if lines[i].startswith("    def ")),
+                  len(lines),
+              )
+              for i in range(start + 1, end):
+                  if lines[i]:
+                      lines[i] = "    " + lines[i]
+
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          py_compile.compile(str(path), doraise=True)
+          PY
+
+      - name: Commit repair and remove helper workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/zz-fix-search-test-indent.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/test_search_news_freshness.py .github/workflows/zz-fix-search-test-indent.yml
+          git diff --cached --check
+          git commit -m "test: repair search freshness test indentation"
+          git push origin HEAD:agent/v6-accuracy-foundation
