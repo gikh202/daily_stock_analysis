@@ -11,6 +11,7 @@ on:
       - 'src/alpha_engine/validation.py'
       - 'tests/test_v6_daily.py'
       - 'tests/test_v6_accuracy_foundation.py'
+      - 'tests/test_v6_runner_accuracy.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -27,6 +28,7 @@ on:
       - 'src/alpha_engine/validation.py'
       - 'tests/test_v6_daily.py'
       - 'tests/test_v6_accuracy_foundation.py'
+      - 'tests/test_v6_runner_accuracy.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -83,5 +85,6 @@ jobs:
           python -m pytest -q \
             tests/test_v6_daily.py \
             tests/test_v6_accuracy_foundation.py \
+            tests/test_v6_runner_accuracy.py \
             tests/test_alpha_engine.py \
             tests/test_alpha_validation.py
