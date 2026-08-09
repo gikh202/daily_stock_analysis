@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.alpha_engine.shadow_store import read_analysis_records
 from src.v6_daily.engine import V6DailyEngine
+from src.v6_daily.free_sources import fetch_free_context
 from src.v6_daily.report import write_daily_report
 from src.v6_daily.store import V6DailyStore, mature_outcomes
 
@@ -48,7 +49,7 @@ def _notify(report_path: Path, codes: list[str]) -> Dict[str, Any]:
             "success": bool(success),
             "status": "sent" if success else "failed",
         }
-    except Exception as exc:  # notification failure must not corrupt V6 research state
+    except Exception as exc:
         logger.exception("V6 notification failed")
         return {
             "attempted": True,
@@ -108,6 +109,14 @@ def run(
     if quick.strip().lower() != "ok":
         raise RuntimeError(f"V6 database quick_check failed: {quick}")
 
+    board_before_report = store.latest_board()
+    codes = [
+        str(item.get("code") or "").strip().upper()
+        for item in board_before_report
+        if str(item.get("code") or "").strip()
+    ]
+    public_context = fetch_free_context(codes)
+
     run_stats: Dict[str, Any] = {
         "analysis_records_seen": len(records),
         "new_signals": new_signals,
@@ -116,18 +125,18 @@ def run(
         "new_outcomes": maturation["evaluated"],
         "not_yet_mature": maturation["not_yet_mature"],
         "quick_check": quick,
+        "free_source_enrichment": (public_context.get("status") or {}).get("enabled", False),
     }
     payload = write_daily_report(
         store,
         report_dir,
         run_stats=run_stats,
         min_samples=max(3, int(min_samples)),
-        report_date=datetime.now().strftime("%Y%m%d"),
+        report_date=datetime.now().strftime("%Y-%m-%d"),
+        public_context=public_context,
     )
 
     report_path = Path(report_dir) / "v6_daily_latest.md"
-    board = payload.get("board") or []
-    codes = [str(item.get("code") or "") for item in board if str(item.get("code") or "")]
     notification = _notify(report_path, codes) if notify else {
         "attempted": False,
         "success": False,
@@ -140,6 +149,7 @@ def run(
         "report": str(report_path),
         "run": run_stats,
         "scoreboard_status": (payload.get("scoreboard") or {}).get("status"),
+        "free_sources": public_context.get("status") or {},
         "notification": notification,
     }
     (Path(report_dir) / "v6_run.json").write_text(
