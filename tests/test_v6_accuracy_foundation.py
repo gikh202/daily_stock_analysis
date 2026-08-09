@@ -3,20 +3,27 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import replace
+from datetime import date, timedelta
 from pathlib import Path
 
+from scripts.run_v6_daily import _is_current_external_context_safe
 from src.alpha_engine.models import AlphaFeatures
 from src.v6_daily.accuracy import (
     build_horizon_forecasts,
     deterministic_catalyst_score,
+    external_fundamental_quality,
 )
 from src.v6_daily.engine import V6DailyEngine
-from src.v6_daily.free_sources import _fred_derived, _fundamental_snapshot
+from src.v6_daily.free_sources import (
+    _fred_derived,
+    _fundamental_snapshot,
+    _latest_total_debt,
+)
 from src.v6_daily.replay import replay_series
 from src.v6_daily.store import V6DailyStore, mature_outcomes
 
 
-def _record(history_id: int = 1, code: str = "MSFT", date: str = "2026-01-01") -> dict:
+def _record(history_id: int = 1, code: str = "MSFT", date_value: str = "2026-01-01") -> dict:
     snapshot = {
         "trend_analysis": {
             "signal_score": 80,
@@ -38,7 +45,7 @@ def _record(history_id: int = 1, code: str = "MSFT", date: str = "2026-01-01") -
         "market_regime": {"regime": "risk_on", "market_breadth": {"breadth": "broad"}},
         "market_structure_context": {"support": 95.0, "resistance": 115.0},
         "realtime": {"price": 100.0},
-        "effective_daily_bar_date": date,
+        "effective_daily_bar_date": date_value,
         "atr": 2.0,
     }
     raw = {
@@ -50,7 +57,7 @@ def _record(history_id: int = 1, code: str = "MSFT", date: str = "2026-01-01") -
         "id": history_id,
         "query_id": f"q-{history_id}",
         "code": code,
-        "created_at": f"{date} 22:30:00",
+        "created_at": f"{date_value} 22:30:00",
         "context_snapshot": json.dumps(snapshot),
         "raw_result": json.dumps(raw),
     }
@@ -79,12 +86,26 @@ def test_horizon_models_are_distinct_and_etf_ignores_company_fundamental() -> No
     assert etf_low["20d"]["score"] == etf_high["20d"]["score"]
 
 
-def test_free_form_llm_catalyst_is_not_scored_but_structured_evidence_is() -> None:
+def test_free_form_or_unsourced_catalyst_is_not_scored_but_sourced_evidence_is() -> None:
     score, diag = deterministic_catalyst_score(
         {"dashboard": {"intelligence": {"positive_catalysts": ["huge upside"]}}}
     )
     assert score is None
     assert diag["eligible_events"] == 0
+
+    score, diag = deterministic_catalyst_score(
+        {
+            "dashboard": {
+                "intelligence": {
+                    "evidence": [
+                        {"direction": "positive", "importance": "high", "age_hours": 2}
+                    ]
+                }
+            }
+        }
+    )
+    assert score is None
+    assert diag["rejected_unsourced"] == 1
 
     score, diag = deterministic_catalyst_score(
         {
@@ -104,6 +125,17 @@ def test_free_form_llm_catalyst_is_not_scored_but_structured_evidence_is() -> No
     )
     assert score is not None and score > 50
     assert diag["eligible_events"] == 1
+
+
+def test_external_fundamental_requires_minimum_component_coverage() -> None:
+    low_coverage = {
+        "sec": {"MSFT": {"fundamentals": {"quality_score": 90, "coverage": 0.30}}}
+    }
+    sufficient = {
+        "sec": {"MSFT": {"fundamentals": {"quality_score": 82, "coverage": 0.72}}}
+    }
+    assert external_fundamental_quality(low_coverage, "MSFT") is None
+    assert external_fundamental_quality(sufficient, "MSFT") == 82.0
 
 
 def _fact(tag: str, values: list[tuple[str, float]]) -> tuple[str, dict]:
@@ -139,7 +171,36 @@ def test_sec_companyfacts_builds_deterministic_fundamental_quality() -> None:
     assert result["operating_margin_pct"] == 30.0
     assert result["fcf_margin_pct"] == 25.0
     assert result["quality_score"] is not None
+    assert result["coverage"] >= 0.60
     assert result["source"] == "SEC CompanyFacts/XBRL"
+
+
+def test_sec_debt_sums_current_and_noncurrent_same_period() -> None:
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "LongTermDebtCurrent": {
+                    "units": {
+                        "USD": [
+                            {"end": "2026-06-30", "val": 20.0, "form": "10-Q", "filed": "2026-07-20"}
+                        ]
+                    }
+                },
+                "LongTermDebtNoncurrent": {
+                    "units": {
+                        "USD": [
+                            {"end": "2026-06-30", "val": 80.0, "form": "10-Q", "filed": "2026-07-20"}
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    debt, debt_date, source, complete = _latest_total_debt(payload)
+    assert debt == 100.0
+    assert debt_date == "2026-06-30"
+    assert source == "current_plus_noncurrent_long_term_debt"
+    assert complete is True
 
 
 def test_fred_macro_uses_levels_and_changes() -> None:
@@ -153,6 +214,13 @@ def test_fred_macro_uses_levels_and_changes() -> None:
     assert result["yield_curve_10y_2y"] == 0.4
     assert result["macro_risk_score"] is not None
     assert 0 <= result["macro_risk_score"] <= 100
+
+
+def test_current_external_snapshot_is_rejected_for_stale_backfill() -> None:
+    recent = (date.today() - timedelta(days=2)).isoformat()
+    stale = (date.today() - timedelta(days=30)).isoformat()
+    assert _is_current_external_context_safe(recent) is True
+    assert _is_current_external_context_safe(stale) is False
 
 
 def test_same_symbol_same_trade_date_is_not_counted_twice(tmp_path: Path) -> None:
@@ -213,14 +281,12 @@ def test_maturity_uses_each_horizons_own_direction_and_benchmark(tmp_path: Path)
 def _series_with_future(multiplier: float) -> dict:
     result = {"MSFT": [], "SPY": [], "QQQ": []}
     for day in range(1, 101):
-        date = f"2025-{((day - 1) // 28) + 1:02d}-{((day - 1) % 28) + 1:02d}"
+        date_value = f"2025-{((day - 1) // 28) + 1:02d}-{((day - 1) % 28) + 1:02d}"
         base = 100.0 + day * 0.3
-        # The selected as-of point below is day 71. Only mutate observations
-        # after that point so any score change would be a real future-data leak.
         future_adjustment = 0.0 if day <= 71 else (day - 71) * multiplier
-        result["MSFT"].append({"date": date, "close": base + future_adjustment, "high": base + 1, "low": base - 1, "volume": 1_000_000 + day})
-        result["SPY"].append({"date": date, "close": 100 + day * 0.15, "high": 0, "low": 0, "volume": 1})
-        result["QQQ"].append({"date": date, "close": 100 + day * 0.20, "high": 0, "low": 0, "volume": 1})
+        result["MSFT"].append({"date": date_value, "close": base + future_adjustment, "high": base + 1, "low": base - 1, "volume": 1_000_000 + day})
+        result["SPY"].append({"date": date_value, "close": 100 + day * 0.15, "high": 0, "low": 0, "volume": 1})
+        result["QQQ"].append({"date": date_value, "close": 100 + day * 0.20, "high": 0, "low": 0, "volume": 1})
     return result
 
 
@@ -230,6 +296,5 @@ def test_replay_features_do_not_leak_future_prices() -> None:
     key_date = _series_with_future(0.2)["MSFT"][70]["date"]
     left = next(item for item in first if item.as_of == key_date and item.horizon_days == 5)
     right = next(item for item in second if item.as_of == key_date and item.horizon_days == 5)
-    # Future outcomes can change, but the score at the as-of date cannot.
     assert left.score == right.score
     assert left.direction == right.direction
