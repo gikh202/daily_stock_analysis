@@ -29,10 +29,11 @@ def _get_json(url: str, *, headers: Optional[Dict[str, str]] = None, timeout: fl
 
 
 def _latest_non_missing_observation(payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Return the first usable observation from a newest-first FRED response."""
     observations = payload.get("observations")
     if not isinstance(observations, list):
         return None
-    for item in reversed(observations):
+    for item in observations:
         if not isinstance(item, dict):
             continue
         value = str(item.get("value") or "").strip()
@@ -103,11 +104,12 @@ def fetch_free_context(codes: Iterable[str]) -> Dict[str, Any]:
 
     sec_user_agent = os.getenv("SEC_USER_AGENT", "").strip()
     if sec_user_agent:
+        sec_headers = {
+            "User-Agent": sec_user_agent,
+            "Accept": "application/json",
+        }
         try:
-            tickers_payload = _get_json(
-                SEC_TICKERS_URL,
-                headers={"User-Agent": sec_user_agent, "Accept-Encoding": "gzip, deflate"},
-            )
+            tickers_payload = _get_json(SEC_TICKERS_URL, headers=sec_headers)
             ticker_map: Dict[str, str] = {}
             if isinstance(tickers_payload, dict):
                 for item in tickers_payload.values():
@@ -117,14 +119,17 @@ def fetch_free_context(codes: Iterable[str]) -> Dict[str, Any]:
                     cik = item.get("cik_str")
                     if ticker and cik is not None:
                         ticker_map[ticker] = f"{int(cik):010d}"
-            for code in list(dict.fromkeys(str(code or "").strip().upper() for code in codes))[:20]:
+            normalized_codes = list(
+                dict.fromkeys(str(code or "").strip().upper() for code in codes)
+            )[:20]
+            for code in normalized_codes:
                 cik = ticker_map.get(code)
                 if not cik:
                     continue
                 try:
                     payload = _get_json(
                         SEC_SUBMISSIONS_URL.format(cik=cik),
-                        headers={"User-Agent": sec_user_agent, "Accept-Encoding": "gzip, deflate"},
+                        headers=sec_headers,
                     )
                     if isinstance(payload, dict):
                         result["sec"][code] = {
@@ -146,14 +151,19 @@ def fetch_free_context(codes: Iterable[str]) -> Dict[str, Any]:
                         "series_id": series_id,
                         "api_key": fred_key,
                         "file_type": "json",
-                        "sort_order": "asc",
+                        "sort_order": "desc",
                         "limit": 30,
                     }
                 )
                 payload = _get_json(f"{FRED_OBSERVATIONS_URL}?{query}")
-                latest = _latest_non_missing_observation(payload if isinstance(payload, dict) else {})
+                latest = _latest_non_missing_observation(
+                    payload if isinstance(payload, dict) else {}
+                )
                 result["fred"][series_id] = {"label": label, "latest": latest}
             except Exception as exc:
-                result["fred"][series_id] = {"label": label, "error": f"{type(exc).__name__}: {exc}"}
+                result["fred"][series_id] = {
+                    "label": label,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
 
     return result
