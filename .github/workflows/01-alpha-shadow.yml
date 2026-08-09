@@ -30,8 +30,6 @@ concurrency:
 
 jobs:
   shadow:
-    # workflow_run only proceeds when production analysis succeeded. Scheduled,
-    # feature-branch validation and manual runs replay the latest valid cache.
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -139,12 +137,12 @@ jobs:
             --report-dir alpha_reports \
             --limit 5000
 
-      - name: Generate V5 Alpha validation report
+      - name: Generate corrected Alpha validation report
         run: |
           python scripts/run_alpha_validation.py \
             --alpha-db alpha_data/alpha_shadow.db \
             --report-dir alpha_reports \
-            --min-samples 20 \
+            --min-samples 50 \
             --primary-horizon 5
 
       - name: Validate Alpha shadow database
