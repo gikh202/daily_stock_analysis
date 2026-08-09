@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from scripts.run_v6_daily import run
 from src.v6_daily.engine import V6DailyEngine
+from src.v6_daily.free_sources import source_status
 from src.v6_daily.store import V6DailyStore, mature_outcomes
 
 
@@ -90,6 +92,16 @@ def test_v6_numeric_forecast_is_independent_from_llm_prose() -> None:
     assert first.evidence_coverage > 0.5
 
 
+def test_free_source_enrichment_is_safe_when_unconfigured(monkeypatch) -> None:
+    monkeypatch.setenv("V6_FREE_SOURCE_ENRICHMENT", "true")
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    status = source_status()
+    assert status["enabled"] is True
+    assert status["sec"]["configured"] is False
+    assert status["fred"]["configured"] is False
+
+
 def _create_stock_db(path: Path) -> None:
     conn = sqlite3.connect(path)
     try:
@@ -158,7 +170,63 @@ def test_v6_store_matures_by_future_trading_bars(tmp_path: Path) -> None:
     assert all(item["directional_hit_rate_pct"] == 100.0 for item in scorecard["horizons"])
 
 
-def test_v6_runner_generates_daily_report_and_database(tmp_path: Path) -> None:
+def test_buy_and_avoid_metrics_do_not_reuse_forecast_direction(tmp_path: Path) -> None:
+    store = V6DailyStore(str(tmp_path / "v6_metrics.db"))
+    base = V6DailyEngine().from_analysis_record(_record())
+    assert base is not None
+
+    buy = replace(
+        base,
+        analysis_history_id=1,
+        query_id="buy",
+        code="BUY",
+        decision="BUY_SETUP",
+        direction="bearish",
+    )
+    avoid = replace(
+        base,
+        analysis_history_id=2,
+        query_id="avoid",
+        code="AVOID",
+        decision="AVOID",
+        direction="bullish",
+    )
+    assert store.save_signal(buy, engine_version=V6DailyEngine.version)
+    assert store.save_signal(avoid, engine_version=V6DailyEngine.version)
+
+    rows = store.all_signals()
+    by_code = {row["code"]: int(row["id"]) for row in rows}
+    store.save_outcome(
+        signal_id=by_code["BUY"],
+        horizon_days=5,
+        end_trade_date="2026-02-05",
+        start_price=100.0,
+        end_price=105.0,
+        max_high=106.0,
+        min_low=99.0,
+        direction="bearish",
+    )
+    store.save_outcome(
+        signal_id=by_code["AVOID"],
+        horizon_days=5,
+        end_trade_date="2026-02-05",
+        start_price=100.0,
+        end_price=90.0,
+        max_high=101.0,
+        min_low=89.0,
+        direction="bullish",
+    )
+
+    horizon = store.scoreboard(min_samples=3)["horizons"][0]
+    assert horizon["directional_hit_rate_pct"] == 0.0
+    assert horizon["buy_setup_hit_rate_pct"] == 100.0
+    assert horizon["avoidance_hit_rate_pct"] == 100.0
+    assert horizon["false_avoid_rate_pct"] == 0.0
+    assert horizon["avg_avoided_return_pct"] == -10.0
+
+
+def test_v6_runner_generates_daily_report_and_database(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("V6_FREE_SOURCE_ENRICHMENT", "false")
     stock_db = tmp_path / "stock.db"
     _create_stock_db(stock_db)
     report_dir = tmp_path / "reports"
@@ -182,4 +250,5 @@ def test_v6_runner_generates_daily_report_and_database(tmp_path: Path) -> None:
     assert "Opportunity Ranking" in markdown
     assert "Setup Cards" in markdown
     assert "Prediction Scoreboard" in markdown
+    assert "Free Public Data Context" in markdown
     assert "LLM prose has zero direct numeric influence" in markdown
