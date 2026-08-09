@@ -2021,33 +2021,33 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         self.assertEqual(intel["earnings"].results[1].published_date, in_window)
 
     def test_search_comprehensive_intel_etf_analytical_dimensions_keep_unknown_dates(self) -> None:
-    """ETF analytical dimensions keep unknown-date background evidence."""
-    fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
-    fresh_text = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    expected_fresh_date = fresh_dt.astimezone().date().isoformat()
+        """ETF analytical dimensions keep unknown-date background evidence."""
+        fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        fresh_text = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        expected_fresh_date = fresh_dt.astimezone().date().isoformat()
 
-    service, mock_search = self._create_service_with_mock_provider(
-        news_max_age_days=3,
-        news_strategy_profile="short",
-    )
-    mock_search.side_effect = [
-        _response([_result("latest_news", fresh_text, snippet="沪深300ETF 510300 最新消息")]),
-        _response([_result("fund_analysis_unknown", None, snippet="沪深300ETF 510300 基金分析")]),
-        _response([_result("tracking_risk_unknown", None, snippet="沪深300ETF 510300 跟踪风险")]),
-    ]
-
-    with patch("src.search_service.time.sleep"):
-        intel = service.search_comprehensive_intel(
-            stock_code="510300",
-            stock_name="沪深300ETF",
-            max_searches=3,
+        service, mock_search = self._create_service_with_mock_provider(
+            news_max_age_days=3,
+            news_strategy_profile="short",
         )
+        mock_search.side_effect = [
+            _response([_result("latest_news", fresh_text, snippet="沪深300ETF 510300 最新消息")]),
+            _response([_result("fund_analysis_unknown", None, snippet="沪深300ETF 510300 基金分析")]),
+            _response([_result("tracking_risk_unknown", None, snippet="沪深300ETF 510300 跟踪风险")]),
+        ]
 
-    self.assertEqual(intel["latest_news"].results[0].published_date, expected_fresh_date)
-    self.assertEqual([item.title for item in intel["fund_analysis"].results], ["fund_analysis_unknown"])
-    self.assertIsNone(intel["fund_analysis"].results[0].published_date)
-    self.assertEqual([item.title for item in intel["tracking_risk"].results], ["tracking_risk_unknown"])
-    self.assertIsNone(intel["tracking_risk"].results[0].published_date)
+        with patch("src.search_service.time.sleep"):
+            intel = service.search_comprehensive_intel(
+                stock_code="510300",
+                stock_name="沪深300ETF",
+                max_searches=3,
+            )
+
+        self.assertEqual(intel["latest_news"].results[0].published_date, expected_fresh_date)
+        self.assertEqual([item.title for item in intel["fund_analysis"].results], ["fund_analysis_unknown"])
+        self.assertIsNone(intel["fund_analysis"].results[0].published_date)
+        self.assertEqual([item.title for item in intel["tracking_risk"].results], ["tracking_risk_unknown"])
+        self.assertIsNone(intel["tracking_risk"].results[0].published_date)
     def test_search_comprehensive_intel_non_etf_risk_check_stays_strict(self) -> None:
         """Non-ETF risk_check should keep strict freshness filtering."""
         fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
@@ -2136,31 +2136,31 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         self.assertIn("fresh_announcement", titles)
 
     def test_etf_index_outlook_keeps_unknown_dates(self) -> None:
-    """ETF index_outlook is analytical and may keep unknown-date background evidence."""
-    fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
-    fresh_text = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        """ETF index_outlook is analytical and may keep unknown-date background evidence."""
+        fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        fresh_text = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    service, mock_search = self._create_service_with_mock_provider(
-        news_max_age_days=3,
-        news_strategy_profile="short",
-    )
-    mock_search.side_effect = [
-        _response([_result("latest_news", fresh_text, snippet="沪深300ETF 510300 最新消息")]),
-        _response([_result("fund_analysis", None, snippet="沪深300ETF 510300 基金分析")]),
-        _response([_result("tracking_risk", None, snippet="沪深300ETF 510300 跟踪风险")]),
-        _response([_result("index_outlook_unknown", None, snippet="沪深300ETF 510300 指数成分展望")]),
-    ]
-
-    with patch("src.search_service.time.sleep"):
-        intel = service.search_comprehensive_intel(
-            stock_code="510300",
-            stock_name="沪深300ETF",
-            max_searches=4,
+        service, mock_search = self._create_service_with_mock_provider(
+            news_max_age_days=3,
+            news_strategy_profile="short",
         )
+        mock_search.side_effect = [
+            _response([_result("latest_news", fresh_text, snippet="沪深300ETF 510300 最新消息")]),
+            _response([_result("fund_analysis", None, snippet="沪深300ETF 510300 基金分析")]),
+            _response([_result("tracking_risk", None, snippet="沪深300ETF 510300 跟踪风险")]),
+            _response([_result("index_outlook_unknown", None, snippet="沪深300ETF 510300 指数成分展望")]),
+        ]
 
-    self.assertIn("index_outlook", intel)
-    self.assertEqual([item.title for item in intel["index_outlook"].results], ["index_outlook_unknown"])
-    self.assertIsNone(intel["index_outlook"].results[0].published_date)
+        with patch("src.search_service.time.sleep"):
+            intel = service.search_comprehensive_intel(
+                stock_code="510300",
+                stock_name="沪深300ETF",
+                max_searches=4,
+            )
+
+        self.assertIn("index_outlook", intel)
+        self.assertEqual([item.title for item in intel["index_outlook"].results], ["index_outlook_unknown"])
+        self.assertIsNone(intel["index_outlook"].results[0].published_date)
     def test_effective_window_helper_has_no_side_effect(self) -> None:
         """_effective_news_window_days should not mutate stored news_window_days."""
         service, _ = self._create_service_with_mock_provider(
