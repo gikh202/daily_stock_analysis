@@ -85,8 +85,8 @@ def source_status() -> Dict[str, Any]:
         },
         "existing_repository_sources": {
             "yfinance": "free market/daily data",
-            "brave": "optional free-credit search fallback via existing SearchService",
-            "finnhub": "optional free-tier company/news data where configured",
+            "serpapi": "existing optional search provider",
+            "brave": "existing optional search fallback when configured",
         },
     }
 
