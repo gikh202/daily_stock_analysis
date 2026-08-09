@@ -1,0 +1,66 @@
+name: V6 Daily CI
+
+on:
+  pull_request:
+    paths:
+      - 'src/v6_daily/**'
+      - 'scripts/run_v6_daily.py'
+      - 'src/alpha_engine/models.py'
+      - 'src/alpha_engine/validation.py'
+      - 'tests/test_v6_daily.py'
+      - 'tests/test_alpha_validation.py'
+      - '.github/workflows/ci-v6-daily.yml'
+      - '.github/workflows/03-v6-daily.yml'
+  push:
+    branches:
+      - 'agent/v6-daily-intelligence'
+    paths:
+      - 'src/v6_daily/**'
+      - 'scripts/run_v6_daily.py'
+      - 'src/alpha_engine/models.py'
+      - 'src/alpha_engine/validation.py'
+      - 'tests/test_v6_daily.py'
+      - 'tests/test_alpha_validation.py'
+      - '.github/workflows/ci-v6-daily.yml'
+      - '.github/workflows/03-v6-daily.yml'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  v6-daily-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install test dependency
+        run: python -m pip install --upgrade pytest
+
+      - name: Compile V6 modules
+        run: |
+          python -m py_compile \
+            src/v6_daily/__init__.py \
+            src/v6_daily/models.py \
+            src/v6_daily/engine.py \
+            src/v6_daily/store.py \
+            src/v6_daily/report.py \
+            scripts/run_v6_daily.py \
+            src/alpha_engine/models.py \
+            src/alpha_engine/validation.py
+
+      - name: Run V6 and corrected validation tests
+        run: |
+          python -m pytest -q \
+            tests/test_v6_daily.py \
+            tests/test_alpha_validation.py
