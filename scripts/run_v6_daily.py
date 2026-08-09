@@ -95,7 +95,8 @@ def _finalize_report(
     dated_path.write_text(unified, encoding="utf-8")
     return {
         "language": "zh",
-        "fusion_mode": "structured_v4_v6_accuracy",
+        "fusion_mode": "structured_v4_v6",
+        "accuracy_layer": "v6.1",
         "v4_merged": structured_count > 0,
         "v4_structured_records": structured_count,
         "v4_report": str(v4_path) if v4_markdown and v4_path is not None else None,
