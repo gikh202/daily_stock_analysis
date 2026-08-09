@@ -125,6 +125,7 @@ jobs:
           V6_DAILY_MIN_SAMPLES: ${{ inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
           V6_DAILY_SCAN_LIMIT: ${{ inputs.scan_limit || vars.V6_DAILY_SCAN_LIMIT || '5000' }}
           V6_FREE_SOURCE_ENRICHMENT: ${{ vars.V6_FREE_SOURCE_ENRICHMENT || 'true' }}
+          V6_UNIFIED_EMAIL_FINAL: 'true'
           SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT || secrets.SEC_USER_AGENT }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
