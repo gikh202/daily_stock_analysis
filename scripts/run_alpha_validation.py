@@ -34,7 +34,7 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate V5 Alpha validation metrics")
+    parser = argparse.ArgumentParser(description="Generate V6-compatible Alpha validation metrics")
     parser.add_argument(
         "--alpha-db",
         default=os.getenv("ALPHA_SHADOW_DB_PATH", "alpha_data/alpha_shadow.db"),
@@ -46,7 +46,7 @@ def main() -> int:
     parser.add_argument(
         "--min-samples",
         type=int,
-        default=int(os.getenv("ALPHA_VALIDATION_MIN_SAMPLES", "20")),
+        default=int(os.getenv("ALPHA_VALIDATION_MIN_SAMPLES", "50")),
     )
     parser.add_argument(
         "--primary-horizon",
