@@ -97,11 +97,11 @@ def _seed_validation_dataset(store: AlphaShadowStore) -> None:
         )
 
 
-def test_validation_summary_reports_rank_quality_and_risk_proxies(tmp_path: Path) -> None:
+def test_validation_separates_long_strategy_from_avoidance(tmp_path: Path) -> None:
     store = AlphaShadowStore(str(tmp_path / "alpha_shadow.db"))
     _seed_validation_dataset(store)
 
-    summary = build_validation_summary(store, min_samples=5, primary_horizon=5)
+    summary = build_validation_summary(store, min_samples=3, primary_horizon=5)
 
     assert summary["coverage"]["signals"] == 6
     assert summary["coverage"]["evaluated_signals"] == 6
@@ -110,11 +110,36 @@ def test_validation_summary_reports_rank_quality_and_risk_proxies(tmp_path: Path
 
     horizon = summary["horizons"][0]
     assert horizon["horizon_days"] == 5
-    assert horizon["directional_hit_rate_pct"] == pytest.approx(83.33, abs=0.01)
-    assert horizon["avg_strategy_return_pct"] == pytest.approx(2.5, abs=0.001)
-    assert horizon["profit_factor"] == pytest.approx(16.0, abs=0.001)
+    assert horizon["strategy_samples"] == 3
+    assert horizon["buy_directional_hit_rate_pct"] == pytest.approx(66.67, abs=0.01)
+    assert horizon["avg_strategy_return_pct"] == pytest.approx(2.6667, abs=0.001)
+    assert horizon["profit_factor"] == pytest.approx(9.0, abs=0.001)
+    assert horizon["avoidance_samples"] == 3
+    assert horizon["avoidance_hit_rate_pct"] == pytest.approx(100.0)
+    assert horizon["false_avoid_rate_pct"] == pytest.approx(0.0)
+    assert horizon["avg_avoided_return_pct"] == pytest.approx(-2.3333, abs=0.001)
     assert horizon["opportunity_ic_spearman"] > 0.9
-    assert horizon["sequence_max_drawdown_proxy_pct"] > 0
+    assert horizon["avg_evidence_coverage_pct"] == pytest.approx(75.0)
+
+
+def test_avoid_is_not_counted_as_short_profit(tmp_path: Path) -> None:
+    store = AlphaShadowStore(str(tmp_path / "alpha_shadow.db"))
+    _seed_signal(
+        store,
+        history_id=1,
+        code="AAA",
+        created_at="2026-01-01T00:00:00+00:00",
+        decision="AVOID",
+        opportunity_score=20,
+        confidence=0.8,
+        return_pct=-10.0,
+    )
+    summary = build_validation_summary(store, min_samples=3, primary_horizon=5)
+    horizon = summary["horizons"][0]
+    assert horizon["strategy_samples"] == 0
+    assert horizon["avg_strategy_return_pct"] is None
+    assert horizon["avoidance_samples"] == 1
+    assert horizon["avoidance_hit_rate_pct"] == 100.0
 
 
 def test_validation_report_writes_machine_and_trader_views(tmp_path: Path) -> None:
@@ -125,7 +150,7 @@ def test_validation_report_writes_machine_and_trader_views(tmp_path: Path) -> No
     summary = write_validation_report(
         store,
         report_dir,
-        min_samples=5,
+        min_samples=3,
         primary_horizon=5,
     )
 
@@ -137,17 +162,17 @@ def test_validation_report_writes_machine_and_trader_views(tmp_path: Path) -> No
 
     markdown = md_path.read_text(encoding="utf-8")
     assert "Research gate: **research_pass**" in markdown
-    assert "Profit Factor" in markdown
-    assert "Sharpe Proxy" in markdown
-    assert "DD Proxy" in markdown
-    assert "shadow-only" in markdown
+    assert "BUY Hit" in markdown
+    assert "Avoid Hit" in markdown
+    assert "Evidence" in markdown
+    assert "shadow/research only" in markdown
 
 
 def test_validation_stays_insufficient_until_sample_floor_is_met(tmp_path: Path) -> None:
     store = AlphaShadowStore(str(tmp_path / "alpha_shadow.db"))
     _seed_validation_dataset(store)
 
-    summary = build_validation_summary(store, min_samples=20, primary_horizon=5)
+    summary = build_validation_summary(store, min_samples=50, primary_horizon=5)
 
     assert summary["research_gate"]["status"] == "insufficient_data"
     assert summary["research_gate"]["checks"]["sample_size"] is False
@@ -179,7 +204,7 @@ def test_backtest_evidence_state_does_not_overclaim_results() -> None:
     ) == "below_sample_floor"
     assert _evidence_state(
         {
-            "coverage": {"outcomes": 40, "evaluated_signals": 20},
+            "coverage": {"outcomes": 100, "evaluated_signals": 50},
             "research_gate": {"status": "research_hold"},
         }
     ) == "measurable"
@@ -191,4 +216,4 @@ def test_render_validation_markdown_handles_empty_database(tmp_path: Path) -> No
     markdown = render_validation_markdown(summary)
 
     assert summary["research_gate"]["status"] == "insufficient_data"
-    assert "| - | 0 | N/A" in markdown
+    assert "| - | 0 | 0 | N/A" in markdown

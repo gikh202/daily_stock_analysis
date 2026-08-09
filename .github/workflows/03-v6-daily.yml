@@ -1,0 +1,215 @@
+name: V6 AI 美股日报
+
+on:
+  workflow_run:
+    workflows: ['每日股票分析']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      notify:
+        description: 'Send V6 report through configured notification channels'
+        required: false
+        default: true
+        type: boolean
+      min_samples:
+        description: 'Minimum matured samples before metrics are called measurable'
+        required: false
+        default: '50'
+        type: string
+      scan_limit:
+        description: 'Maximum production history rows to scan'
+        required: false
+        default: '5000'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v6-daily-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  v6-daily:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare V6 directories
+        run: mkdir -p data v6_data v6_reports
+
+      - name: Restore latest valid production database
+        uses: actions/cache/restore@v5
+        with:
+          path: data/
+          key: v6-stock-source-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-analysis-data-${{ runner.os }}-
+
+      - name: Restore V6 research history
+        uses: actions/cache/restore@v5
+        with:
+          path: v6_data/
+          key: v6-daily-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            v6-daily-data-${{ runner.os }}-
+
+      - name: Validate production source database
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = 'data/stock_analysis.db'
+          if not os.path.isfile(path):
+              raise SystemExit('stock_analysis.db missing; V6 cannot run')
+          if os.path.getsize(path) < 4096:
+              raise SystemExit('stock_analysis.db unexpectedly small')
+
+          conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              tables = {
+                  row[0]
+                  for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+              }
+              history = int(conn.execute('SELECT COUNT(*) FROM analysis_history').fetchone()[0]) if 'analysis_history' in tables else 0
+              bars = int(conn.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]) if 'stock_daily' in tables else 0
+          finally:
+              conn.close()
+
+          if quick != 'ok':
+              raise SystemExit(f'stock_analysis.db quick_check failed: {quick!r}')
+          missing = {'analysis_history', 'stock_daily'} - tables
+          if missing:
+              raise SystemExit(f'missing required V6 source tables: {sorted(missing)}')
+          if history <= 0:
+              raise SystemExit('analysis_history is empty')
+          if bars <= 0:
+              raise SystemExit('stock_daily is empty')
+          print(f'V6 source database: PASS history={history} stock_daily={bars}')
+          PY
+
+      - name: Run V6 deterministic daily intelligence
+        env:
+          V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
+          V6_DAILY_MIN_SAMPLES: ${{ inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
+          V6_DAILY_SCAN_LIMIT: ${{ inputs.scan_limit || vars.V6_DAILY_SCAN_LIMIT || '5000' }}
+          V6_FREE_SOURCE_ENRICHMENT: ${{ vars.V6_FREE_SOURCE_ENRICHMENT || 'true' }}
+          SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT || secrets.SEC_USER_AGENT }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+          REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || 'zh' }}
+
+          # Existing notification configuration is reused; V6 adds no paid service requirement.
+          EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'V6 AI 美股日报' }}
+          WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
+          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
+          NOTIFICATION_REPORT_CHANNELS: ${{ vars.NOTIFICATION_REPORT_CHANNELS || secrets.NOTIFICATION_REPORT_CHANNELS }}
+          NOTIFICATION_DEDUP_TTL_SECONDS: ${{ vars.NOTIFICATION_DEDUP_TTL_SECONDS || secrets.NOTIFICATION_DEDUP_TTL_SECONDS || '0' }}
+          NOTIFICATION_COOLDOWN_SECONDS: ${{ vars.NOTIFICATION_COOLDOWN_SECONDS || secrets.NOTIFICATION_COOLDOWN_SECONDS || '0' }}
+          NOTIFICATION_TIMEZONE: ${{ vars.NOTIFICATION_TIMEZONE || secrets.NOTIFICATION_TIMEZONE || 'Asia/Shanghai' }}
+          LOG_LEVEL: INFO
+        run: |
+          NOTIFY_ARG=""
+          case "${V6_DAILY_NOTIFY,,}" in
+            1|true|yes|on) NOTIFY_ARG="--notify" ;;
+          esac
+          python scripts/run_v6_daily.py \
+            --stock-db data/stock_analysis.db \
+            --v6-db v6_data/v6_daily.db \
+            --report-dir v6_reports \
+            --limit "${V6_DAILY_SCAN_LIMIT}" \
+            --min-samples "${V6_DAILY_MIN_SAMPLES}" \
+            ${NOTIFY_ARG}
+
+      - name: Validate V6 database and outputs
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sqlite3
+
+          db = 'v6_data/v6_daily.db'
+          report = 'v6_reports/v6_daily_latest.md'
+          run = 'v6_reports/v6_run.json'
+          payload = 'v6_reports/v6_daily_latest.json'
+          for path in (db, report, run, payload):
+              if not os.path.isfile(path):
+                  raise SystemExit(f'missing V6 output: {path}')
+
+          conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=10)
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              signals = int(conn.execute('SELECT COUNT(*) FROM v6_signals').fetchone()[0])
+              outcomes = int(conn.execute('SELECT COUNT(*) FROM v6_outcomes').fetchone()[0])
+          finally:
+              conn.close()
+          if quick != 'ok':
+              raise SystemExit(f'v6_daily.db quick_check failed: {quick!r}')
+          if signals <= 0:
+              raise SystemExit('V6 generated zero usable signals')
+          with open(run, encoding='utf-8') as f:
+              run_payload = json.load(f)
+          print(
+              'V6 validation: PASS '
+              f'signals={signals} outcomes={outcomes} '
+              f"scoreboard={run_payload.get('scoreboard_status')} "
+              f"notification={run_payload.get('notification', {}).get('status')}"
+          )
+          PY
+
+      - name: Save V6 research history
+        if: success()
+        uses: actions/cache/save@v5
+        with:
+          path: v6_data/
+          key: v6-daily-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload V6 daily artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: v6-daily-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            v6_reports/
+            v6_data/v6_daily.db
+          if-no-files-found: warn
+          retention-days: 30
