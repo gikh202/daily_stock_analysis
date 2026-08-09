@@ -19,6 +19,7 @@ from src.v6_daily.engine import V6DailyEngine
 from src.v6_daily.free_sources import fetch_free_context
 from src.v6_daily.report import write_daily_report
 from src.v6_daily.store import V6DailyStore, mature_outcomes
+from src.v6_daily.unified_report import build_unified_chinese_report
 
 
 logger = logging.getLogger("v6_daily")
@@ -42,7 +43,7 @@ def _notify(report_path: Path, codes: list[str]) -> Dict[str, Any]:
             email_send_to_all=True,
             route_type="report",
             severity="info",
-            dedup_key=f"v6-daily-{datetime.now().strftime('%Y%m%d')}",
+            dedup_key=f"v6-unified-daily-{datetime.now().strftime('%Y%m%d')}",
         )
         return {
             "attempted": True,
@@ -50,13 +51,43 @@ def _notify(report_path: Path, codes: list[str]) -> Dict[str, Any]:
             "status": "sent" if success else "failed",
         }
     except Exception as exc:
-        logger.exception("V6 notification failed")
+        logger.exception("V6 unified notification failed")
         return {
             "attempted": True,
             "success": False,
             "status": "exception",
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+
+def _finalize_report(
+    *,
+    report_dir: str,
+    report_date: str,
+    v4_report_path: str | None,
+) -> Dict[str, Any]:
+    output = Path(report_dir)
+    latest_path = output / "v6_daily_latest.md"
+    dated_path = output / f"v6_daily_{report_date}.md"
+    v6_markdown = latest_path.read_text(encoding="utf-8")
+
+    v4_path = Path(v4_report_path) if v4_report_path else None
+    v4_markdown = None
+    if v4_path is not None and v4_path.is_file():
+        v4_markdown = v4_path.read_text(encoding="utf-8")
+        logger.info("[V6] 已合并上游 V4 报告: %s", v4_path)
+    elif v4_report_path:
+        logger.warning("[V6] 指定的 V4 报告不存在，降级为仅 V6 中文日报: %s", v4_report_path)
+
+    unified = build_unified_chinese_report(v6_markdown, v4_markdown)
+    latest_path.write_text(unified, encoding="utf-8")
+    dated_path.write_text(unified, encoding="utf-8")
+    return {
+        "language": "zh",
+        "v4_merged": bool(v4_markdown),
+        "v4_report": str(v4_path) if v4_markdown and v4_path is not None else None,
+        "output": str(latest_path),
+    }
 
 
 def run(
@@ -68,6 +99,7 @@ def run(
     min_samples: int = 50,
     primary_model: str | None = None,
     notify: bool = False,
+    v4_report_path: str | None = None,
 ) -> Dict[str, Any]:
     store = V6DailyStore(v6_db_path)
     engine = V6DailyEngine()
@@ -127,15 +159,21 @@ def run(
         "quick_check": quick,
         "free_source_enrichment": (public_context.get("status") or {}).get("enabled", False),
     }
+    report_date = datetime.now().strftime("%Y-%m-%d")
     payload = write_daily_report(
         store,
         report_dir,
         run_stats=run_stats,
         min_samples=max(3, int(min_samples)),
-        report_date=datetime.now().strftime("%Y-%m-%d"),
+        report_date=report_date,
         public_context=public_context,
     )
 
+    unified_report = _finalize_report(
+        report_dir=report_dir,
+        report_date=report_date,
+        v4_report_path=v4_report_path,
+    )
     report_path = Path(report_dir) / "v6_daily_latest.md"
     notification = _notify(report_path, codes) if notify else {
         "attempted": False,
@@ -147,6 +185,7 @@ def run(
         "version": engine.version,
         "database": str(store.path),
         "report": str(report_path),
+        "unified_report": unified_report,
         "run": run_stats,
         "scoreboard_status": (payload.get("scoreboard") or {}).get("status"),
         "free_sources": public_context.get("status") or {},
@@ -164,6 +203,7 @@ def main() -> int:
     parser.add_argument("--stock-db", default=os.getenv("STOCK_DB_PATH", "data/stock_analysis.db"))
     parser.add_argument("--v6-db", default=os.getenv("V6_DAILY_DB_PATH", "v6_data/v6_daily.db"))
     parser.add_argument("--report-dir", default=os.getenv("V6_DAILY_REPORT_DIR", "v6_reports"))
+    parser.add_argument("--v4-report", default=os.getenv("V6_UPSTREAM_V4_REPORT"))
     parser.add_argument("--limit", type=int, default=int(os.getenv("V6_DAILY_SCAN_LIMIT", "5000")))
     parser.add_argument("--min-samples", type=int, default=int(os.getenv("V6_DAILY_MIN_SAMPLES", "50")))
     parser.add_argument("--primary-model", default=os.getenv("LITELLM_MODEL") or os.getenv("V6_PRIMARY_LLM_MODEL"))
@@ -186,6 +226,7 @@ def main() -> int:
         min_samples=args.min_samples,
         primary_model=args.primary_model,
         notify=args.notify,
+        v4_report_path=args.v4_report,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

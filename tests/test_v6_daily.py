@@ -6,9 +6,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from scripts.run_v6_daily import run
+from src.notification_sender.email_sender import EmailSender
 from src.v6_daily.engine import V6DailyEngine
 from src.v6_daily.free_sources import source_status
 from src.v6_daily.store import V6DailyStore, mature_outcomes
+from src.v6_daily.unified_report import build_unified_chinese_report
 
 
 def _snapshot(price: float = 100.0) -> dict:
@@ -225,12 +227,66 @@ def test_buy_and_avoid_metrics_do_not_reuse_forecast_direction(tmp_path: Path) -
     assert horizon["avg_avoided_return_pct"] == -10.0
 
 
-def test_v6_runner_generates_daily_report_and_database(tmp_path: Path, monkeypatch) -> None:
+def test_unified_report_translates_v6_and_keeps_full_v4_detail() -> None:
+    v6 = """# V6 AI 美股日报 · 2026-08-09
+
+## 1. Market Pulse
+
+- Regime: **risk_on**
+
+## 3. Opportunity Ranking
+
+| Rank | Symbol | Decision | Direction | Forecast | Opportunity | Quality | Risk | Evidence | LLM |
+|---:|---|---|---|---:|---:|---:|---:|---:|---|
+| 1 | MSFT | WATCH | bullish | 85.7 | 77.5 | 79.1 | 59.3 | 72% | fallback |
+"""
+    v4 = """# 🎯 2026-08-09 决策仪表盘
+
+## ⚪ Microsoft Corporation (MSFT)
+
+### 📰 重要信息速览
+
+**✨ 利好催化**: 财报超预期。
+"""
+    merged = build_unified_chinese_report(v6, v4)
+    assert "## 1. 市场脉搏" in merged
+    assert "## 3. 机会排名" in merged
+    assert "| 1 | MSFT | 观察 | 看多 |" in merged
+    assert "## 9. V4 AI 深度分析" in merged
+    assert "### 📰 重要信息速览" in merged
+    assert "财报超预期" in merged
+    assert "# 🎯 2026-08-09 决策仪表盘" not in merged
+
+
+def test_upstream_v4_email_is_suppressed_but_final_v6_is_allowed(monkeypatch) -> None:
+    class DummyConfig:
+        email_sender = "sender@gmail.com"
+        email_sender_name = "日报"
+        email_password = "secret"
+        email_receivers = ["receiver@gmail.com"]
+        stock_email_groups = []
+
+    sender = EmailSender(DummyConfig())
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("MERGE_EMAIL_NOTIFICATION", "true")
+    monkeypatch.delenv("V6_UNIFIED_EMAIL_FINAL", raising=False)
+    assert sender._is_email_configured() is False
+
+    monkeypatch.setenv("V6_UNIFIED_EMAIL_FINAL", "true")
+    assert sender._is_email_configured() is True
+
+
+def test_v6_runner_generates_chinese_unified_report_and_database(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("V6_FREE_SOURCE_ENRICHMENT", "false")
     stock_db = tmp_path / "stock.db"
     _create_stock_db(stock_db)
     report_dir = tmp_path / "reports"
     v6_db = tmp_path / "v6_data" / "v6_daily.db"
+    v4_report = tmp_path / "report_20260101.md"
+    v4_report.write_text(
+        "# V4 测试日报\n\n## MSFT 深度分析\n\n- V4 原始详情保留。\n",
+        encoding="utf-8",
+    )
 
     result = run(
         stock_db_path=str(stock_db),
@@ -240,15 +296,21 @@ def test_v6_runner_generates_daily_report_and_database(tmp_path: Path, monkeypat
         min_samples=3,
         primary_model="deepseek/deepseek-v4-flash",
         notify=False,
+        v4_report_path=str(v4_report),
     )
 
     assert result["run"]["new_signals"] == 1
     assert result["run"]["new_outcomes"] == 3
+    assert result["unified_report"]["v4_merged"] is True
+    assert result["unified_report"]["language"] == "zh"
     assert v6_db.is_file()
     markdown = (report_dir / "v6_daily_latest.md").read_text(encoding="utf-8")
     assert "V6 AI 美股日报" in markdown
-    assert "Opportunity Ranking" in markdown
-    assert "Setup Cards" in markdown
-    assert "Prediction Scoreboard" in markdown
-    assert "Free Public Data Context" in markdown
-    assert "LLM prose has zero direct numeric influence" in markdown
+    assert "## 1. 市场脉搏" in markdown
+    assert "## 3. 机会排名" in markdown
+    assert "## 4. 交易计划卡" in markdown
+    assert "## 6. 预测验证看板" in markdown
+    assert "## 7. 免费公共数据" in markdown
+    assert "LLM 文本对 V6 数值评分没有直接影响" in markdown
+    assert "## 9. V4 AI 深度分析" in markdown
+    assert "V4 原始详情保留" in markdown

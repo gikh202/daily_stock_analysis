@@ -7,23 +7,24 @@ on:
   workflow_dispatch:
     inputs:
       notify:
-        description: 'Send V6 report through configured notification channels'
+        description: '通过已配置通知渠道发送最终综合日报'
         required: false
         default: true
         type: boolean
       min_samples:
-        description: 'Minimum matured samples before metrics are called measurable'
+        description: '预测指标可衡量前所需的最小成熟样本数'
         required: false
         default: '50'
         type: string
       scan_limit:
-        description: 'Maximum production history rows to scan'
+        description: '最多扫描多少条生产历史记录'
         required: false
         default: '5000'
         type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: v6-daily-${{ github.event.workflow_run.head_branch || github.ref }}
@@ -38,24 +39,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v5
 
-      - name: Setup Python
+      - name: 设置 Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install runtime dependencies
+      - name: 安装运行依赖
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Prepare V6 directories
-        run: mkdir -p data v6_data v6_reports
+      - name: 准备 V6 目录
+        run: mkdir -p data v6_data v6_reports upstream_v4
 
-      - name: Restore latest valid production database
+      - name: 下载本次上游 V4 分析报告
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v5
+        with:
+          pattern: analysis-reports-*
+          path: upstream_v4
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 恢复最近有效生产数据库
         uses: actions/cache/restore@v5
         with:
           path: data/
@@ -63,7 +74,7 @@ jobs:
           restore-keys: |
             stock-analysis-data-${{ runner.os }}-
 
-      - name: Restore V6 research history
+      - name: 恢复 V6 研究历史
         uses: actions/cache/restore@v5
         with:
           path: v6_data/
@@ -71,7 +82,7 @@ jobs:
           restore-keys: |
             v6-daily-data-${{ runner.os }}-
 
-      - name: Validate production source database
+      - name: 校验生产源数据库
         shell: bash
         run: |
           python - <<'PY'
@@ -108,22 +119,23 @@ jobs:
           print(f'V6 source database: PASS history={history} stock_daily={bars}')
           PY
 
-      - name: Run V6 deterministic daily intelligence
+      - name: 运行 V6 并生成 V4+V6 中文综合日报
         env:
           V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
           V6_DAILY_MIN_SAMPLES: ${{ inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
           V6_DAILY_SCAN_LIMIT: ${{ inputs.scan_limit || vars.V6_DAILY_SCAN_LIMIT || '5000' }}
           V6_FREE_SOURCE_ENRICHMENT: ${{ vars.V6_FREE_SOURCE_ENRICHMENT || 'true' }}
+          V6_UNIFIED_EMAIL_FINAL: 'true'
           SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT || secrets.SEC_USER_AGENT }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
-          REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || 'zh' }}
+          REPORT_LANGUAGE: zh
 
-          # Existing notification configuration is reused; V6 adds no paid service requirement.
+          # 复用现有通知配置。V4 本身不再推送日报，只有这里发送最终综合邮件。
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
-          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'V6 AI 美股日报' }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'AI 美股综合日报' }}
           WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
           DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
@@ -146,20 +158,34 @@ jobs:
           NOTIFICATION_COOLDOWN_SECONDS: ${{ vars.NOTIFICATION_COOLDOWN_SECONDS || secrets.NOTIFICATION_COOLDOWN_SECONDS || '0' }}
           NOTIFICATION_TIMEZONE: ${{ vars.NOTIFICATION_TIMEZONE || secrets.NOTIFICATION_TIMEZONE || 'Asia/Shanghai' }}
           LOG_LEVEL: INFO
+        shell: bash
         run: |
-          NOTIFY_ARG=""
+          EXTRA_ARGS=()
+
           case "${V6_DAILY_NOTIFY,,}" in
-            1|true|yes|on) NOTIFY_ARG="--notify" ;;
+            1|true|yes|on) EXTRA_ARGS+=(--notify) ;;
           esac
+
+          V4_REPORT_PATH="$(find upstream_v4 -type f -path '*/reports/report_*.md' -print 2>/dev/null | sort | tail -n 1 || true)"
+          if [ -z "$V4_REPORT_PATH" ]; then
+            V4_REPORT_PATH="$(find upstream_v4 -type f -name 'report_*.md' -print 2>/dev/null | sort | tail -n 1 || true)"
+          fi
+          if [ -n "$V4_REPORT_PATH" ]; then
+            echo "✅ 找到上游 V4 报告，将合并到最终中文日报: $V4_REPORT_PATH"
+            EXTRA_ARGS+=(--v4-report "$V4_REPORT_PATH")
+          else
+            echo "⚠️ 未找到上游 V4 报告，本次降级为仅发送 V6 中文日报"
+          fi
+
           python scripts/run_v6_daily.py \
             --stock-db data/stock_analysis.db \
             --v6-db v6_data/v6_daily.db \
             --report-dir v6_reports \
             --limit "${V6_DAILY_SCAN_LIMIT}" \
             --min-samples "${V6_DAILY_MIN_SAMPLES}" \
-            ${NOTIFY_ARG}
+            "${EXTRA_ARGS[@]}"
 
-      - name: Validate V6 database and outputs
+      - name: 校验 V6 数据库与综合日报
         shell: bash
         run: |
           python - <<'PY'
@@ -186,24 +212,32 @@ jobs:
               raise SystemExit(f'v6_daily.db quick_check failed: {quick!r}')
           if signals <= 0:
               raise SystemExit('V6 generated zero usable signals')
+
+          with open(report, encoding='utf-8') as f:
+              report_text = f.read()
+          if '## 1. 市场脉搏' not in report_text:
+              raise SystemExit('V6 final report is not Chinese')
+
           with open(run, encoding='utf-8') as f:
               run_payload = json.load(f)
+          unified = run_payload.get('unified_report') or {}
           print(
               'V6 validation: PASS '
               f'signals={signals} outcomes={outcomes} '
               f"scoreboard={run_payload.get('scoreboard_status')} "
+              f"v4_merged={unified.get('v4_merged')} "
               f"notification={run_payload.get('notification', {}).get('status')}"
           )
           PY
 
-      - name: Save V6 research history
+      - name: 保存 V6 研究历史
         if: success()
         uses: actions/cache/save@v5
         with:
           path: v6_data/
           key: v6-daily-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Upload V6 daily artifact
+      - name: 上传 V6 综合日报 Artifact
         if: always()
         uses: actions/upload-artifact@v6
         with:
