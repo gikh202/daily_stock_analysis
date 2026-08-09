@@ -6,6 +6,7 @@ from pathlib import Path
 from src.alpha_engine.models import AlphaFeatures
 from src.v6_daily.accuracy_lab import (
     build_shadow_forecasts,
+    execution_policy_key,
     run_accuracy_lab,
     simulate_long_trade,
     wilson_interval,
@@ -40,7 +41,7 @@ def test_wilson_interval_and_shadow_profiles_are_deterministic() -> None:
     assert first["trend_guard"]["10d"]["weights"] != first["momentum_focus"]["10d"]["weights"]
 
 
-def test_trade_simulation_uses_conservative_stop_first_on_same_bar() -> None:
+def test_trade_simulation_uses_conservative_stop_first_on_entry_bar() -> None:
     result = simulate_long_trade(
         [
             {
@@ -55,10 +56,50 @@ def test_trade_simulation_uses_conservative_stop_first_on_same_bar() -> None:
         cost_bps=10.0,
     )
     assert result["status"] == "filled"
-    assert result["exit_reason"] == "stop_and_target_same_bar_stop_first"
+    assert result["exit_reason"] == "stop"
     assert result["exit_price"] == 95.0
     assert result["return_pct"] < -5.0
     assert result["win"] == 0
+
+
+def test_trade_simulation_never_credits_target_that_may_precede_entry() -> None:
+    result = simulate_long_trade(
+        [
+            {
+                # Price may have touched 107 before falling into the 99-100 entry zone.
+                # Daily OHLC cannot prove ordering, so 105 must not be credited.
+                "date": "2026-01-02",
+                "open": 106.0,
+                "high": 107.0,
+                "low": 99.0,
+                "close": 100.0,
+            },
+            {
+                "date": "2026-01-03",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+            },
+        ],
+        {"entry_low": 99.0, "entry_high": 100.0, "stop": 95.0, "target": 105.0},
+        cost_bps=10.0,
+    )
+    assert result["status"] == "filled"
+    assert result["entry_price"] == 100.0
+    assert result["exit_reason"] == "time_exit"
+    assert result["exit_price"] == 100.0
+    assert result["return_pct"] == -0.1
+    assert result["win"] == 0
+
+
+def test_execution_policy_key_changes_with_research_settings() -> None:
+    baseline = execution_policy_key(cost_bps=10.0, max_holding_bars=20)
+    cost_changed = execution_policy_key(cost_bps=25.0, max_holding_bars=20)
+    holding_changed = execution_policy_key(cost_bps=10.0, max_holding_bars=10)
+    assert baseline != cost_changed
+    assert baseline != holding_changed
+    assert "entry_bar_target=deferred" in baseline
 
 
 def _create_stock_db(path: Path) -> tuple[str, float]:
@@ -87,11 +128,27 @@ def _create_stock_db(path: Path) -> tuple[str, float]:
             spy = 500.0 + index * 0.20
             conn.execute(
                 "INSERT INTO stock_daily VALUES (?,?,?,?,?,?,?)",
-                ("MSFT", date_text, msft - 0.2, msft + 1.2, msft - 1.0, msft, 1_000_000 + index),
+                (
+                    "MSFT",
+                    date_text,
+                    msft - 0.2,
+                    msft + 1.2,
+                    msft - 1.0,
+                    msft,
+                    1_000_000 + index,
+                ),
             )
             conn.execute(
                 "INSERT INTO stock_daily VALUES (?,?,?,?,?,?,?)",
-                ("SPY", date_text, spy - 0.1, spy + 0.7, spy - 0.6, spy, 2_000_000 + index),
+                (
+                    "SPY",
+                    date_text,
+                    spy - 0.1,
+                    spy + 0.7,
+                    spy - 0.6,
+                    spy,
+                    2_000_000 + index,
+                ),
             )
         conn.commit()
     finally:
@@ -100,16 +157,33 @@ def _create_stock_db(path: Path) -> tuple[str, float]:
     return dates[analysis_index - 1], 100.0 + analysis_index * 0.45
 
 
-def test_accuracy_lab_persists_shadow_outcomes_and_execution_metrics(tmp_path: Path) -> None:
+def test_accuracy_lab_persists_shadow_outcomes_and_policy_versioned_execution_metrics(
+    tmp_path: Path,
+) -> None:
     stock_db = tmp_path / "stock.db"
     analysis_date, baseline = _create_stock_db(stock_db)
     v6_db = tmp_path / "v6.db"
     store = V6DailyStore(str(v6_db))
 
     horizon_forecasts = {
-        "5d": {"horizon_days": 5, "score": 72.0, "direction": "bullish", "evidence_coverage": 0.9},
-        "10d": {"horizon_days": 10, "score": 74.0, "direction": "bullish", "evidence_coverage": 0.9},
-        "20d": {"horizon_days": 20, "score": 76.0, "direction": "bullish", "evidence_coverage": 0.9},
+        "5d": {
+            "horizon_days": 5,
+            "score": 72.0,
+            "direction": "bullish",
+            "evidence_coverage": 0.9,
+        },
+        "10d": {
+            "horizon_days": 10,
+            "score": 74.0,
+            "direction": "bullish",
+            "evidence_coverage": 0.9,
+        },
+        "20d": {
+            "horizon_days": 20,
+            "score": 76.0,
+            "direction": "bullish",
+            "evidence_coverage": 0.9,
+        },
     }
     features = {
         "trend": 78.0,
@@ -174,11 +248,13 @@ def test_accuracy_lab_persists_shadow_outcomes_and_execution_metrics(tmp_path: P
     assert payload["run"]["new_trade_outcomes"] == 1
     assert len(payload["champion"]) == 3
     assert len(payload["challengers"]) == 9
+    assert all("@v1-" in item["variant"] for item in payload["challengers"])
     assert payload["strategy"]["evaluated_plans"] == 1
+    assert payload["strategy"]["execution_policy"] == payload["policy"]["execution_policy"]
     assert (report_dir / "v6_accuracy_lab.json").is_file()
     assert (report_dir / "v6_accuracy_lab.md").is_file()
 
-    # Re-running is idempotent; it must not duplicate shadow samples.
+    # Re-running the same policy is idempotent.
     second = run_accuracy_lab(
         str(v6_db),
         str(stock_db),
@@ -191,3 +267,28 @@ def test_accuracy_lab_persists_shadow_outcomes_and_execution_metrics(tmp_path: P
     assert second["run"]["new_shadow_forecasts"] == 0
     assert second["run"]["new_shadow_outcomes"] == 0
     assert second["run"]["new_trade_outcomes"] == 0
+
+    # Changing execution settings creates an independent research policy instead
+    # of silently mixing old and new returns in one sample population.
+    third = run_accuracy_lab(
+        str(v6_db),
+        str(stock_db),
+        report_dir=report_dir,
+        min_samples=3,
+        promotion_min_samples=3,
+        cost_bps=25.0,
+        max_holding_bars=20,
+    )
+    assert third["run"]["new_trade_outcomes"] == 1
+    assert third["strategy"]["execution_policy"] != payload["strategy"]["execution_policy"]
+
+    conn = sqlite3.connect(v6_db)
+    try:
+        rows = conn.execute(
+            "SELECT execution_policy,cost_bps FROM v6_trade_outcomes ORDER BY cost_bps"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 2
+    assert rows[0][0] != rows[1][0]
+    assert [row[1] for row in rows] == [10.0, 25.0]
