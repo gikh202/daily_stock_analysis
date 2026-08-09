@@ -28,6 +28,18 @@ def _reset_backtest_database(path: Path) -> None:
             candidate.unlink()
 
 
+def _evidence_state(validation: Dict[str, Any]) -> str:
+    coverage = validation.get("coverage") or {}
+    gate = validation.get("research_gate") or {}
+    outcomes = int(coverage.get("outcomes") or 0)
+    evaluated_signals = int(coverage.get("evaluated_signals") or 0)
+    if outcomes <= 0 or evaluated_signals <= 0:
+        return "no_mature_outcomes"
+    if gate.get("status") == "insufficient_data":
+        return "below_sample_floor"
+    return "measurable"
+
+
 def run(
     *,
     stock_db_path: str,
@@ -57,11 +69,19 @@ def run(
         stem="backtest_summary",
         title="V5 Alpha Historical Replay Backtest",
     )
+    evidence_state = _evidence_state(validation)
     payload = {
         "mode": "historical_replay",
+        "execution_status": "success",
+        "evidence_state": evidence_state,
+        "performance_evidence_available": evidence_state == "measurable",
         "lookahead_policy": (
             "features come from stored analysis snapshots; outcomes use only trading "
             "bars strictly after each original analysis date"
+        ),
+        "interpretation": (
+            "execution_status only confirms that the replay pipeline completed. "
+            "Performance claims require measurable matured outcomes."
         ),
         "shadow_run": shadow_stats,
         "validation": validation,
