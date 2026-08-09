@@ -32,7 +32,7 @@ on:
       min_samples:
         description: 'Minimum matured samples for the research gate'
         required: false
-        default: '20'
+        default: '50'
         type: string
 
 permissions:
@@ -118,7 +118,7 @@ jobs:
       - name: Run isolated historical replay
         env:
           BACKTEST_LIMIT: ${{ github.event.inputs.limit || '5000' }}
-          BACKTEST_MIN_SAMPLES: ${{ github.event.inputs.min_samples || '20' }}
+          BACKTEST_MIN_SAMPLES: ${{ github.event.inputs.min_samples || '50' }}
         run: |
           python scripts/run_alpha_backtest.py \
             --stock-db data/stock_analysis.db \
