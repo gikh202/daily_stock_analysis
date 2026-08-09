@@ -50,6 +50,77 @@ def _snapshot(price: float = 100.0) -> dict:
     }
 
 
+def _default_raw_result() -> dict:
+    return {
+        "success": True,
+        "model_used": "deepseek/deepseek-v4-flash",
+        "name": "Microsoft Corporation",
+        "sentiment_score": 62,
+        "trend_prediction": "看多",
+        "operation_advice": "观望",
+        "forecast": {
+            "primary_horizon": "10d",
+            "horizons": {
+                "10d": {
+                    "direction": "bullish",
+                    "up_probability": 65,
+                    "expected_return_pct": 5.0,
+                    "confidence": "中",
+                    "rationale": "财报后趋势延续，但需要量价确认。",
+                }
+            },
+        },
+        "dashboard": {
+            "core_conclusion": {
+                "one_sentence": "中期看好，短期等待确认。",
+                "position_advice": {
+                    "no_position": "等待回踩后再考虑。",
+                    "has_position": "持有并上移止损。",
+                },
+            },
+            "intelligence": {
+                "positive_catalysts": ["财报超预期，云业务增速强劲。"],
+                "risk_alerts": ["短期 RSI 偏高，追高风险增加。"],
+                "earnings_outlook": "盈利预期保持正面。",
+                "sentiment_summary": "舆情中性偏多。",
+                "latest_news": "近期财报成为主要催化。",
+            },
+            "battle_plan": {
+                "sniper_points": {
+                    "ideal_buy": "理想买入点：95",
+                    "secondary_buy": "次优买入点：92",
+                    "stop_loss": "止损位：90",
+                    "take_profit": "目标位：112",
+                },
+                "position_strategy": {
+                    "suggested_position": "小仓",
+                    "risk_control": "严格控制回撤。",
+                },
+            },
+            "phase_decision": {
+                "phase_context": {
+                    "phase": "non_trading",
+                    "is_trading_day": False,
+                    "effective_daily_bar_date": "2026-01-01",
+                },
+                "immediate_action": "等待盘中确认，禁止追高。",
+                "watch_conditions": ["开盘后站稳 MA5", "量能有效放大"],
+                "next_check_time": "下一个交易日开盘后",
+                "data_limitations": ["非交易日无盘中确认"],
+            },
+            "signal_attribution": {
+                "strongest_bullish_signal": "均线多头排列",
+                "strongest_bearish_signal": "短期量能不足",
+            },
+        },
+        "analysis_summary": "趋势与基本面偏多，但执行上等待价格和量能确认。",
+        "technical_analysis": "均线结构偏多。",
+        "volume_analysis": "量能仍需确认。",
+        "fundamental_analysis": "基本面质量较高。",
+        "risk_warning": "若跌破关键支撑则趋势失效。",
+    }
+
+
 def _record(raw_result: dict | None = None) -> dict:
     return {
         "id": 1,
@@ -57,7 +128,7 @@ def _record(raw_result: dict | None = None) -> dict:
         "code": "MSFT",
         "created_at": "2026-01-01 22:30:00",
         "context_snapshot": json.dumps(_snapshot()),
-        "raw_result": json.dumps(raw_result or {"success": True, "model_used": "deepseek/deepseek-v4-flash"}),
+        "raw_result": json.dumps(raw_result or _default_raw_result(), ensure_ascii=False),
     }
 
 
@@ -227,35 +298,86 @@ def test_buy_and_avoid_metrics_do_not_reuse_forecast_direction(tmp_path: Path) -
     assert horizon["avg_avoided_return_pct"] == -10.0
 
 
-def test_unified_report_translates_v6_and_keeps_full_v4_detail() -> None:
-    v6 = """# V6 AI 美股日报 · 2026-08-09
+def _fusion_payload(direction: str = "bullish") -> dict:
+    return {
+        "version": "v6-test",
+        "generated_at": "2026-08-09T06:00:00",
+        "market_pulse": {
+            "regime": "risk_on",
+            "breadth": "broad",
+            "average_opportunity": 77.5,
+            "average_risk": 42.0,
+            "average_evidence_coverage": 0.72,
+        },
+        "board": [
+            {
+                "code": "MSFT",
+                "decision": "WATCH",
+                "direction": direction,
+                "forecast_score": 85.7,
+                "opportunity_score": 77.5,
+                "quality_score": 79.1,
+                "risk_score": 42.0,
+                "evidence_coverage": 0.72,
+                "llm_health": "fallback",
+                "features": {
+                    "trend": 88,
+                    "momentum": 75,
+                    "relative_strength": 82,
+                    "volume_confirmation": 55,
+                    "fundamental_quality": 84,
+                    "market_regime": 80,
+                },
+                "trade_plan": {
+                    "entry_zone": "95.0-99.0",
+                    "stop_loss": 90.0,
+                    "targets": [112.0, 118.0],
+                    "risk_reward": 2.1,
+                    "max_position_pct": 0.10,
+                },
+                "catalysts": ["财报超预期，云业务增速强劲。"],
+                "risks": ["短期 RSI 偏高，追高风险增加。"],
+                "limitations": ["催化因子尚未进入数值评分"],
+            }
+        ],
+        "deltas": [],
+        "scoreboard": {"status": "insufficient_data", "minimum_samples": 50, "horizons": []},
+        "public_context": {},
+        "run": {"new_signals": 1, "skipped_existing": 0, "skipped_unusable": 0, "new_outcomes": 0, "not_yet_mature": 1, "quick_check": "ok"},
+    }
 
-## 1. Market Pulse
 
-- Regime: **risk_on**
-
-## 3. Opportunity Ranking
-
-| Rank | Symbol | Decision | Direction | Forecast | Opportunity | Quality | Risk | Evidence | LLM |
-|---:|---|---|---|---:|---:|---:|---:|---:|---|
-| 1 | MSFT | WATCH | bullish | 85.7 | 77.5 | 79.1 | 59.3 | 72% | fallback |
-"""
-    v4 = """# 🎯 2026-08-09 决策仪表盘
-
-## ⚪ Microsoft Corporation (MSFT)
-
-### 📰 重要信息速览
-
-**✨ 利好催化**: 财报超预期。
-"""
-    merged = build_unified_chinese_report(v6, v4)
-    assert "## 1. 市场脉搏" in merged
-    assert "## 3. 机会排名" in merged
-    assert "| 1 | MSFT | 观察 | 看多 |" in merged
-    assert "## 9. V4 AI 深度分析" in merged
-    assert "### 📰 重要信息速览" in merged
+def test_unified_report_semantically_fuses_v4_and_v6_without_appendix() -> None:
+    merged = build_unified_chinese_report(
+        "# legacy v6 markdown",
+        "# legacy v4 markdown",
+        v6_payload=_fusion_payload(),
+        v4_records=[_record()],
+        report_date="2026-08-09",
+    )
+    assert "# AI 美股综合日报 · 2026-08-09" in merged
+    assert "## 1. 今日最终总览" in merged
+    assert "## 3. 标的融合分析" in merged
+    assert "方向一致" in merged
+    assert "V4 投研摘要" in merged
+    assert "V6 确定性视角" in merged
     assert "财报超预期" in merged
-    assert "# 🎯 2026-08-09 决策仪表盘" not in merged
+    assert "融合交易计划" in merged
+    assert "模型上行概率 **65%（未校准）**" in merged
+    assert "## 9. V4 AI 深度分析" not in merged
+    assert "legacy v4 markdown" not in merged
+
+
+def test_unified_report_surfaces_direction_conflict_and_does_not_upgrade_action() -> None:
+    merged = build_unified_chinese_report(
+        "",
+        v6_payload=_fusion_payload(direction="bearish"),
+        v4_records=[_record()],
+        report_date="2026-08-09",
+    )
+    assert "方向分歧" in merged
+    assert "按风险优先原则不升级仓位" in merged
+    assert "最终：观察" in merged
 
 
 def test_upstream_v4_email_is_suppressed_but_final_v6_is_allowed(monkeypatch) -> None:
@@ -276,7 +398,7 @@ def test_upstream_v4_email_is_suppressed_but_final_v6_is_allowed(monkeypatch) ->
     assert sender._is_email_configured() is True
 
 
-def test_v6_runner_generates_chinese_unified_report_and_database(tmp_path: Path, monkeypatch) -> None:
+def test_v6_runner_generates_integrated_chinese_report_and_database(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("V6_FREE_SOURCE_ENRICHMENT", "false")
     stock_db = tmp_path / "stock.db"
     _create_stock_db(stock_db)
@@ -284,7 +406,7 @@ def test_v6_runner_generates_chinese_unified_report_and_database(tmp_path: Path,
     v6_db = tmp_path / "v6_data" / "v6_daily.db"
     v4_report = tmp_path / "report_20260101.md"
     v4_report.write_text(
-        "# V4 测试日报\n\n## MSFT 深度分析\n\n- V4 原始详情保留。\n",
+        "# V4 测试日报\n\n## MSFT 深度分析\n\n- 这段原始 Markdown 不应被整段追加。\n",
         encoding="utf-8",
     )
 
@@ -302,15 +424,16 @@ def test_v6_runner_generates_chinese_unified_report_and_database(tmp_path: Path,
     assert result["run"]["new_signals"] == 1
     assert result["run"]["new_outcomes"] == 3
     assert result["unified_report"]["v4_merged"] is True
+    assert result["unified_report"]["fusion_mode"] == "structured_v4_v6"
+    assert result["unified_report"]["v4_structured_records"] == 1
     assert result["unified_report"]["language"] == "zh"
     assert v6_db.is_file()
     markdown = (report_dir / "v6_daily_latest.md").read_text(encoding="utf-8")
-    assert "V6 AI 美股日报" in markdown
-    assert "## 1. 市场脉搏" in markdown
-    assert "## 3. 机会排名" in markdown
-    assert "## 4. 交易计划卡" in markdown
+    assert "AI 美股综合日报" in markdown
+    assert "## 1. 今日最终总览" in markdown
+    assert "## 3. 标的融合分析" in markdown
+    assert "V4 投研摘要" in markdown
+    assert "V6 确定性视角" in markdown
     assert "## 6. 预测验证看板" in markdown
-    assert "## 7. 免费公共数据" in markdown
-    assert "LLM 文本对 V6 数值评分没有直接影响" in markdown
-    assert "## 9. V4 AI 深度分析" in markdown
-    assert "V4 原始详情保留" in markdown
+    assert "## 9. V4 AI 深度分析" not in markdown
+    assert "这段原始 Markdown 不应被整段追加" not in markdown
