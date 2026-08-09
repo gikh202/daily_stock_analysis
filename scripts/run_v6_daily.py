@@ -19,7 +19,7 @@ from src.v6_daily.engine import V6DailyEngine
 from src.v6_daily.free_sources import fetch_free_context
 from src.v6_daily.report import write_daily_report
 from src.v6_daily.store import V6DailyStore, mature_outcomes
-from src.v6_daily.unified_report import build_unified_chinese_report
+from src.v6_daily.unified_report import build_unified_chinese_report, count_v4_structured_records
 
 
 logger = logging.getLogger("v6_daily")
@@ -65,6 +65,8 @@ def _finalize_report(
     report_dir: str,
     report_date: str,
     v4_report_path: str | None,
+    v6_payload: Dict[str, Any],
+    analysis_records: list[Dict[str, Any]],
 ) -> Dict[str, Any]:
     output = Path(report_dir)
     latest_path = output / "v6_daily_latest.md"
@@ -75,16 +77,30 @@ def _finalize_report(
     v4_markdown = None
     if v4_path is not None and v4_path.is_file():
         v4_markdown = v4_path.read_text(encoding="utf-8")
-        logger.info("[V6] 已合并上游 V4 报告: %s", v4_path)
+        logger.info("[V6] 已加载同次运行的 V4 报告 Artifact: %s", v4_path)
     elif v4_report_path:
-        logger.warning("[V6] 指定的 V4 报告不存在，降级为仅 V6 中文日报: %s", v4_report_path)
+        logger.warning("[V6] 指定的 V4 报告不存在，将仅使用数据库中的 V4 结构化记录: %s", v4_report_path)
 
-    unified = build_unified_chinese_report(v6_markdown, v4_markdown)
+    structured_count = count_v4_structured_records(analysis_records)
+    if structured_count:
+        logger.info("[V6] 融合报告使用 %s 个标的的 V4 结构化投研记录", structured_count)
+    else:
+        logger.warning("[V6] 未发现 V4 结构化投研记录；最终报告不会回退为 V4/V6 原文拼接")
+
+    unified = build_unified_chinese_report(
+        v6_markdown,
+        v4_markdown,
+        v6_payload=v6_payload,
+        v4_records=analysis_records,
+        report_date=report_date,
+    )
     latest_path.write_text(unified, encoding="utf-8")
     dated_path.write_text(unified, encoding="utf-8")
     return {
         "language": "zh",
-        "v4_merged": bool(v4_markdown),
+        "fusion_mode": "structured_v4_v6",
+        "v4_merged": structured_count > 0,
+        "v4_structured_records": structured_count,
         "v4_report": str(v4_path) if v4_markdown and v4_path is not None else None,
         "output": str(latest_path),
     }
@@ -173,6 +189,8 @@ def run(
         report_dir=report_dir,
         report_date=report_date,
         v4_report_path=v4_report_path,
+        v6_payload=payload,
+        analysis_records=records,
     )
     report_path = Path(report_dir) / "v6_daily_latest.md"
     notification = _notify(report_path, codes) if notify else {
