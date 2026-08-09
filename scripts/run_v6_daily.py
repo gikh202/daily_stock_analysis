@@ -45,11 +45,7 @@ def _notify(report_path: Path, codes: list[str]) -> Dict[str, Any]:
             severity="info",
             dedup_key=f"v6-unified-daily-{datetime.now().strftime('%Y%m%d')}",
         )
-        return {
-            "attempted": True,
-            "success": bool(success),
-            "status": "sent" if success else "failed",
-        }
+        return {"attempted": True, "success": bool(success), "status": "sent" if success else "failed"}
     except Exception as exc:
         logger.exception("V6 unified notification failed")
         return {
@@ -121,8 +117,20 @@ def run(
     engine = V6DailyEngine()
     records = read_analysis_records(stock_db_path, limit=max(1, int(limit)))
 
+    # V6.1 fetches official/free context before scoring so the exact evidence
+    # used by the signal can be persisted. Any source failure remains best-effort.
+    source_codes = list(
+        dict.fromkeys(
+            str(record.get("code") or "").strip().upper()
+            for record in records
+            if str(record.get("code") or "").strip()
+        )
+    )
+    public_context = fetch_free_context(source_codes)
+
     new_signals = 0
     skipped_existing = 0
+    skipped_same_trade_date = 0
     skipped_unusable = 0
 
     for record in records:
@@ -133,19 +141,30 @@ def run(
         if store.has_analysis_history_id(history_id):
             skipped_existing += 1
             continue
-        signal = engine.from_analysis_record(record, primary_model=primary_model)
+        signal = engine.from_analysis_record(
+            record,
+            primary_model=primary_model,
+            external_context=public_context,
+        )
         if signal is None:
             skipped_unusable += 1
             continue
+        if store.has_signal_key(signal.code, signal.effective_trade_date, engine.version):
+            skipped_same_trade_date += 1
+            continue
         if store.save_signal(signal, engine_version=engine.version):
             new_signals += 1
+            horizon_text = ", ".join(
+                f"{name}={item.get('direction')}/{item.get('score')}"
+                for name, item in signal.horizon_forecasts.items()
+            )
             logger.info(
-                "[V6] history_id=%s code=%s direction=%s decision=%s forecast=%s opportunity=%s risk=%s evidence=%.2f llm=%s",
+                "[V6.1] history_id=%s code=%s type=%s decision=%s horizons=[%s] opportunity=%s risk=%s evidence=%.2f llm=%s",
                 signal.analysis_history_id,
                 signal.code,
-                signal.direction,
+                signal.instrument_type,
                 signal.decision,
-                signal.forecast_score,
+                horizon_text,
                 signal.opportunity_score,
                 signal.risk_score,
                 signal.evidence_coverage,
@@ -163,12 +182,11 @@ def run(
         for item in board_before_report
         if str(item.get("code") or "").strip()
     ]
-    public_context = fetch_free_context(codes)
-
     run_stats: Dict[str, Any] = {
         "analysis_records_seen": len(records),
         "new_signals": new_signals,
         "skipped_existing": skipped_existing,
+        "skipped_same_trade_date": skipped_same_trade_date,
         "skipped_unusable": skipped_unusable,
         "new_outcomes": maturation["evaluated"],
         "not_yet_mature": maturation["not_yet_mature"],
@@ -217,7 +235,7 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the V6 deterministic AI US-stock daily intelligence layer")
+    parser = argparse.ArgumentParser(description="Run the V6.1 deterministic multi-horizon US-stock daily intelligence layer")
     parser.add_argument("--stock-db", default=os.getenv("STOCK_DB_PATH", "data/stock_analysis.db"))
     parser.add_argument("--v6-db", default=os.getenv("V6_DAILY_DB_PATH", "v6_data/v6_daily.db"))
     parser.add_argument("--report-dir", default=os.getenv("V6_DAILY_REPORT_DIR", "v6_reports"))
@@ -225,11 +243,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=int(os.getenv("V6_DAILY_SCAN_LIMIT", "5000")))
     parser.add_argument("--min-samples", type=int, default=int(os.getenv("V6_DAILY_MIN_SAMPLES", "50")))
     parser.add_argument("--primary-model", default=os.getenv("LITELLM_MODEL") or os.getenv("V6_PRIMARY_LLM_MODEL"))
-    parser.add_argument(
-        "--notify",
-        action="store_true",
-        default=_truthy(os.getenv("V6_DAILY_NOTIFY", "false")),
-    )
+    parser.add_argument("--notify", action="store_true", default=_truthy(os.getenv("V6_DAILY_NOTIFY", "false")))
     args = parser.parse_args()
 
     logging.basicConfig(
