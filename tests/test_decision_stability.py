@@ -128,7 +128,7 @@ def test_downgrades_buy_mid_range_with_neutral_fund_flow() -> None:
     assert "资金流不明确" in result.risk_warning
 
 
-def test_downgrades_buy_when_capital_flow_is_unavailable() -> None:
+def test_preserves_actions_when_capital_flow_is_unavailable() -> None:
     buy_result = _result(
         decision_type="buy",
         operation_advice="买入",
@@ -154,20 +154,19 @@ def test_downgrades_buy_when_capital_flow_is_unavailable() -> None:
         _unsupported_fund_flow(),
     )
 
-    assert buy_result.decision_type == "hold"
-    assert buy_result.operation_advice == "持有观察"
-    assert buy_result.confidence_level == "低"
-    assert buy_result.sentiment_score <= 59
-    assert buy_result.dashboard["decision_stability"]["applied"] is True
-    assert "买入结论缺少资金面确认" in buy_result.dashboard["decision_stability"]["reason"]
-    assert buy_result.dashboard["core_conclusion"]["signal_type"] == "🟡持有观望"
+    assert buy_result.decision_type == "buy"
+    assert buy_result.operation_advice == "买入"
+    assert buy_result.sentiment_score == 66
+    assert buy_result.dashboard["decision_stability"]["applied"] is False
+    assert "仅记录数据缺口" in buy_result.dashboard["decision_stability"]["reason"]
     assert sell_result.decision_type == "sell"
     assert sell_result.operation_advice == "卖出"
+    assert sell_result.sentiment_score == 30
     assert sell_result.dashboard["decision_stability"]["applied"] is False
-    assert "未使用资金流校准" in sell_result.dashboard["decision_stability"]["reason"]
+    assert "仅记录数据缺口" in sell_result.dashboard["decision_stability"]["reason"]
 
 
-def test_downgrades_buy_when_capital_flow_values_are_na() -> None:
+def test_preserves_buy_when_capital_flow_values_are_na() -> None:
     result = _result(
         decision_type="buy",
         operation_advice="买入",
@@ -192,13 +191,14 @@ def test_downgrades_buy_when_capital_flow_values_are_na() -> None:
         },
     )
 
-    assert result.decision_type == "hold"
-    assert result.operation_advice == "持有观察"
-    assert result.dashboard["decision_stability"]["applied"] is True
+    assert result.decision_type == "buy"
+    assert result.operation_advice == "买入"
+    assert result.sentiment_score == 66
+    assert result.dashboard["decision_stability"]["applied"] is False
     assert "资金流数据缺失" in result.dashboard["decision_stability"]["capital_flow_status"]
 
 
-def test_downgrades_buy_advice_when_decision_type_is_hold_and_capital_flow_unavailable() -> None:
+def test_preserves_existing_hold_advice_when_capital_flow_unavailable() -> None:
     result = _result(
         decision_type="hold",
         operation_advice="建议买入",
@@ -213,13 +213,13 @@ def test_downgrades_buy_advice_when_decision_type_is_hold_and_capital_flow_unava
     )
 
     assert result.decision_type == "hold"
-    assert result.operation_advice == "持有观察"
-    assert result.sentiment_score <= 59
-    assert result.dashboard["decision_stability"]["applied"] is True
-    assert "买入结论缺少资金面确认" in result.dashboard["decision_stability"]["reason"]
+    assert result.operation_advice == "建议买入"
+    assert result.sentiment_score == 68
+    assert result.dashboard["decision_stability"]["applied"] is False
+    assert "仅记录数据缺口" in result.dashboard["decision_stability"]["reason"]
 
 
-def test_downgrades_buy_when_capital_flow_status_is_unavailable_case_insensitive() -> None:
+def test_preserves_buy_when_capital_flow_status_is_unavailable_case_insensitive() -> None:
     buy_result = _result(
         decision_type="buy",
         operation_advice="买入",
@@ -233,9 +233,10 @@ def test_downgrades_buy_when_capital_flow_status_is_unavailable_case_insensitive
         _unsupported_fund_flow_caps(),
     )
 
-    assert buy_result.decision_type == "hold"
-    assert buy_result.operation_advice == "持有观察"
-    assert buy_result.dashboard["decision_stability"]["applied"] is True
+    assert buy_result.decision_type == "buy"
+    assert buy_result.operation_advice == "买入"
+    assert buy_result.sentiment_score == 66
+    assert buy_result.dashboard["decision_stability"]["applied"] is False
     assert "暂不支持" in str(buy_result.dashboard["decision_stability"]["capital_flow_status"])
 
 

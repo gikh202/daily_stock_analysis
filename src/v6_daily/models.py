@@ -28,7 +28,14 @@ class V6Signal:
     risks: Tuple[str, ...] = ()
     limitations: Tuple[str, ...] = ()
     diagnostics: Dict[str, Any] = field(default_factory=dict)
+    instrument_type: str = "STOCK"
+    effective_trade_date: Optional[str] = None
+    horizon_forecasts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    context_features: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def actionable(self) -> bool:
         return self.decision in {"BUY_SETUP", "WATCH"}
+
+    def horizon(self, days: int) -> Dict[str, Any]:
+        return dict(self.horizon_forecasts.get(f"{int(days)}d") or {})

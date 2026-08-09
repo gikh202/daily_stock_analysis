@@ -7,16 +7,16 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from src.alpha_engine import AlphaDecisionEngine, AlphaFeatureAdapter
 
+from .accuracy import (
+    build_horizon_forecasts,
+    classify_instrument,
+    enrich_features,
+    primary_forecast,
+)
 from .models import V6Signal
 
 
-V6_ENGINE_VERSION = "v6.0-daily.1"
-FORECAST_WEIGHTS = {
-    "trend": 0.35,
-    "momentum": 0.25,
-    "relative_strength": 0.25,
-    "market_regime": 0.15,
-}
+V6_ENGINE_VERSION = "v6.1-accuracy.1"
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -52,7 +52,7 @@ def _find_mapping(root: Mapping[str, Any], keys: Sequence[str]) -> Dict[str, Any
         seen.add(marker)
         for key, value in current.items():
             if key in wanted and isinstance(value, dict):
-                return value
+                return dict(value)
             if isinstance(value, dict):
                 queue.append(value)
     return {}
@@ -92,32 +92,6 @@ def _as_text_tuple(value: Any, *, limit: int = 5) -> Tuple[str, ...]:
     return tuple(items)
 
 
-def _weighted_forecast(features: Any) -> Tuple[Optional[float], float]:
-    numerator = 0.0
-    observed_weight = 0.0
-    total_weight = sum(FORECAST_WEIGHTS.values())
-    for name, weight in FORECAST_WEIGHTS.items():
-        value = _finite(getattr(features, name, None))
-        if value is None:
-            continue
-        value = max(0.0, min(100.0, value))
-        numerator += value * weight
-        observed_weight += weight
-    if observed_weight <= 0:
-        return None, 0.0
-    return round(numerator / observed_weight, 2), round(observed_weight / total_weight, 4)
-
-
-def _direction(score: Optional[float], coverage: float) -> str:
-    if score is None or coverage < 0.50:
-        return "neutral"
-    if score >= 60.0:
-        return "bullish"
-    if score <= 40.0:
-        return "bearish"
-    return "neutral"
-
-
 def _llm_health(raw_result: Dict[str, Any], primary_model: Optional[str]) -> Tuple[Optional[str], str]:
     if not raw_result:
         return None, "missing"
@@ -153,12 +127,28 @@ def _qualitative_intelligence(raw_result: Dict[str, Any]) -> Tuple[Tuple[str, ..
     return catalysts, risks
 
 
-class V6DailyEngine:
-    """Deterministic V6 daily forecast layer.
+def _effective_trade_date(context: Mapping[str, Any], created_at: Any) -> Optional[str]:
+    value = _find_value(
+        context,
+        (
+            "effective_daily_bar_date",
+            "effective_trade_date",
+            "last_complete_trade_date",
+        ),
+    )
+    text = str(value or "").strip()
+    if len(text) >= 10:
+        return text[:10]
+    created = str(created_at or "").strip()
+    return created[:10] if len(created) >= 10 else None
 
-    LLM output is used only for qualitative catalyst/risk display and health
-    telemetry. Direction, scores, evidence coverage and trade plan come only from
-    structured market evidence and deterministic rules.
+
+class V6DailyEngine:
+    """Deterministic V6.1 multi-horizon forecast layer.
+
+    Numeric decisions are produced from structured evidence only. LLM prose is
+    retained for explanation, but cannot directly change a score. Structured,
+    source-backed catalyst evidence may be scored by deterministic rules.
     """
 
     version = V6_ENGINE_VERSION
@@ -171,6 +161,7 @@ class V6DailyEngine:
         record: Mapping[str, Any],
         *,
         primary_model: Optional[str] = None,
+        external_context: Optional[Mapping[str, Any]] = None,
     ) -> Optional[V6Signal]:
         history_id = int(record.get("id") or 0)
         code = str(record.get("code") or "").strip().upper()
@@ -178,32 +169,57 @@ class V6DailyEngine:
             return None
 
         context = _parse_object(record.get("context_snapshot"))
+        raw_result = _parse_object(record.get("raw_result"))
         adapted = AlphaFeatureAdapter.from_snapshot(context)
         if adapted.current_price is None or adapted.current_price <= 0:
             return None
 
+        instrument_type = classify_instrument(code, context)
+        features, accuracy_diag = enrich_features(
+            adapted.features,
+            context=context,
+            raw_result=raw_result,
+            external_context=external_context,
+            code=code,
+            current_price=adapted.current_price,
+            support=adapted.support,
+            atr=adapted.atr,
+        )
+
+        horizons = build_horizon_forecasts(features, instrument_type=instrument_type)
+        forecast_score, direction, forecast_coverage = primary_forecast(horizons, 10)
+
         decision = self.alpha.evaluate(
             code,
-            adapted.features,
+            features,
             current_price=adapted.current_price,
             support=adapted.support,
             resistance=adapted.resistance,
             atr=adapted.atr,
+            instrument_type=instrument_type,
         )
-        forecast_score, forecast_coverage = _weighted_forecast(adapted.features)
-        direction = _direction(forecast_score, forecast_coverage)
 
-        raw_result = _parse_object(record.get("raw_result"))
         model_used, llm_health = _llm_health(raw_result, primary_model)
         catalysts, risks = _qualitative_intelligence(raw_result)
 
         limitations = list(decision.limitations)
         if forecast_coverage < 0.50:
-            limitations.append("directional forecast evidence coverage below 50%")
-        if adapted.features.fundamental_quality is None:
+            limitations.append("10d directional forecast evidence coverage below 50%")
+        if instrument_type == "STOCK" and features.fundamental_quality is None:
             limitations.append("deterministic fundamental quality unavailable")
-        if adapted.features.catalyst is None:
-            limitations.append("catalyst remains qualitative-only")
+        if features.catalyst is None:
+            limitations.append("source-backed deterministic catalyst unavailable")
+        if features.macro_risk is None:
+            limitations.append("macro risk snapshot unavailable")
+
+        effective_date = _effective_trade_date(context, record.get("created_at"))
+        context_features = {
+            "instrument_type": instrument_type,
+            "effective_trade_date": effective_date,
+            "market_regime": adapted.market_regime,
+            "market_breadth": _market_breadth(context),
+            "accuracy": accuracy_diag,
+        }
 
         return V6Signal(
             analysis_history_id=history_id,
@@ -222,7 +238,7 @@ class V6DailyEngine:
             market_breadth=_market_breadth(context),
             model_used=model_used,
             llm_health=llm_health,
-            features=asdict(adapted.features),
+            features=asdict(features),
             trade_plan=asdict(decision.trade_plan),
             catalysts=catalysts,
             risks=risks,
@@ -230,8 +246,15 @@ class V6DailyEngine:
             diagnostics={
                 "engine_version": self.version,
                 "feature_adapter_version": AlphaFeatureAdapter.version,
+                "primary_horizon": "10d",
                 "forecast_component_coverage": forecast_coverage,
                 "adapter": adapted.diagnostics,
+                "accuracy": accuracy_diag,
+                "alpha": decision.diagnostics,
                 "llm_numeric_influence": "none",
             },
+            instrument_type=instrument_type,
+            effective_trade_date=effective_date,
+            horizon_forecasts=horizons,
+            context_features=context_features,
         )

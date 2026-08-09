@@ -133,8 +133,9 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
             self.assertIn('"phase_decision"', prompt)
             self.assertIn('"watch_conditions"', prompt)
             self.assertIn('"data_limitations"', prompt)
-            self.assertIn("quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated", prompt)
-            self.assertIn("`confidence_level` 不得为高", prompt)
+            self.assertIn("只有关键数据出现 stale/failed/inconsistent", prompt)
+            self.assertIn("partial 明确缺少当前决策所必需的核心字段", prompt)
+            self.assertIn("不得自动降低置信度", prompt)
 
     def test_analysis_prompt_contains_actionability_guardrails(self) -> None:
         with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None):
@@ -190,10 +191,10 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
         with patch("src.analyzer.get_config", return_value=fake_cfg):
             prompt = analyzer._format_prompt(context, "贵州茅台", news_context="news")
 
-        self.assertIn("近7日的新闻搜索结果", prompt)
-        self.assertIn("每一条都必须带具体日期（YYYY-MM-DD）", prompt)
-        self.assertIn("超出近7日窗口的新闻一律忽略", prompt)
-        self.assertIn("时间未知、无法确定发布日期的新闻一律忽略", prompt)
+        self.assertIn("处于近7日窗口内", prompt)
+        self.assertIn("必须有具体发布日期", prompt)
+        self.assertIn("不得把旧分析报告描述成近7日最新事件", prompt)
+        self.assertIn("时间未知的证据不得进入", prompt)
         self.assertIn("财报与分红（价值投资口径）", prompt)
         self.assertIn("禁止编造", prompt)
 
@@ -250,8 +251,8 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
         with patch("src.analyzer.get_config", return_value=fake_cfg):
             prompt = analyzer._format_prompt(context, "贵州茅台", news_context="news")
 
-        self.assertIn("近1日的新闻搜索结果", prompt)
-        self.assertIn("超出近1日窗口的新闻一律忽略", prompt)
+        self.assertIn("处于近1日窗口内", prompt)
+        self.assertIn("不得把旧分析报告描述成近1日最新事件", prompt)
 
     def test_format_prompt_injects_market_phase_and_pack_summary_before_technical_data(self) -> None:
         with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None):

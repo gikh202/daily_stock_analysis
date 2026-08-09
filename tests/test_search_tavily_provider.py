@@ -133,9 +133,9 @@ class TestTavilySearchProvider(unittest.TestCase):
                     {
                         "results": [
                             {
-                                "title": f"Fresh article via {field_name}",
+                                "title": f"BABA Alibaba fresh article via {field_name}",
                                 "url": "https://example.com/fresh-article",
-                                "content": "Fresh coverage",
+                                "content": "Alibaba BABA fresh coverage",
                                 field_name: published_text,
                             }
                         ]
@@ -206,7 +206,7 @@ class TestTavilySearchProvider(unittest.TestCase):
         self.assertEqual(_FakeTavilyClient.search_calls[0]["topic"], "news")
         self.assertNotIn("topic", _FakeTavilyClient.search_calls[1])
 
-    def test_search_comprehensive_intel_etf_risk_check_does_not_force_news_topic(self) -> None:
+    def test_search_comprehensive_intel_etf_analytical_dimensions_do_not_force_news_topic(self) -> None:
         published_dt = datetime.now(timezone.utc).replace(microsecond=0)
         published_text = published_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -214,9 +214,9 @@ class TestTavilySearchProvider(unittest.TestCase):
             {
                 "results": [
                     {
-                        "title": "ETF intel article",
+                        "title": "沪深300ETF 510300 intel article",
                         "url": "https://example.com/etf-intel",
-                        "content": "Recent ETF coverage",
+                        "content": "沪深300ETF 510300 recent coverage",
                         "published_date": published_text,
                     }
                 ]
@@ -231,8 +231,8 @@ class TestTavilySearchProvider(unittest.TestCase):
             intel = service.search_comprehensive_intel("510300", "沪深300ETF", max_searches=3)
 
         self.assertIn("latest_news", intel)
-        self.assertIn("market_analysis", intel)
-        self.assertIn("risk_check", intel)
+        self.assertIn("fund_analysis", intel)
+        self.assertIn("tracking_risk", intel)
         self.assertGreaterEqual(len(_FakeTavilyClient.search_calls), 3)
         self.assertEqual(_FakeTavilyClient.search_calls[0]["topic"], "news")
         self.assertNotIn("topic", _FakeTavilyClient.search_calls[1])

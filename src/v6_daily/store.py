@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from .models import V6Signal
 
 
-V6_SCHEMA_VERSION = "v6.0-daily.1"
+V6_SCHEMA_VERSION = "v6.1-accuracy.1"
 DEFAULT_HORIZONS = (5, 10, 20)
 
 
@@ -79,19 +79,24 @@ def _spearman(pairs: Iterable[Tuple[Any, Any]]) -> Tuple[Optional[float], int]:
 
 
 def _return_hit_rate(rows: Sequence[sqlite3.Row], *, positive: bool) -> Optional[float]:
-    returns = [
-        value
-        for value in (_finite(row["return_pct"]) for row in rows)
-        if value is not None
-    ]
+    returns = [value for value in (_finite(row["return_pct"]) for row in rows) if value is not None]
     if not returns:
         return None
     hits = sum(1 for value in returns if (value > 0.0 if positive else value <= 0.0))
     return round(100.0 * hits / len(returns), 2)
 
 
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, name: str, definition: str) -> None:
+    if name not in _column_names(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
 class V6DailyStore:
-    """Independent V6 persistence so production V4 storage stays untouched."""
+    """Independent V6 persistence with migration-safe V6.1 accuracy fields."""
 
     def __init__(self, path: str = "v6_data/v6_daily.db") -> None:
         self.path = Path(path)
@@ -141,12 +146,13 @@ class V6DailyStore:
                     catalysts_json TEXT NOT NULL,
                     risks_json TEXT NOT NULL,
                     limitations_json TEXT NOT NULL,
-                    diagnostics_json TEXT NOT NULL
+                    diagnostics_json TEXT NOT NULL,
+                    instrument_type TEXT DEFAULT 'STOCK',
+                    effective_trade_date TEXT,
+                    signal_key TEXT,
+                    horizon_forecasts_json TEXT DEFAULT '{}',
+                    context_features_json TEXT DEFAULT '{}'
                 );
-                CREATE INDEX IF NOT EXISTS ix_v6_signals_code_time
-                    ON v6_signals(code, analysis_created_at);
-                CREATE INDEX IF NOT EXISTS ix_v6_signals_decision_time
-                    ON v6_signals(decision, analysis_created_at);
 
                 CREATE TABLE IF NOT EXISTS v6_outcomes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,9 +166,43 @@ class V6DailyStore:
                     mfe_pct REAL,
                     mae_pct REAL,
                     directional_hit INTEGER,
+                    forecast_score REAL,
+                    direction_used TEXT,
+                    benchmark_spy_return_pct REAL,
+                    benchmark_qqq_return_pct REAL,
+                    excess_vs_spy_pct REAL,
+                    excess_vs_qqq_pct REAL,
                     UNIQUE(signal_id, horizon_days),
                     FOREIGN KEY(signal_id) REFERENCES v6_signals(id) ON DELETE CASCADE
                 );
+                """
+            )
+            for name, definition in (
+                ("instrument_type", "TEXT DEFAULT 'STOCK'"),
+                ("effective_trade_date", "TEXT"),
+                ("signal_key", "TEXT"),
+                ("horizon_forecasts_json", "TEXT DEFAULT '{}'"),
+                ("context_features_json", "TEXT DEFAULT '{}'"),
+            ):
+                _add_column_if_missing(conn, "v6_signals", name, definition)
+            for name, definition in (
+                ("forecast_score", "REAL"),
+                ("direction_used", "TEXT"),
+                ("benchmark_spy_return_pct", "REAL"),
+                ("benchmark_qqq_return_pct", "REAL"),
+                ("excess_vs_spy_pct", "REAL"),
+                ("excess_vs_qqq_pct", "REAL"),
+            ):
+                _add_column_if_missing(conn, "v6_outcomes", name, definition)
+
+            conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS ix_v6_signals_code_time
+                    ON v6_signals(code, analysis_created_at);
+                CREATE INDEX IF NOT EXISTS ix_v6_signals_decision_time
+                    ON v6_signals(decision, analysis_created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_v6_signals_signal_key
+                    ON v6_signals(signal_key) WHERE signal_key IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS ix_v6_outcomes_horizon
                     ON v6_outcomes(horizon_days, evaluated_at);
                 """
@@ -183,6 +223,11 @@ class V6DailyStore:
             outcomes = int(conn.execute("SELECT COUNT(*) FROM v6_outcomes").fetchone()[0])
         return {"signals": signals, "outcomes": outcomes}
 
+    @staticmethod
+    def signal_key(code: str, effective_trade_date: Any, engine_version: str) -> str:
+        date = _parse_date(effective_trade_date) or "unknown-date"
+        return f"{str(code or '').strip().upper()}|{date}|{str(engine_version or '').strip()}"
+
     def has_analysis_history_id(self, history_id: int) -> bool:
         with self.connect() as conn:
             row = conn.execute(
@@ -191,7 +236,15 @@ class V6DailyStore:
             ).fetchone()
         return row is not None
 
+    def has_signal_key(self, code: str, effective_trade_date: Any, engine_version: str) -> bool:
+        key = self.signal_key(code, effective_trade_date, engine_version)
+        with self.connect() as conn:
+            row = conn.execute("SELECT 1 FROM v6_signals WHERE signal_key=? LIMIT 1", (key,)).fetchone()
+        return row is not None
+
     def save_signal(self, signal: V6Signal, *, engine_version: str) -> bool:
+        effective = signal.effective_trade_date or _parse_date(signal.analysis_created_at)
+        key = self.signal_key(signal.code, effective, engine_version)
         with self.connect() as conn:
             cursor = conn.execute(
                 """
@@ -201,34 +254,24 @@ class V6DailyStore:
                     decision, quality_score, opportunity_score, risk_score,
                     evidence_coverage, baseline_price, market_regime, market_breadth,
                     model_used, llm_health, features_json, trade_plan_json,
-                    catalysts_json, risks_json, limitations_json, diagnostics_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    catalysts_json, risks_json, limitations_json, diagnostics_json,
+                    instrument_type, effective_trade_date, signal_key,
+                    horizon_forecasts_json, context_features_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    int(signal.analysis_history_id),
-                    signal.query_id,
-                    signal.code,
-                    signal.analysis_created_at,
-                    _utc_now(),
-                    engine_version,
-                    signal.direction,
-                    _finite(signal.forecast_score),
-                    signal.decision,
-                    _finite(signal.quality_score),
-                    _finite(signal.opportunity_score),
-                    _finite(signal.risk_score),
-                    float(signal.evidence_coverage),
-                    float(signal.baseline_price),
-                    signal.market_regime,
-                    signal.market_breadth,
-                    signal.model_used,
-                    signal.llm_health,
-                    _json(signal.features),
-                    _json(signal.trade_plan),
-                    _json(list(signal.catalysts)),
-                    _json(list(signal.risks)),
-                    _json(list(signal.limitations)),
-                    _json(signal.diagnostics),
+                    int(signal.analysis_history_id), signal.query_id, signal.code,
+                    signal.analysis_created_at, _utc_now(), engine_version,
+                    signal.direction, _finite(signal.forecast_score), signal.decision,
+                    _finite(signal.quality_score), _finite(signal.opportunity_score),
+                    _finite(signal.risk_score), float(signal.evidence_coverage),
+                    float(signal.baseline_price), signal.market_regime, signal.market_breadth,
+                    signal.model_used, signal.llm_health, _json(signal.features),
+                    _json(signal.trade_plan), _json(list(signal.catalysts)),
+                    _json(list(signal.risks)), _json(list(signal.limitations)),
+                    _json(signal.diagnostics), str(signal.instrument_type or "STOCK").upper(),
+                    effective, key, _json(signal.horizon_forecasts),
+                    _json(signal.context_features),
                 ),
             )
         return cursor.rowcount > 0
@@ -243,11 +286,7 @@ class V6DailyStore:
 
     def all_signals(self) -> List[sqlite3.Row]:
         with self.connect() as conn:
-            return list(
-                conn.execute(
-                    "SELECT * FROM v6_signals ORDER BY analysis_created_at ASC, id ASC"
-                ).fetchall()
-            )
+            return list(conn.execute("SELECT * FROM v6_signals ORDER BY analysis_created_at ASC, id ASC").fetchall())
 
     def save_outcome(
         self,
@@ -261,6 +300,9 @@ class V6DailyStore:
         min_low: Optional[float],
         direction: str,
         neutral_band_pct: float = 2.0,
+        forecast_score: Optional[float] = None,
+        benchmark_spy_return_pct: Optional[float] = None,
+        benchmark_qqq_return_pct: Optional[float] = None,
     ) -> bool:
         return_pct = (end_price / start_price - 1.0) * 100.0
         mfe = None if max_high is None else (max_high / start_price - 1.0) * 100.0
@@ -274,6 +316,8 @@ class V6DailyStore:
             hit = int(abs(return_pct) <= abs(float(neutral_band_pct)))
         else:
             hit = None
+        excess_spy = None if benchmark_spy_return_pct is None else return_pct - benchmark_spy_return_pct
+        excess_qqq = None if benchmark_qqq_return_pct is None else return_pct - benchmark_qqq_return_pct
 
         with self.connect() as conn:
             cursor = conn.execute(
@@ -281,20 +325,20 @@ class V6DailyStore:
                 INSERT OR IGNORE INTO v6_outcomes(
                     signal_id, horizon_days, evaluated_at, end_trade_date,
                     start_price, end_price, return_pct, mfe_pct, mae_pct,
-                    directional_hit
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    directional_hit, forecast_score, direction_used,
+                    benchmark_spy_return_pct, benchmark_qqq_return_pct,
+                    excess_vs_spy_pct, excess_vs_qqq_pct
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    int(signal_id),
-                    int(horizon_days),
-                    _utc_now(),
-                    end_trade_date,
-                    float(start_price),
-                    float(end_price),
-                    round(return_pct, 6),
+                    int(signal_id), int(horizon_days), _utc_now(), end_trade_date,
+                    float(start_price), float(end_price), round(return_pct, 6),
                     None if mfe is None else round(mfe, 6),
-                    None if mae is None else round(mae, 6),
-                    hit,
+                    None if mae is None else round(mae, 6), hit,
+                    _finite(forecast_score), normalized,
+                    _finite(benchmark_spy_return_pct), _finite(benchmark_qqq_return_pct),
+                    None if excess_spy is None else round(excess_spy, 6),
+                    None if excess_qqq is None else round(excess_qqq, 6),
                 ),
             )
         return cursor.rowcount > 0
@@ -303,24 +347,14 @@ class V6DailyStore:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT s.*
-                FROM v6_signals s
-                JOIN (
-                    SELECT code, MAX(id) AS max_id
-                    FROM v6_signals
-                    GROUP BY code
-                ) latest ON latest.max_id=s.id
+                SELECT s.* FROM v6_signals s
+                JOIN (SELECT code, MAX(id) AS max_id FROM v6_signals GROUP BY code) latest
+                  ON latest.max_id=s.id
                 ORDER BY
-                    CASE s.decision
-                        WHEN 'BUY_SETUP' THEN 0
-                        WHEN 'WATCH' THEN 1
-                        WHEN 'WAIT' THEN 2
-                        WHEN 'AVOID' THEN 3
-                        ELSE 4
-                    END,
+                    CASE s.decision WHEN 'BUY_SETUP' THEN 0 WHEN 'WATCH' THEN 1
+                        WHEN 'WAIT' THEN 2 WHEN 'AVOID' THEN 3 ELSE 4 END,
                     COALESCE(s.opportunity_score, -1) DESC,
-                    COALESCE(s.risk_score, 101) ASC,
-                    s.code ASC
+                    COALESCE(s.risk_score, 101) ASC, s.code ASC
                 """
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
@@ -328,28 +362,20 @@ class V6DailyStore:
     def previous_for_code(self, code: str, latest_id: int) -> Optional[Dict[str, Any]]:
         with self.connect() as conn:
             row = conn.execute(
-                """
-                SELECT * FROM v6_signals
-                WHERE code=? AND id<?
-                ORDER BY id DESC LIMIT 1
-                """,
+                "SELECT * FROM v6_signals WHERE code=? AND id<? ORDER BY id DESC LIMIT 1",
                 (str(code), int(latest_id)),
             ).fetchone()
         return None if row is None else self._row_to_dict(row)
 
     def daily_deltas(self) -> List[Dict[str, Any]]:
-        board = self.latest_board()
         deltas: List[Dict[str, Any]] = []
-        for item in board:
+        for item in self.latest_board():
             previous = self.previous_for_code(item["code"], int(item["id"]))
             if previous is None:
                 continue
-            opportunity_now = _finite(item.get("opportunity_score"))
-            opportunity_prev = _finite(previous.get("opportunity_score"))
-            risk_now = _finite(item.get("risk_score"))
-            risk_prev = _finite(previous.get("risk_score"))
-            forecast_now = _finite(item.get("forecast_score"))
-            forecast_prev = _finite(previous.get("forecast_score"))
+            def delta(field: str) -> Optional[float]:
+                now, before = _finite(item.get(field)), _finite(previous.get(field))
+                return None if now is None or before is None else round(now - before, 2)
             deltas.append(
                 {
                     "code": item["code"],
@@ -357,9 +383,9 @@ class V6DailyStore:
                     "decision_after": item.get("decision"),
                     "direction_before": previous.get("direction"),
                     "direction_after": item.get("direction"),
-                    "opportunity_delta": None if opportunity_now is None or opportunity_prev is None else round(opportunity_now - opportunity_prev, 2),
-                    "risk_delta": None if risk_now is None or risk_prev is None else round(risk_now - risk_prev, 2),
-                    "forecast_delta": None if forecast_now is None or forecast_prev is None else round(forecast_now - forecast_prev, 2),
+                    "opportunity_delta": delta("opportunity_score"),
+                    "risk_delta": delta("risk_score"),
+                    "forecast_delta": delta("forecast_score"),
                 }
             )
         return deltas
@@ -367,32 +393,56 @@ class V6DailyStore:
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         item = dict(row)
-        for field in (
-            "features_json",
-            "trade_plan_json",
-            "catalysts_json",
-            "risks_json",
-            "limitations_json",
-            "diagnostics_json",
-        ):
+        mapping = {
+            "features_json": "features",
+            "trade_plan_json": "trade_plan",
+            "catalysts_json": "catalysts",
+            "risks_json": "risks",
+            "limitations_json": "limitations",
+            "diagnostics_json": "diagnostics",
+            "horizon_forecasts_json": "horizon_forecasts",
+            "context_features_json": "context_features",
+        }
+        for field, target in mapping.items():
             try:
-                item[field[:-5]] = json.loads(item.get(field) or "null")
+                item[target] = json.loads(item.get(field) or "null")
             except (TypeError, ValueError, json.JSONDecodeError):
-                item[field[:-5]] = None
+                item[target] = None
         return item
+
+    @staticmethod
+    def _calibration(bucket: Sequence[sqlite3.Row], minimum: int) -> Dict[str, Any]:
+        ranges = ((0, 40), (40, 50), (50, 60), (60, 70), (70, 101))
+        result = []
+        for low, high in ranges:
+            rows = [row for row in bucket if _finite(row["outcome_forecast_score"]) is not None and low <= float(row["outcome_forecast_score"]) < high]
+            returns = [float(row["return_pct"]) for row in rows if row["return_pct"] is not None]
+            if not rows:
+                continue
+            result.append(
+                {
+                    "score_range": f"{low}-{high if high <= 100 else 100}",
+                    "samples": len(rows),
+                    "mature": len(rows) >= minimum,
+                    "positive_return_rate_pct": None if not returns else round(100.0 * sum(1 for value in returns if value > 0) / len(returns), 2),
+                    "avg_return_pct": None if not returns else round(statistics.fmean(returns), 4),
+                }
+            )
+        return {"status": "measurable" if any(item["mature"] for item in result) else "insufficient_data", "buckets": result}
 
     def scoreboard(self, *, min_samples: int = 50) -> Dict[str, Any]:
         minimum = max(3, int(min_samples))
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT s.direction, s.decision, s.market_regime,
-                       s.forecast_score, s.opportunity_score,
+                SELECT s.direction AS signal_direction, s.decision, s.market_regime,
+                       s.instrument_type, s.opportunity_score,
                        o.horizon_days, o.return_pct, o.mfe_pct, o.mae_pct,
-                       o.directional_hit
-                FROM v6_outcomes o
-                JOIN v6_signals s ON s.id=o.signal_id
-                ORDER BY o.horizon_days, s.analysis_created_at, s.id
+                       o.directional_hit, o.direction_used,
+                       COALESCE(o.forecast_score, s.forecast_score) AS outcome_forecast_score,
+                       o.excess_vs_spy_pct, o.excess_vs_qqq_pct
+                FROM v6_outcomes o JOIN v6_signals s ON s.id=o.signal_id
+                ORDER BY o.horizon_days, s.effective_trade_date, s.id
                 """
             ).fetchall()
 
@@ -404,12 +454,22 @@ class V6DailyStore:
             buy_rows = [row for row in bucket if row["decision"] == "BUY_SETUP"]
             avoid_rows = [row for row in bucket if row["decision"] == "AVOID"]
             avoided_returns = [float(row["return_pct"]) for row in avoid_rows if row["return_pct"] is not None]
-            score_ic, score_ic_n = _spearman(
-                (row["forecast_score"], row["return_pct"]) for row in bucket
-            )
-            opp_ic, opp_ic_n = _spearman(
-                (row["opportunity_score"], row["return_pct"]) for row in bucket
-            )
+            excess_spy = [float(row["excess_vs_spy_pct"]) for row in bucket if row["excess_vs_spy_pct"] is not None]
+            excess_qqq = [float(row["excess_vs_qqq_pct"]) for row in bucket if row["excess_vs_qqq_pct"] is not None]
+            score_ic, score_ic_n = _spearman((row["outcome_forecast_score"], row["return_pct"]) for row in bucket)
+            score_excess_ic, score_excess_ic_n = _spearman((row["outcome_forecast_score"], row["excess_vs_spy_pct"]) for row in bucket)
+            opp_ic, opp_ic_n = _spearman((row["opportunity_score"], row["return_pct"]) for row in bucket)
+
+            regime_breakdown = []
+            for regime in sorted({str(row["market_regime"] or "unknown") for row in bucket}):
+                group = [row for row in bucket if str(row["market_regime"] or "unknown") == regime]
+                group_hits = [int(row["directional_hit"]) for row in group if row["directional_hit"] is not None]
+                regime_breakdown.append({
+                    "regime": regime,
+                    "samples": len(group),
+                    "directional_hit_rate_pct": None if not group_hits else round(100.0 * sum(group_hits) / len(group_hits), 2),
+                })
+
             horizons.append(
                 {
                     "horizon_days": horizon,
@@ -418,6 +478,8 @@ class V6DailyStore:
                     "directional_samples": len(hits),
                     "directional_hit_rate_pct": None if not hits else round(100.0 * sum(hits) / len(hits), 2),
                     "avg_return_pct": None if not returns else round(statistics.fmean(returns), 4),
+                    "avg_excess_vs_spy_pct": None if not excess_spy else round(statistics.fmean(excess_spy), 4),
+                    "avg_excess_vs_qqq_pct": None if not excess_qqq else round(statistics.fmean(excess_qqq), 4),
                     "buy_setup_samples": len(buy_rows),
                     "buy_setup_hit_rate_pct": _return_hit_rate(buy_rows, positive=True),
                     "avoidance_samples": len(avoid_rows),
@@ -426,8 +488,12 @@ class V6DailyStore:
                     "avg_avoided_return_pct": None if not avoided_returns else round(statistics.fmean(avoided_returns), 4),
                     "forecast_score_ic_spearman": None if score_ic is None else round(score_ic, 4),
                     "forecast_score_ic_samples": score_ic_n,
+                    "forecast_excess_spy_ic_spearman": None if score_excess_ic is None else round(score_excess_ic, 4),
+                    "forecast_excess_spy_ic_samples": score_excess_ic_n,
                     "opportunity_ic_spearman": None if opp_ic is None else round(opp_ic, 4),
                     "opportunity_ic_samples": opp_ic_n,
+                    "regime_breakdown": regime_breakdown,
+                    "calibration": self._calibration(bucket, minimum),
                 }
             )
 
@@ -439,32 +505,40 @@ class V6DailyStore:
         }
 
 
-def _future_bars(
-    stock_db_path: str,
-    *,
-    code: str,
-    analysis_created_at: Any,
-    needed: int,
-) -> List[Dict[str, Any]]:
-    analysis_date = _parse_date(analysis_created_at)
-    if analysis_date is None:
-        return []
+def _future_bars(stock_db_path: str, *, code: str, analysis_date: str, needed: int) -> List[Dict[str, Any]]:
     conn = sqlite3.connect(f"file:{Path(stock_db_path)}?mode=ro", uri=True, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            """
-            SELECT date, high, low, close
-            FROM stock_daily
-            WHERE code=? AND date>?
-            ORDER BY date ASC
-            LIMIT ?
-            """,
+            "SELECT date, high, low, close FROM stock_daily WHERE code=? AND date>? ORDER BY date ASC LIMIT ?",
             (str(code), analysis_date, max(1, int(needed))),
         ).fetchall()
         return [dict(row) for row in rows]
     finally:
         conn.close()
+
+
+def _benchmark_return(stock_db_path: str, *, code: str, analysis_date: str, horizon: int) -> Optional[float]:
+    conn = sqlite3.connect(f"file:{Path(stock_db_path)}?mode=ro", uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        start_row = conn.execute(
+            "SELECT close FROM stock_daily WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1",
+            (code, analysis_date),
+        ).fetchone()
+        future = conn.execute(
+            "SELECT close FROM stock_daily WHERE code=? AND date>? ORDER BY date ASC LIMIT ?",
+            (code, analysis_date, int(horizon)),
+        ).fetchall()
+    finally:
+        conn.close()
+    if start_row is None or len(future) < horizon:
+        return None
+    start = _finite(start_row["close"])
+    end = _finite(future[-1]["close"])
+    if start is None or end is None or start <= 0:
+        return None
+    return round((end / start - 1.0) * 100.0, 6)
 
 
 def mature_outcomes(
@@ -486,16 +560,19 @@ def mature_outcomes(
         needed = [h for h in normalized if h not in done]
         if not needed:
             continue
-        bars = _future_bars(
-            stock_db_path,
-            code=str(signal["code"]),
-            analysis_created_at=signal["analysis_created_at"],
-            needed=max_horizon,
-        )
+        analysis_date = _parse_date(signal["effective_trade_date"]) or _parse_date(signal["analysis_created_at"])
+        if analysis_date is None:
+            pending += len(needed)
+            continue
+        bars = _future_bars(stock_db_path, code=str(signal["code"]), analysis_date=analysis_date, needed=max_horizon)
         start = _finite(signal["baseline_price"])
         if start is None or start <= 0:
             pending += len(needed)
             continue
+        try:
+            forecasts = json.loads(signal["horizon_forecasts_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            forecasts = {}
 
         for horizon in needed:
             if len(bars) < horizon:
@@ -508,16 +585,18 @@ def mature_outcomes(
             if end is None or end <= 0:
                 pending += 1
                 continue
+            block = forecasts.get(f"{horizon}d") if isinstance(forecasts, dict) else None
+            direction = str(block.get("direction") if isinstance(block, dict) else signal["direction"])
+            forecast_score = _finite(block.get("score")) if isinstance(block, dict) else _finite(signal["forecast_score"])
+            spy_return = _benchmark_return(stock_db_path, code="SPY", analysis_date=analysis_date, horizon=horizon)
+            qqq_return = _benchmark_return(stock_db_path, code="QQQ", analysis_date=analysis_date, horizon=horizon)
             if store.save_outcome(
-                signal_id=int(signal["id"]),
-                horizon_days=horizon,
-                end_trade_date=str(window[-1].get("date") or ""),
-                start_price=start,
-                end_price=end,
-                max_high=max(highs) if highs else None,
-                min_low=min(lows) if lows else None,
-                direction=str(signal["direction"]),
-                neutral_band_pct=neutral_band_pct,
+                signal_id=int(signal["id"]), horizon_days=horizon,
+                end_trade_date=str(window[-1].get("date") or ""), start_price=start,
+                end_price=end, max_high=max(highs) if highs else None,
+                min_low=min(lows) if lows else None, direction=direction,
+                neutral_band_pct=neutral_band_pct, forecast_score=forecast_score,
+                benchmark_spy_return_pct=spy_return, benchmark_qqq_return_pct=qqq_return,
             ):
                 evaluated += 1
 

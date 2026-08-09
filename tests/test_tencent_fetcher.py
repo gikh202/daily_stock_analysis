@@ -154,7 +154,14 @@ def test_tencent_fetcher_parses_qfq_daily_response() -> None:
         "ma5",
         "ma10",
         "ma20",
+        "volume_ma5",
+        "volume_ma20",
+        "rvol5",
+        "rvol20",
         "volume_ratio",
+        "volume_trend_5d_pct",
+        "volume_trend_vs20_pct",
+        "dollar_volume_proxy",
     ]
     assert len(df) == 2
     assert float(df.iloc[0]["close"]) == 10.5

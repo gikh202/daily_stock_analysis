@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Static checks for notification env mappings in 00-daily-analysis.yml."""
+"""Static regression checks for notification env mappings in 00-daily-analysis.yml."""
 
 from pathlib import Path
 
@@ -24,7 +24,6 @@ NOTIFICATIONS_DOC_PATH = ROOT_DIR / "docs/notifications.md"
 
 P0_EXCLUDED_BEHAVIOR_SWITCHES = {
     "MARKDOWN_TO_IMAGE_CHANNELS",
-    "MERGE_EMAIL_NOTIFICATION",
 }
 
 
@@ -84,6 +83,15 @@ def test_daily_analysis_keeps_deferred_behavior_switches_unmapped() -> None:
 
     for key in P0_EXCLUDED_BEHAVIOR_SWITCHES:
         assert key not in env
+
+
+def test_daily_analysis_maps_merge_email_notification_with_safe_default() -> None:
+    # MERGE_EMAIL_NOTIFICATION is an active workflow switch now, not a deferred mapping.
+    env = _load_daily_analysis_env()
+
+    expression = str(env["MERGE_EMAIL_NOTIFICATION"])
+    assert "vars.MERGE_EMAIL_NOTIFICATION" in expression
+    assert "'true'" in expression
 
 
 def test_notification_actions_env_table_matches_generated_output() -> None:

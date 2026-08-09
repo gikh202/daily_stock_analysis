@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 from .models import AlphaDecision, AlphaFeatures, TradePlan
 
@@ -19,19 +19,19 @@ def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
 
 
 def _weighted_available(
-    values: Dict[str, Optional[float]],
-    weights: Dict[str, float],
+    values: Mapping[str, Optional[float]],
+    weights: Mapping[str, float],
 ) -> Tuple[Optional[float], float]:
     """Score only observed features; return score and configured-weight coverage."""
     numerator = 0.0
     observed_weight = 0.0
-    total_weight = sum(max(0.0, w) for w in weights.values())
+    total_weight = sum(max(0.0, float(w)) for w in weights.values())
     for name, weight in weights.items():
         value = _finite(values.get(name))
         if value is None or weight <= 0:
             continue
-        numerator += _clamp(value) * weight
-        observed_weight += weight
+        numerator += _clamp(value) * float(weight)
+        observed_weight += float(weight)
     if observed_weight <= 0 or total_weight <= 0:
         return None, 0.0
     return round(numerator / observed_weight, 1), round(observed_weight / total_weight, 4)
@@ -40,33 +40,53 @@ def _weighted_available(
 class AlphaDecisionEngine:
     """Deterministic, explainable decision layer.
 
-    Design rules:
-    - missing evidence lowers confidence instead of becoming a fake 50;
-    - risk can veto sizing/action but never rewrites the upstream forecast;
-    - position sizing is capped; this module never places orders;
-    - LLM prose is not an input to the numeric score;
-    - the top-level decision and generated TradePlan action must never disagree.
+    V6.1 separates stock and ETF evidence profiles, adds source-backed catalyst
+    and risk-v2 inputs, and continues to treat missing evidence as missing.
+    LLM prose is never a numeric input.
     """
 
-    QUALITY_WEIGHTS = {
-        "fundamental_quality": 0.55,
-        "trend": 0.20,
-        "relative_strength": 0.15,
+    STOCK_QUALITY_WEIGHTS = {
+        "fundamental_quality": 0.50,
+        "trend": 0.18,
+        "relative_strength": 0.12,
+        "sector_relative_strength": 0.10,
         "data_quality": 0.10,
     }
-    OPPORTUNITY_WEIGHTS = {
-        "trend": 0.25,
-        "momentum": 0.15,
-        "relative_strength": 0.20,
-        "volume_confirmation": 0.15,
+    ETF_QUALITY_WEIGHTS = {
+        "trend": 0.30,
+        "relative_strength": 0.30,
+        "market_regime": 0.25,
+        "data_quality": 0.15,
+    }
+    STOCK_OPPORTUNITY_WEIGHTS = {
+        "trend": 0.22,
+        "momentum": 0.14,
+        "relative_strength": 0.16,
+        "sector_relative_strength": 0.10,
+        "volume_confirmation": 0.12,
         "catalyst": 0.10,
-        "market_regime": 0.15,
+        "market_regime": 0.16,
+    }
+    ETF_OPPORTUNITY_WEIGHTS = {
+        "trend": 0.28,
+        "momentum": 0.18,
+        "relative_strength": 0.25,
+        "volume_confirmation": 0.12,
+        "market_regime": 0.17,
     }
     RISK_WEIGHTS = {
-        "volatility_risk": 0.55,
-        "event_risk": 0.30,
-        "data_risk": 0.15,
+        "volatility_risk": 0.30,
+        "event_risk": 0.18,
+        "gap_risk": 0.12,
+        "trend_breakdown_risk": 0.15,
+        "macro_risk": 0.15,
+        "data_risk": 0.10,
     }
+
+    def _profiles(self, instrument_type: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+        if str(instrument_type or "").strip().upper() == "ETF":
+            return self.ETF_QUALITY_WEIGHTS, self.ETF_OPPORTUNITY_WEIGHTS
+        return self.STOCK_QUALITY_WEIGHTS, self.STOCK_OPPORTUNITY_WEIGHTS
 
     def evaluate(
         self,
@@ -77,32 +97,25 @@ class AlphaDecisionEngine:
         support: Optional[float] = None,
         resistance: Optional[float] = None,
         atr: Optional[float] = None,
+        instrument_type: str = "STOCK",
     ) -> AlphaDecision:
         raw = features.__dict__.copy()
         data_quality = _finite(features.data_quality)
-        raw["data_risk"] = (
-            None if data_quality is None else 100.0 - _clamp(data_quality)
-        )
+        raw["data_risk"] = None if data_quality is None else 100.0 - _clamp(data_quality)
 
-        quality, quality_coverage = _weighted_available(raw, self.QUALITY_WEIGHTS)
-        opportunity, opportunity_coverage = _weighted_available(
-            raw,
-            self.OPPORTUNITY_WEIGHTS,
-        )
+        quality_weights, opportunity_weights = self._profiles(instrument_type)
+        quality, quality_coverage = _weighted_available(raw, quality_weights)
+        opportunity, opportunity_coverage = _weighted_available(raw, opportunity_weights)
         risk, risk_coverage = _weighted_available(raw, self.RISK_WEIGHTS)
 
-        coverage = (
-            0.45 * opportunity_coverage
-            + 0.30 * quality_coverage
-            + 0.25 * risk_coverage
-        )
+        coverage = 0.45 * opportunity_coverage + 0.30 * quality_coverage + 0.25 * risk_coverage
         confidence = round(_clamp(coverage * 100.0) / 100.0, 2)
 
         limitations = []
         if opportunity_coverage < 0.65:
             limitations.append("opportunity evidence coverage below 65%")
-        if risk_coverage < 0.70:
-            limitations.append("risk evidence coverage below 70%")
+        if risk_coverage < 0.60:
+            limitations.append("risk evidence coverage below 60%")
         if data_quality is not None and data_quality < 60:
             limitations.append("data quality below 60")
 
@@ -125,15 +138,8 @@ class AlphaDecisionEngine:
             resistance=resistance,
             atr=atr,
         )
-
-        # The trade-plan layer has the final word on actionability.  For
-        # example, a statistically attractive setup with <1.5R becomes WAIT.
-        # Keeping these two fields aligned prevents downstream UI/backtests from
-        # treating a rejected setup as BUY_SETUP.
         if plan.action != decision:
-            limitations.append(
-                f"trade-plan gate downgraded decision {decision}->{plan.action}"
-            )
+            limitations.append(f"trade-plan gate downgraded decision {decision}->{plan.action}")
             decision = plan.action
 
         reasons = []
@@ -156,9 +162,13 @@ class AlphaDecisionEngine:
             reasons=tuple(reasons),
             limitations=tuple(dict.fromkeys(limitations)),
             diagnostics={
+                "instrument_type": str(instrument_type or "STOCK").upper(),
                 "quality_coverage": quality_coverage,
                 "opportunity_coverage": opportunity_coverage,
                 "risk_coverage": risk_coverage,
+                "quality_weights": quality_weights,
+                "opportunity_weights": opportunity_weights,
+                "risk_weights": self.RISK_WEIGHTS,
             },
         )
 
@@ -177,25 +187,18 @@ class AlphaDecisionEngine:
         resistance_f = _finite(resistance)
         atr_f = _finite(atr)
 
-        if (
-            price is None
-            or price <= 0
-            or decision not in {"BUY_SETUP", "WATCH"}
-        ):
+        if price is None or price <= 0 or decision not in {"BUY_SETUP", "WATCH"}:
             return TradePlan(action=decision, max_position_pct=0.0)
 
         risk = 50.0 if risk_score is None else _clamp(risk_score)
-        # Hard portfolio-independent cap. Portfolio engine may reduce this further.
         max_position = 0.15 if risk <= 35 else 0.10 if risk <= 55 else 0.05
         if decision == "WATCH":
             max_position = min(max_position, 0.05)
 
-        volatility_buffer = (
-            atr_f if atr_f is not None and atr_f > 0 else price * 0.025
-        )
+        volatility_buffer = atr_f if atr_f is not None and atr_f > 0 else price * 0.025
         stop = (
             support_f - 0.35 * volatility_buffer
-            if support_f and support_f < price
+            if support_f is not None and 0 < support_f < price
             else price - 1.5 * volatility_buffer
         )
         stop = max(0.01, stop)
@@ -203,13 +206,11 @@ class AlphaDecisionEngine:
 
         first_target = (
             resistance_f
-            if resistance_f and resistance_f > price
+            if resistance_f is not None and resistance_f > price
             else price + 2.0 * risk_per_share
         )
         second_target = max(first_target, price + 3.0 * risk_per_share)
         rr = (first_target - price) / risk_per_share
-
-        # Do not advertise a low-R:R setup as actionable.
         if rr < 1.5:
             return TradePlan(
                 action="WAIT",
@@ -218,11 +219,14 @@ class AlphaDecisionEngine:
                 invalidation=("first target offers <1.5R",),
             )
 
-        entry_low = min(
-            price,
-            support_f if support_f and support_f > stop else price,
-        )
+        # ATR-based entry width avoids the former [price, price] pseudo-zone.
+        zone_width = max(0.25 * volatility_buffer, price * 0.0025)
+        technical_floor = stop + 0.55 * risk_per_share
+        entry_low = max(technical_floor, price - zone_width)
+        if support_f is not None and stop < support_f < price:
+            entry_low = max(entry_low, min(price, support_f))
         entry_high = price
+
         return TradePlan(
             action=decision,
             entry_zone=(round(entry_low, 4), round(entry_high, 4)),
@@ -231,7 +235,5 @@ class AlphaDecisionEngine:
             max_position_pct=max_position,
             risk_reward=round(rr, 2),
             invalidation=(f"close below {stop:.4f}",),
-            confirmations=(
-                "price/volume confirmation required before entry",
-            ),
+            confirmations=("price/volume confirmation required before entry",),
         )

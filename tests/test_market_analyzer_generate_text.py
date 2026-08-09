@@ -2162,13 +2162,13 @@ class TestAnalyzerGenerateText:
                 stream=True,
             )
 
-        assert text == "fallback"
+        assert text == "fallback full"
         assert model_used == "provider/good-model"
-        _assert_usage_contains(usage, {"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9})
+        _assert_usage_contains(usage, {"prompt_tokens": 7, "completion_tokens": 8, "total_tokens": 15})
         assert dispatch_calls == [
             ("provider/bad-model", True),
             ("provider/bad-model", False),
-            ("provider/good-model", True),
+            ("provider/good-model", False),
         ]
 
     def test_analyze_integrity_retry_keeps_progress_monotonic(self):

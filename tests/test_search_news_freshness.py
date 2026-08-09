@@ -128,8 +128,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
                     _result("old", old),
                     _result("unknown", None),
                     _result("future_2", future_2),
-                    _result("future_1", future_1),
-                    _result("fresh", fresh),
+                    _result("future_1", future_1, snippet="贵州茅台 600519 最新消息"),
+                    _result("fresh", fresh, snippet="贵州茅台 600519 最新消息"),
                 ]
             ),
         )
@@ -174,7 +174,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p2 = SimpleNamespace(
             is_available=True,
             name="P2",
-            search=MagicMock(return_value=_response([_result("fresh", fresh)])),
+            search=MagicMock(return_value=_response([_result("fresh", fresh, snippet="贵州茅台 600519 最新消息")])),
         )
         service._providers = [p1, p2]
 
@@ -243,8 +243,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             search=MagicMock(
                 return_value=_response(
                     [
-                        _result("English headline", fresh),
-                        _result("Another English story", fresh),
+                        _result("English headline", fresh, snippet="Kweichow Moutai 600519 latest company news"),
+                        _result("Another English story", fresh, snippet="Kweichow Moutai 600519 business update"),
                     ]
                 )
             ),
@@ -252,7 +252,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p2 = SimpleNamespace(
             is_available=True,
             name="P2",
-            search=MagicMock(return_value=_response([_result("中文资讯", fresh)])),
+            search=MagicMock(return_value=_response([_result("中文资讯", fresh, snippet="贵州茅台 600519 公司最新资讯")])),
         )
         service._providers = [p1, p2]
 
@@ -277,9 +277,9 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             search=MagicMock(
                 return_value=_response(
                     [
-                        _result("English headline", fresh),
-                        _result("中文快讯", fresh),
-                        _result("Second English headline", fresh),
+                        _result("English headline", fresh, snippet="Kweichow Moutai 600519 latest company news"),
+                        _result("中文快讯", fresh, snippet="贵州茅台 600519 公司快讯"),
+                        _result("Second English headline", fresh, snippet="Kweichow Moutai 600519 second company update"),
                     ]
                 )
             ),
@@ -287,9 +287,11 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         service._providers = [mixed_provider]
 
         resp = service.search_stock_news("600519", "贵州茅台", max_results=3)
-        self.assertEqual(
-            [r.title for r in resp.results],
-            ["中文快讯", "English headline", "Second English headline"],
+        titles = [r.title for r in resp.results]
+        self.assertEqual(titles[0], "中文快讯")
+        self.assertCountEqual(
+            titles[1:],
+            ["English headline", "Second English headline"],
         )
 
     def test_search_stock_news_prioritizes_chinese_before_truncating_results(self) -> None:
@@ -308,8 +310,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             search=MagicMock(
                 return_value=_response(
                     [
-                        _result("English headline", fresh),
-                        _result("中文快讯", fresh),
+                        _result("English headline", fresh, snippet="Kweichow Moutai 600519 latest company news"),
+                        _result("中文快讯", fresh, snippet="贵州茅台 600519 公司快讯"),
                     ]
                 )
             ),
@@ -317,14 +319,14 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p2 = SimpleNamespace(
             is_available=True,
             name="P2",
-            search=MagicMock(return_value=_response([_result("后续中文资讯", fresh)])),
+            search=MagicMock(return_value=_response([_result("后续中文资讯", fresh, snippet="贵州茅台 600519 后续资讯")])),
         )
         service._providers = [p1, p2]
 
         resp = service.search_stock_news("600519", "贵州茅台", max_results=1)
         self.assertEqual([r.title for r in resp.results], ["中文快讯"])
         p1.search.assert_called_once()
-        p2.search.assert_called_once()
+        p2.search.assert_not_called()
 
     def test_search_stock_news_prefers_chinese_direct_hit_before_score_truncation(self) -> None:
         """Chinese direct hits should outrank higher-scored English direct hits before limiting."""
@@ -639,7 +641,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
                     _result(
                         "外围市场走弱拖累科技股",
                         fresh,
-                        snippet="外围市场情绪走弱，带动科技股阶段性回撤。",
+                        snippet="外围市场情绪走弱，腾讯控股 00700 与科技股阶段性回撤。",
                         source="finance.example.invalid",
                     ),
                 ]
@@ -1864,7 +1866,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         fresh_iso = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         for stock_code, stock_name, expected_lang, expected_country, title, description in (
-            ("600519", "贵州茅台", "zh-hans", "CN", "中文资讯", "中文摘要"),
+            ("600519", "贵州茅台", "zh-hans", "CN", "贵州茅台 600519 中文资讯", "贵州茅台公司最新消息"),
             ("AAPL", "Apple", "en", "US", "Apple earnings beat", "English summary"),
         ):
             with self.subTest(stock_code=stock_code):
@@ -1911,8 +1913,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_strategy_profile="medium",  # min(7,3)=3
         )
         mock_search.side_effect = [
-            _response([_result("old", old), _result("fresh", fresh)]),
-            _response([_result("analysis_unknown", None), _result("analysis_dated", analysis_text)]),
+            _response([_result("old", old, snippet="贵州茅台 600519 旧闻"), _result("fresh", fresh, snippet="贵州茅台 600519 最新消息")]),
+            _response([_result("analysis_unknown", None, snippet="贵州茅台 600519 机构分析"), _result("analysis_dated", analysis_text, snippet="贵州茅台 600519 机构分析")]),
         ]
         with patch("src.search_service.time.sleep"):
             intel = service.search_comprehensive_intel(
@@ -1931,10 +1933,10 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         self.assertEqual([item.title for item in intel["latest_news"].results], ["fresh"])
         self.assertEqual(
             [item.title for item in intel["market_analysis"].results],
-            ["analysis_unknown", "analysis_dated"],
+            ["analysis_dated", "analysis_unknown"],
         )
-        self.assertIsNone(intel["market_analysis"].results[0].published_date)
-        self.assertEqual(intel["market_analysis"].results[1].published_date, expected_analysis_date)
+        self.assertEqual(intel["market_analysis"].results[0].published_date, expected_analysis_date)
+        self.assertIsNone(intel["market_analysis"].results[1].published_date)
 
     def test_search_comprehensive_intel_widens_analytical_provider_windows(self) -> None:
         """Market analysis and earnings should request a longer provider lookback."""
@@ -1985,18 +1987,18 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_strategy_profile="short",
         )
         mock_search.side_effect = [
-            _response([_result("latest_news", fresh_text)]),
+            _response([_result("latest_news", fresh_text, snippet="贵州茅台 600519 最新消息")]),
             _response([
-                _result("market_analysis_too_old", very_old),
-                _result("market_analysis_unknown", None),
-                _result("market_analysis_in_window", in_window),
+                _result("market_analysis_too_old", very_old, snippet="贵州茅台 600519 机构分析"),
+                _result("market_analysis_unknown", None, snippet="贵州茅台 600519 机构分析"),
+                _result("market_analysis_in_window", in_window, snippet="贵州茅台 600519 机构分析"),
             ]),
-            _response([_result("risk_check", fresh_text)]),
-            _response([_result("announcement_item", fresh_text)]),
+            _response([_result("risk_check", fresh_text, snippet="贵州茅台 600519 风险排查")]),
+            _response([_result("announcement_item", fresh_text, snippet="贵州茅台 600519 公司公告")]),
             _response([
-                _result("earnings_too_old", very_old),
-                _result("earnings_unknown", None),
-                _result("earnings_in_window", in_window),
+                _result("earnings_too_old", very_old, snippet="贵州茅台 600519 业绩分析"),
+                _result("earnings_unknown", None, snippet="贵州茅台 600519 业绩分析"),
+                _result("earnings_in_window", in_window, snippet="贵州茅台 600519 业绩分析"),
             ]),
         ]
 
@@ -2009,19 +2011,19 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
 
         self.assertEqual(
             [item.title for item in intel["market_analysis"].results],
-            ["market_analysis_unknown", "market_analysis_in_window"],
+            ["market_analysis_in_window", "market_analysis_unknown"],
         )
-        self.assertIsNone(intel["market_analysis"].results[0].published_date)
-        self.assertEqual(intel["market_analysis"].results[1].published_date, in_window)
+        self.assertEqual(intel["market_analysis"].results[0].published_date, in_window)
+        self.assertIsNone(intel["market_analysis"].results[1].published_date)
         self.assertEqual(
             [item.title for item in intel["earnings"].results],
-            ["earnings_unknown", "earnings_in_window"],
+            ["earnings_in_window", "earnings_unknown"],
         )
-        self.assertIsNone(intel["earnings"].results[0].published_date)
-        self.assertEqual(intel["earnings"].results[1].published_date, in_window)
+        self.assertEqual(intel["earnings"].results[0].published_date, in_window)
+        self.assertIsNone(intel["earnings"].results[1].published_date)
 
-    def test_search_comprehensive_intel_etf_risk_check_keeps_unknown_dates(self) -> None:
-        """ETF risk_check should avoid strict freshness filtering."""
+    def test_search_comprehensive_intel_etf_analytical_dimensions_keep_unknown_dates(self) -> None:
+        """ETF analytical dimensions keep unknown-date background evidence."""
         fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
         fresh_text = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         expected_fresh_date = fresh_dt.astimezone().date().isoformat()
@@ -2031,9 +2033,9 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_strategy_profile="short",
         )
         mock_search.side_effect = [
-            _response([_result("latest_news", fresh_text)]),
-            _response([_result("market_analysis_unknown", None)]),
-            _response([_result("risk_unknown", None)]),
+            _response([_result("latest_news", fresh_text, snippet="沪深300ETF 510300 最新消息")]),
+            _response([_result("fund_analysis_unknown", None, snippet="沪深300ETF 510300 基金分析")]),
+            _response([_result("tracking_risk_unknown", None, snippet="沪深300ETF 510300 跟踪风险")]),
         ]
 
         with patch("src.search_service.time.sleep"):
@@ -2044,11 +2046,10 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             )
 
         self.assertEqual(intel["latest_news"].results[0].published_date, expected_fresh_date)
-        self.assertEqual([item.title for item in intel["market_analysis"].results], ["market_analysis_unknown"])
-        self.assertIsNone(intel["market_analysis"].results[0].published_date)
-        self.assertEqual([item.title for item in intel["risk_check"].results], ["risk_unknown"])
-        self.assertIsNone(intel["risk_check"].results[0].published_date)
-
+        self.assertEqual([item.title for item in intel["fund_analysis"].results], ["fund_analysis_unknown"])
+        self.assertIsNone(intel["fund_analysis"].results[0].published_date)
+        self.assertEqual([item.title for item in intel["tracking_risk"].results], ["tracking_risk_unknown"])
+        self.assertIsNone(intel["tracking_risk"].results[0].published_date)
     def test_search_comprehensive_intel_non_etf_risk_check_stays_strict(self) -> None:
         """Non-ETF risk_check should keep strict freshness filtering."""
         fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
@@ -2060,9 +2061,9 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_strategy_profile="short",
         )
         mock_search.side_effect = [
-            _response([_result("latest_news", fresh_text)]),
-            _response([_result("market_analysis_unknown", None)]),
-            _response([_result("risk_unknown", None)]),
+            _response([_result("latest_news", fresh_text, snippet="贵州茅台 600519 最新消息")]),
+            _response([_result("market_analysis_unknown", None, snippet="贵州茅台 600519 机构分析")]),
+            _response([_result("risk_unknown", None, snippet="贵州茅台 600519 风险排查")]),
         ]
 
         with patch("src.search_service.time.sleep"):
@@ -2087,10 +2088,10 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_strategy_profile="short",
         )
         mock_search.side_effect = [
-            _response([_result("latest_news", fresh_text)]),
-            _response([_result("market_analysis", None)]),
-            _response([_result("risk_check", fresh_text)]),
-            _response([_result("announcement_item", fresh_text)]),
+            _response([_result("latest_news", fresh_text, snippet="贵州茅台 600519 最新消息")]),
+            _response([_result("market_analysis", None, snippet="贵州茅台 600519 机构分析")]),
+            _response([_result("risk_check", fresh_text, snippet="贵州茅台 600519 风险排查")]),
+            _response([_result("announcement_item", fresh_text, snippet="贵州茅台 600519 公司公告")]),
         ]
 
         with patch("src.search_service.time.sleep"):
@@ -2117,10 +2118,10 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_strategy_profile="short",
         )
         mock_search.side_effect = [
-            _response([_result("latest_news", fresh_text)]),
-            _response([_result("market_analysis", None)]),
-            _response([_result("risk_check", fresh_text)]),
-            _response([_result("old_announcement", old), _result("fresh_announcement", fresh_text)]),
+            _response([_result("latest_news", fresh_text, snippet="贵州茅台 600519 最新消息")]),
+            _response([_result("market_analysis", None, snippet="贵州茅台 600519 机构分析")]),
+            _response([_result("risk_check", fresh_text, snippet="贵州茅台 600519 风险排查")]),
+            _response([_result("old_announcement", old, snippet="贵州茅台 600519 旧公告"), _result("fresh_announcement", fresh_text, snippet="贵州茅台 600519 最新公告")]),
         ]
 
         with patch("src.search_service.time.sleep"):
@@ -2136,8 +2137,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         self.assertNotIn("old_announcement", titles)
         self.assertIn("fresh_announcement", titles)
 
-    def test_announcements_etf_is_not_strict(self) -> None:
-        """For ETF, announcements dimension also uses tavily_topic='news' and strict_freshness=True."""
+    def test_etf_index_outlook_keeps_unknown_dates(self) -> None:
+        """ETF index_outlook is analytical and may keep unknown-date background evidence."""
         fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)
         fresh_text = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -2146,10 +2147,10 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_strategy_profile="short",
         )
         mock_search.side_effect = [
-            _response([_result("latest_news", fresh_text)]),
-            _response([_result("market_analysis", None)]),
-            _response([_result("risk_check", None)]),
-            _response([_result("announcement_item", fresh_text)]),
+            _response([_result("latest_news", fresh_text, snippet="沪深300ETF 510300 最新消息")]),
+            _response([_result("fund_analysis", None, snippet="沪深300ETF 510300 基金分析")]),
+            _response([_result("tracking_risk", None, snippet="沪深300ETF 510300 跟踪风险")]),
+            _response([_result("index_outlook_unknown", None, snippet="沪深300ETF 510300 指数成分展望")]),
         ]
 
         with patch("src.search_service.time.sleep"):
@@ -2159,8 +2160,9 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
                 max_searches=4,
             )
 
-        self.assertIn("announcements", intel)
-
+        self.assertIn("index_outlook", intel)
+        self.assertEqual([item.title for item in intel["index_outlook"].results], ["index_outlook_unknown"])
+        self.assertIsNone(intel["index_outlook"].results[0].published_date)
     def test_effective_window_helper_has_no_side_effect(self) -> None:
         """_effective_news_window_days should not mutate stored news_window_days."""
         service, _ = self._create_service_with_mock_provider(

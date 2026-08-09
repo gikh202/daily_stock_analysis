@@ -1,182 +1,192 @@
 # V6 Daily Intelligence
 
-V6 Daily is an isolated, deterministic US-stock daily intelligence layer built on top of the production analysis history already written by V4.
+V6 is the deterministic accuracy and decision layer that runs after the production V4 analysis workflow. V4 continues to collect market/search/LLM research; V6 converts structured evidence into auditable multi-horizon forecasts, evaluates them on future trading bars, and produces the single Chinese V4+V6 fused report.
 
-## Design goals
+## V6.1 design goals
 
-- Improve prediction auditability without replacing the stable production pipeline in one risky step.
-- Keep numeric decisions deterministic. LLM prose never directly sets V6 Forecast, Opportunity, Quality, Risk, evidence coverage, or position size.
-- Preserve missing data as missing evidence instead of silently substituting a neutral score.
-- Evaluate predictions on future **trading bars** (5/10/20 sessions), not calendar days.
-- Treat `AVOID` as **no position**, never as an implicit short.
-- Keep V6 storage isolated in `v6_data/v6_daily.db` so rollback is deletion/disablement, not a production DB migration.
-- Reuse existing GitHub Actions, YFinance-derived production history, notification channels and optional free public-data sources.
+- Keep numeric decisions deterministic and auditable.
+- Generate independent **5D / 10D / 20D** forecasts instead of validating one direction at three horizons.
+- Keep LLM free-form prose out of numeric scoring.
+- Preserve missing data as `None`; never manufacture a neutral 50.
+- Separate STOCK and ETF scoring profiles.
+- Prevent repeated same-day runs from inflating validation sample counts.
+- Evaluate both absolute return and excess return versus SPY/QQQ when benchmark bars exist.
+- Use SEC/FRED only under explicit point-in-time safety rules.
+- Treat `AVOID` as no-position risk avoidance, never an implicit short.
+- Keep V6 persistence isolated in `v6_data/v6_daily.db`.
 
 ## Runtime flow
 
 ```text
-每日股票分析 (existing production workflow)
+每日股票分析 (V4 production)
         |
-        | successful completion + persisted stock_analysis.db cache
+        | stock_analysis.db + structured V4 research
         v
-V6 AI 美股日报 (.github/workflows/03-v6-daily.yml)
+V6 AI 美股日报
         |
-        +-- read analysis_history/context_snapshot
-        +-- AlphaFeatureAdapter
-        +-- deterministic V6 forecast
-        +-- deterministic Alpha decision / trade plan
-        +-- V6 SQLite history
-        +-- mature 5/10/20 trading-session outcomes
-        +-- opportunity ranking + delta + setup cards
-        +-- prediction scoreboard
-        +-- optional SEC/FRED evidence
-        +-- existing notification channels
+        +-- current free public evidence snapshot (SEC/FRED)
+        +-- V4 structured feature adapter
+        +-- instrument classification: STOCK / ETF
+        +-- source/coverage gates
+        +-- 5D / 10D / 20D deterministic forecasts
+        +-- deterministic Alpha decision + Risk Engine 2.0
+        +-- deduplicated V6 signal persistence
+        +-- future trading-bar outcome maturation
+        +-- SPY/QQQ excess-return validation
+        +-- V4+V6 semantic fusion
+        v
+单封中文综合日报
 ```
 
-The original V4 advice is not overwritten by this workflow.
+## Multi-horizon forecast
 
-## Deterministic forecast
+V6.1 intentionally uses different evidence mixes for each horizon.
 
-V6.0 uses a small, transparent directional forecast score:
+### Stock
 
-| Feature | Weight |
-|---|---:|
-| Trend | 35% |
-| Momentum | 25% |
-| Relative Strength | 25% |
-| Market Regime | 15% |
+- **5D:** short-term momentum, trend, relative strength, sector relative strength, volume confirmation, market regime.
+- **10D:** trend, momentum, relative strength, sector relative strength, volume confirmation, market regime.
+- **20D:** durable trend, relative strength, sector relative strength, fundamental quality, source-backed catalyst evidence, market regime.
 
-Only observed features participate. The directional forecast is neutral when observed directional-component coverage is below 50%.
+### ETF
 
-Initial directional bands:
+ETF forecasts do not use company earnings/fundamental weights. They emphasize trend, relative strength, volume and market regime.
 
-- `>= 60`: bullish
-- `<= 40`: bearish
-- otherwise: neutral
+The top-level legacy `forecast_score` / `direction` fields remain the **10D** forecast for backward compatibility. The database also stores the complete `horizon_forecasts` structure.
 
-These thresholds are intentionally simple. They should not be automatically tuned until the V6 outcome database contains enough matured, out-of-sample evidence.
+Forecast score is **not** a win probability. Probability-like interpretation is allowed only after enough matured historical samples exist for empirical calibration.
 
-## Decision layer
+## Signal deduplication
 
-Opportunity, Quality, Risk and trade-plan construction reuse the deterministic Alpha decision engine. This preserves the existing design principles:
-
-- missing evidence lowers coverage;
-- risk can veto actionability;
-- position size is capped;
-- low R:R setups are rejected;
-- LLM prose is not an input to numeric score computation.
-
-The legacy Alpha `confidence` storage column remains for schema compatibility, but V6 exposes it as `evidence_coverage`. It is **not** a calibrated win probability.
-
-## Corrected validation semantics
-
-V6 updates the Alpha validation layer:
-
-- `BUY_SETUP`: included in long strategy-return metrics.
-- `WATCH`: no position.
-- `WAIT`: no position.
-- `AVOID`: no position; evaluated separately with avoidance accuracy.
-- future explicit `SHORT_SETUP`: can add short-return semantics later.
-
-Validation now exposes:
-
-- buy directional hit rate;
-- avoidance hit rate;
-- false avoid rate;
-- average avoided return/downside;
-- Opportunity IC (Spearman);
-- Forecast Score IC (V6 store);
-- signal-sequence risk proxies;
-- evidence coverage;
-- 5/10/20 trading-session outcome statistics.
-
-The default research sample floor is **50**. `insufficient_data` is the expected state while history is young; it must not be presented as a failed strategy or as proof of performance.
-
-## V6 daily report
-
-`v6_reports/v6_daily_latest.md` contains:
-
-1. Market Pulse
-2. Significant Changes versus the prior V6 signal for each symbol
-3. Opportunity Ranking
-4. Setup Cards
-5. LLM Health
-6. Prediction Scoreboard
-7. Free Public Data Context
-8. Run Health and methodology
-
-`v6_reports/v6_daily_latest.json` contains the same machine-readable payload.
-
-## LLM role
-
-V6 intentionally narrows LLM responsibility.
-
-LLM can contribute:
-
-- qualitative catalyst text already present in the production structured result;
-- qualitative risk text;
-- narrative explanation produced by the existing analysis layer;
-- health/fallback metadata.
-
-LLM does **not** directly determine:
-
-- V6 direction;
-- Forecast Score;
-- Opportunity / Quality / Risk;
-- evidence coverage;
-- trade-plan numeric levels;
-- V6 outcome evaluation.
-
-This makes V6 robust to the empty-response and schema-validation failures that can occur in the upstream LLM path: qualitative context may degrade, but the V6 numeric engine remains deterministic.
-
-## Free public-data enrichment
-
-V6.0 includes an optional evidence-only enrichment module using standard-library HTTP calls.
-
-### SEC EDGAR
-
-Set a repository variable or secret:
+A V6.1 signal uses the key:
 
 ```text
-SEC_USER_AGENT=your-app-name contact@example.com
+SYMBOL | effective_trade_date | engine_version
 ```
 
-V6 can then retrieve public SEC company ticker metadata and recent submissions (10-K, 10-Q, 8-K, 20-F, 6-K).
+Therefore repeatedly forcing the same upstream workflow on the same effective trading day does not create multiple independent validation samples.
 
-SEC evidence is displayed in the report but **does not change V6 numeric scores in V6.0**.
+## STOCK / ETF separation
 
-### FRED
+Known ETFs such as SPY, QQQ, QQQM, VOO, IVV, VTI and sector ETFs are routed through the ETF scoring profile. Stocks use the stock profile, including deterministic fundamental and sector-relative-strength evidence when available.
 
-Create a free FRED API key and store it as a repository secret:
+## SEC CompanyFacts / XBRL fundamentals
 
-```text
-FRED_API_KEY=...
+When `SEC_USER_AGENT` is configured and free-source enrichment is enabled, V6.1 can retrieve SEC CompanyFacts and derive deterministic metrics such as:
+
+- Revenue YoY
+- Operating Income YoY
+- Net Income YoY
+- Operating Margin
+- Net Margin
+- Operating Cash Flow / CapEx / Free Cash Flow
+- FCF Margin
+- Cash
+- Debt
+- Diluted-share change
+
+Fundamental quality is **coverage-gated**. An incomplete CompanyFacts snapshot below the configured component-coverage floor is displayed for context but is not given the full numeric fundamental weight.
+
+Debt handling prefers an SEC total-debt concept. If a filer reports current and noncurrent long-term debt separately, V6 sums the two only when they refer to the same reporting date. Partial debt evidence is marked incomplete and cannot create a full balance-sheet quality score.
+
+## FRED macro evidence
+
+With `FRED_API_KEY`, V6.1 currently reads:
+
+- `DGS10` — US 10Y Treasury
+- `DGS2` — US 2Y Treasury
+- `BAMLH0A0HYM2` — US High Yield OAS
+- `VIXCLS` — VIX
+
+For each series the current snapshot includes recent level/change information. A deterministic macro-risk feature is derived from volatility, credit and rates evidence.
+
+### Critical point-in-time rule
+
+The daily workflow fetches a **current** SEC/FRED snapshot. It must never be applied to old analysis records during database rebuild/backfill, because that would introduce future information into historical samples.
+
+V6.1 therefore applies the current external numeric snapshot only to the newest effective trade-date bucket when that trade date is recent. Older/backfilled signals are built without the newly fetched SEC/FRED numeric context. Current public data may still be displayed in the report as current context.
+
+Historical SEC/FRED point-in-time replay would require an explicitly date-scoped data source and is not fabricated by this implementation.
+
+## Catalyst evidence
+
+Free-form LLM text such as `positive_catalysts` remains qualitative only.
+
+A catalyst can influence a numeric score only if the structured event contains:
+
+- signed direction;
+- materiality/importance;
+- a non-empty traceable source (`source` / `source_type`);
+- optional freshness/reliability metadata.
+
+Structured payloads with missing/unknown/LLM-only source provenance are rejected from numeric scoring.
+
+## Risk Engine 2.0
+
+Risk scoring can consume available deterministic evidence from:
+
+- realized volatility;
+- earnings/event proximity;
+- gap risk when present in the structured snapshot;
+- trend-breakdown proximity using price/support/ATR;
+- FRED macro risk when point-in-time safe;
+- data-quality risk.
+
+Missing risk evidence reduces coverage rather than becoming a fake neutral value.
+
+## Trade plan
+
+The trade-plan gate remains deterministic. Risk can reduce actionability and position size, and low R:R setups are downgraded. V6.1 uses an ATR-based entry-zone width so an actionable setup is not presented as a meaningless `[price, price]` range.
+
+## Validation and scoreboard
+
+V6 stores each horizon's own forecast score and direction with its matured outcome. Validation includes:
+
+- 5D / 10D / 20D directional hit rate;
+- BUY_SETUP hit rate;
+- AVOID / false-avoid statistics;
+- MFE / MAE;
+- Forecast Score IC (Spearman);
+- Opportunity IC;
+- SPY / QQQ benchmark return when available;
+- average excess return versus SPY / QQQ;
+- Forecast Score IC versus SPY excess return;
+- market-regime breakdown;
+- empirical score calibration buckets after the minimum sample threshold.
+
+The initial research floor remains **50 samples per relevant horizon/bucket**. `insufficient_data` is expected while history is young and is not proof of poor performance.
+
+## Historical replay
+
+V6.1 adds a strict no-lookahead replay CLI using only data available at each historical as-of date.
+
+```bash
+python scripts/run_v6_replay.py \
+  --stock-db data/stock_analysis.db \
+  --codes MSFT,GOOGL,QQQM,VOO \
+  --output v6_reports/v6_replay.json
 ```
 
-Current macro evidence series:
+The replay builds rolling market-bar features using observations at or before each as-of date, then evaluates future 5/10/20 trading-bar returns. It never uses current SEC/FRED snapshots for historical dates.
 
-- DGS10 — US 10Y Treasury
-- DGS2 — US 2Y Treasury
-- BAMLH0A0HYM2 — US High Yield OAS
-- VIXCLS — VIX
+If SPY/QQQ history exists in `stock_daily`, replay/production validation can calculate benchmark-relative outcomes. If those benchmark bars do not exist, the corresponding excess-return fields stay missing rather than being fabricated.
 
-FRED values are context-only in V6.0.
+## Unified Chinese report
 
-### Enable / disable enrichment
+The final email/report is still a single semantic fusion of V4 and V6 rather than two Markdown reports appended together. V6.1 adds:
 
-Repository variable:
+- instrument type (stock / ETF);
+- 5D / 10D / 20D deterministic forecasts;
+- per-horizon evidence coverage;
+- SEC CompanyFacts fundamental context when available;
+- FRED macro-risk context when available;
+- existing V4 research drivers/risks and V6 deterministic execution constraints.
 
-```text
-V6_FREE_SOURCE_ENRICHMENT=true
-```
-
-The workflow defaults this flag to `true`, but no SEC/FRED call is made when the corresponding credential/identity is absent. Failures are best-effort and cannot fail the deterministic V6 engine.
-
-The existing repository continues using its already-supported YFinance market data plus configured search providers such as SerpAPI or Brave. V6 adds no mandatory paid API.
+The compatibility `fusion_mode` remains `structured_v4_v6`; V6.1 is exposed as an accuracy layer so existing consumers are not broken.
 
 ## GitHub Actions settings
 
-Optional repository variables:
+Repository variables:
 
 ```text
 V6_DAILY_NOTIFY=true
@@ -186,39 +196,48 @@ V6_FREE_SOURCE_ENRICHMENT=true
 SEC_USER_AGENT=your-app-name contact@example.com
 ```
 
-Optional repository secret:
+Repository secret:
 
 ```text
 FRED_API_KEY=...
 ```
 
-All existing notification secrets are reused. If `V6_DAILY_NOTIFY=true`, users may temporarily receive both the existing production report and the V6 report during the comparison period. Set it to `false` to collect V6 artifacts silently.
+No new paid provider, server, GPU or additional GitHub workflow is required by V6.1.
 
-## Files
+## Important files
 
 ```text
 src/v6_daily/
-  __init__.py
-  models.py
+  accuracy.py
+  accuracy_report.py
   engine.py
-  store.py
-  report.py
   free_sources.py
+  models.py
+  replay.py
+  report.py
+  store.py
+  unified_report.py
 
 scripts/run_v6_daily.py
+scripts/run_v6_replay.py
 .github/workflows/03-v6-daily.yml
 .github/workflows/ci-v6-daily.yml
 tests/test_v6_daily.py
+tests/test_v6_accuracy_foundation.py
 ```
 
 ## Promotion policy
 
-V6 should not replace production advice merely because its CI passes. Promotion requires matured evidence. Recommended sequence:
+Do not claim that V6.1 is more accurate merely because its code or CI passes. The architecture now measures accuracy more correctly; actual improvement must be demonstrated by matured live outcomes and strict no-lookahead replay.
 
-1. Keep V4 and V6 running in parallel.
-2. Accumulate at least the configured minimum per relevant horizon/regime; 50 is only the initial research floor, not definitive proof.
-3. Compare direction hit rate, Forecast/Opportunity IC, BUY setup performance and regime stability.
-4. Increase the sample floor as history grows.
-5. Promote only if V6 materially and consistently improves out-of-sample behavior without unacceptable risk degradation.
+Recommended process:
 
-No automatic weight tuning or automatic trading is introduced by V6.0.
+1. Keep collecting one deduplicated live signal per symbol/effective date/engine version.
+2. Run historical replay on sufficiently long stored daily history.
+3. Compare 5D/10D/20D hit rate and Forecast IC separately.
+4. Compare absolute return with SPY/QQQ excess return.
+5. Inspect performance by market regime and instrument type.
+6. Only recalibrate thresholds/weights when evidence is large enough and remains stable out of sample.
+7. Never auto-tune on the same sample used to report performance.
+
+No automatic order placement or unvalidated ML weight fitting is introduced by V6.1.
