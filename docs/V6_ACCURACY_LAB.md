@@ -10,6 +10,7 @@ V6.2 adds a research-only accuracy improvement layer on top of the existing V6.1
 - track win rate, expectancy, R multiple, Profit Factor and drawdown for actual trade plans;
 - run multiple deterministic challenger weight profiles in shadow mode;
 - compare challengers against the production champion on the same future bars;
+- run a strict no-lookahead Champion/Challenger historical replay using only historical price/volume/benchmark features;
 - prevent overfitting by requiring a separate promotion research gate;
 - keep all results auditable in SQLite + JSON + Markdown artifacts.
 
@@ -76,15 +77,14 @@ Conservative rules:
 - a gap below stop exits at the worse opening price when available;
 - if neither stop nor target is reached, the position exits at the last close in the holding window.
 
-Metrics include:
+Core trade metrics include:
 
 - trade win rate + 95% CI;
 - average/median return;
 - average R multiple;
 - Profit Factor;
 - maximum drawdown of the sequential trade-return curve;
-- target-hit and stop-hit rates;
-- breakdown by instrument type and market regime.
+- target-hit and stop-hit rates.
 
 ## Champion / Challenger
 
@@ -105,6 +105,27 @@ A challenger is only marked as a **research promotion candidate** when all of th
 - SPY excess return is not worse when benchmark data is available.
 
 This flag never changes production weights automatically.
+
+### Challenger identity rule
+
+A variant name is part of its historical research identity. If a future code change materially changes a challenger's multipliers or evidence definition, the variant must be renamed/versioned (for example `trend_guard_v2`) rather than silently reusing the old identity. This prevents incompatible shadow samples from being pooled into one performance history.
+
+## Strict historical Champion/Challenger replay
+
+V6.2 also provides a separate strict no-lookahead replay:
+
+```bash
+python scripts/run_v6_accuracy_replay.py \
+  --stock-db data/stock_analysis.db \
+  --codes MSFT,GOOGL,QQQM,VOO \
+  --min-samples 50 \
+  --promotion-min-samples 100 \
+  --output v6_reports/v6_accuracy_replay.json
+```
+
+For every historical as-of date, this replay builds features only from observations available at or before that date, creates the Champion and all Challenger forecasts, then evaluates future 5/10/20 trading-bar returns. It also reports non-overlapping samples, Wilson intervals, yearly walk-forward results, and SPY excess return when benchmark history exists.
+
+Historical replay intentionally excludes **current** SEC/FRED snapshots. Without a true point-in-time historical SEC/FRED dataset, injecting today's official/macro values into old dates would be look-ahead leakage. The replay therefore measures the historically reconstructible price/volume/benchmark layer and labels that scope explicitly.
 
 ## Persistence
 
@@ -128,6 +149,12 @@ v6_reports/v6_accuracy_lab.md
 ```
 
 The machine-readable daily payload also contains `accuracy_lab`, and `v6_run.json` exposes the lab status and any research promotion candidates.
+
+Historical replay is intentionally an explicit research command rather than an expensive daily job; its default output is:
+
+```text
+v6_reports/v6_accuracy_replay.json
+```
 
 ## Configuration
 
@@ -155,7 +182,7 @@ The intended process is:
 1. collect champion and challenger live shadow outcomes;
 2. inspect non-overlapping accuracy and confidence intervals;
 3. compare SPY/QQQ excess return and trade-plan economics;
-4. verify stability by market regime and instrument type;
+4. verify stability by market regime and instrument type where sufficient samples exist;
 5. run strict no-lookahead historical replay separately;
 6. only after out-of-sample evidence is stable, create a reviewed code change to promote a challenger.
 
