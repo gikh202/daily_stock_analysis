@@ -53,10 +53,19 @@ def _env_truthy(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _default_report_subject() -> str:
+def _default_report_subject(content: str = "") -> str:
     date_str = datetime.now().strftime('%Y-%m-%d')
     if _env_truthy("V6_UNIFIED_EMAIL_FINAL", "false"):
-        return f"📈 AI 美股综合日报 - {date_str}"
+        try:
+            from src.v6_daily.accuracy_report import extract_investor_email_subject
+
+            subject = extract_investor_email_subject(content)
+            if subject:
+                return subject[:180]
+        except Exception:
+            # Subject metadata is optional; never block delivery because of it.
+            pass
+        return f"📈 美股决策日报 - {date_str}"
     return f"📈 股票智能分析报告 - {date_str}"
 
 
@@ -76,6 +85,15 @@ class EmailSender:
             'receivers': config.email_receivers or ([config.email_sender] if config.email_sender else []),
         }
         self._stock_email_groups = getattr(config, 'stock_email_groups', None) or []
+
+    @staticmethod
+    def _is_upstream_unified_email_suppressed() -> bool:
+        """Return whether this is the intentionally suppressed upstream V4 mail."""
+        return (
+            os.getenv("GITHUB_ACTIONS") == "true"
+            and _env_truthy("MERGE_EMAIL_NOTIFICATION", "false")
+            and not _env_truthy("V6_UNIFIED_EMAIL_FINAL", "false")
+        )
         
     def _is_email_configured(self) -> bool:
         """检查邮件配置是否完整，并支持 V4→V6 单封综合日报模式。"""
@@ -83,11 +101,7 @@ class EmailSender:
         # 在 GitHub Actions 中启用该模式时，V4 仍生成报告/数据库/Artifact，
         # 但不直接发送邮件；随后 V6 workflow 下载同一次 V4 Artifact，合并后
         # 再发送唯一的最终中文综合日报。V6 workflow 不注入这个上游开关。
-        if (
-            os.getenv("GITHUB_ACTIONS") == "true"
-            and _env_truthy("MERGE_EMAIL_NOTIFICATION", "false")
-            and not _env_truthy("V6_UNIFIED_EMAIL_FINAL", "false")
-        ):
+        if self._is_upstream_unified_email_suppressed():
             logger.info("统一日报模式已启用：跳过上游 V4 邮件，等待 V6 综合日报统一发送")
             return False
         return bool(self._email_config['sender'] and self._email_config['password'])
@@ -163,7 +177,7 @@ class EmailSender:
         timeout_seconds: Optional[float] = None,
     ) -> bool:
         """
-        通过 SMTP 发送邮件（自动识别 SMTP 服务器）
+        通过 SMTP 发送 Email（最终 V6 日报使用精简投资者视图）。
         
         Args:
             content: 邮件内容（支持 Markdown，会转换为 HTML）
@@ -171,10 +185,14 @@ class EmailSender:
             receivers: 收件人列表（可选，默认使用配置的 receivers）
             
         Returns:
-            是否发送成功
+            是否发送成功；统一日报上游免发属于预期完成，不计为失败。
         """
+        if self._is_upstream_unified_email_suppressed():
+            logger.info("统一日报模式：上游邮件已按策略免发，本步骤视为完成；最终邮件由 V6 综合日报发送")
+            return True
+
         if not self._is_email_configured():
-            logger.warning("邮件配置不完整或当前处于上游免发模式，跳过推送")
+            logger.warning("邮件配置不完整，跳过推送")
             return False
         
         sender = self._email_config['sender']
@@ -183,13 +201,22 @@ class EmailSender:
         server: Optional[smtplib.SMTP] = None
         
         try:
-            # 生成主题；只有最终 V6 综合日报使用新主题，其他场景保持向后兼容。
-            if subject is None:
-                subject = _default_report_subject()
+            prepared_content = strip_hidden_markdown_metadata(content).strip()
+            if _env_truthy("V6_UNIFIED_EMAIL_FINAL", "false"):
+                try:
+                    from src.v6_daily.accuracy_report import build_investor_email_markdown
 
-            sanitized_content = strip_hidden_markdown_metadata(content).strip()
+                    prepared_content = build_investor_email_markdown(prepared_content)
+                except Exception as exc:
+                    logger.warning("投资者邮件视图生成失败，回退完整日报: %s", exc)
+
+            # 生成主题；最终综合日报优先读取投资者视图中的隐藏主题元数据。
+            if subject is None:
+                subject = _default_report_subject(prepared_content)
+
+            sanitized_content = strip_hidden_markdown_metadata(prepared_content).strip()
             
-            # 将 Markdown 转换为简单 HTML
+            # 将 Markdown 转换为 HTML；正文已在上一步收敛为适合邮件阅读的结构。
             html_content = markdown_to_html_document(sanitized_content)
             
             # 构建邮件
@@ -251,6 +278,9 @@ class EmailSender:
         self, image_bytes: bytes, receivers: Optional[List[str]] = None
     ) -> bool:
         """Send email with inline image attachment (Issue #289)."""
+        if self._is_upstream_unified_email_suppressed():
+            logger.info("统一日报模式：上游图片邮件已按策略免发，本步骤视为完成")
+            return True
         if not self._is_email_configured():
             return False
         sender = self._email_config['sender']
