@@ -1,6 +1,14 @@
 name: V5 Alpha Backtest
 
 on:
+  pull_request:
+    paths:
+      - 'src/alpha_engine/**'
+      - 'scripts/run_alpha_shadow.py'
+      - 'scripts/run_alpha_validation.py'
+      - 'scripts/run_alpha_backtest.py'
+      - 'tests/test_alpha_*.py'
+      - '.github/workflows/02-alpha-backtest.yml'
   push:
     branches:
       - 'feature/v5-alpha-validation'
@@ -149,7 +157,8 @@ jobs:
           if signals <= 0:
               raise SystemExit('historical replay generated zero Alpha signals')
 
-          summary = json.load(open(summary_path, encoding='utf-8'))
+          with open(summary_path, encoding='utf-8') as f:
+              summary = json.load(f)
           if summary.get('research_gate', {}).get('production_effect') != 'none':
               raise SystemExit('validation report must remain shadow-only')
           print(
