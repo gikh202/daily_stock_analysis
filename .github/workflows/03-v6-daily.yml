@@ -110,9 +110,9 @@ jobs:
 
       - name: Run V6 deterministic daily intelligence
         env:
-          V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.notify || vars.V6_DAILY_NOTIFY || 'true' }}
-          V6_DAILY_MIN_SAMPLES: ${{ github.event.inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
-          V6_DAILY_SCAN_LIMIT: ${{ github.event.inputs.scan_limit || vars.V6_DAILY_SCAN_LIMIT || '5000' }}
+          V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
+          V6_DAILY_MIN_SAMPLES: ${{ inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
+          V6_DAILY_SCAN_LIMIT: ${{ inputs.scan_limit || vars.V6_DAILY_SCAN_LIMIT || '5000' }}
           LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || 'zh' }}
 
@@ -144,13 +144,17 @@ jobs:
           NOTIFICATION_TIMEZONE: ${{ vars.NOTIFICATION_TIMEZONE || secrets.NOTIFICATION_TIMEZONE || 'Asia/Shanghai' }}
           LOG_LEVEL: INFO
         run: |
+          NOTIFY_ARG=""
+          case "${V6_DAILY_NOTIFY,,}" in
+            1|true|yes|on) NOTIFY_ARG="--notify" ;;
+          esac
           python scripts/run_v6_daily.py \
             --stock-db data/stock_analysis.db \
             --v6-db v6_data/v6_daily.db \
             --report-dir v6_reports \
             --limit "${V6_DAILY_SCAN_LIMIT}" \
             --min-samples "${V6_DAILY_MIN_SAMPLES}" \
-            $( [ "${V6_DAILY_NOTIFY,,}" = "true" ] && echo --notify )
+            ${NOTIFY_ARG}
 
       - name: Validate V6 database and outputs
         shell: bash
