@@ -97,6 +97,32 @@ def test_validator_failure_with_previous_response_gets_one_evidence_aware_repair
     assert result.diagnostics == {"validator_repair_used": True}
 
 
+def test_failed_repair_re_raises_original_validation_failure() -> None:
+    previous = '{"sentiment_score": 66, "trend_prediction": "看多"}'
+    original = _AllModelsValidationFailed(previous)
+    calls = 0
+
+    def completion(_prompt, _generation_config, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise original
+        raise RuntimeError("repair transport failed")
+
+    backend = LiteLLMGenerationBackend(completion)
+
+    with pytest.raises(_AllModelsValidationFailed) as exc_info:
+        backend.generate(
+            "structured",
+            {"temperature": 0.7},
+            response_validator=lambda _text: None,
+        )
+
+    assert calls == 2
+    assert exc_info.value is original
+    assert exc_info.value.last_response_text == previous
+
+
 def test_no_validator_repair_for_transport_style_failure_without_previous_response() -> None:
     def completion(_prompt, _generation_config, **_kwargs):
         raise RuntimeError("network down")
