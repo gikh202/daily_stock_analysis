@@ -15,6 +15,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.alpha_engine.shadow_store import read_analysis_records
+from src.v6_daily.accuracy_lab import (
+    DEFAULT_COST_BPS,
+    DEFAULT_MAX_HOLDING_BARS,
+    DEFAULT_PROMOTION_MIN_SAMPLES,
+    run_accuracy_lab,
+)
 from src.v6_daily.accuracy_report import build_accuracy_unified_report
 from src.v6_daily.engine import V6DailyEngine
 from src.v6_daily.free_sources import fetch_free_context
@@ -179,7 +185,7 @@ def _finalize_report(
     return {
         "language": "zh",
         "fusion_mode": "structured_v4_v6",
-        "accuracy_layer": "v6.1",
+        "accuracy_layer": "v6.2",
         "v4_merged": structured_count > 0,
         "v4_structured_records": structured_count,
         "v4_report": str(v4_path) if v4_markdown and v4_path is not None else None,
@@ -197,6 +203,9 @@ def run(
     primary_model: str | None = None,
     notify: bool = False,
     v4_report_path: str | None = None,
+    accuracy_lab_cost_bps: float = DEFAULT_COST_BPS,
+    accuracy_lab_max_holding_bars: int = DEFAULT_MAX_HOLDING_BARS,
+    accuracy_lab_promotion_min_samples: int = DEFAULT_PROMOTION_MIN_SAMPLES,
 ) -> Dict[str, Any]:
     store = V6DailyStore(v6_db_path)
     engine = V6DailyEngine()
@@ -278,7 +287,7 @@ def run(
                 for name, item in signal.horizon_forecasts.items()
             )
             logger.info(
-                "[V6.1] history_id=%s code=%s type=%s decision=%s horizons=[%s] opportunity=%s risk=%s evidence=%.2f llm=%s external_numeric=%s",
+                "[V6.2] history_id=%s code=%s type=%s decision=%s horizons=[%s] opportunity=%s risk=%s evidence=%.2f llm=%s external_numeric=%s",
                 signal.analysis_history_id,
                 signal.code,
                 signal.instrument_type,
@@ -293,10 +302,20 @@ def run(
 
     if latest_effective_date and external_numeric_signals == 0:
         logger.info(
-            "[V6.1] SEC/FRED 当前快照未注入历史/旧分析记录；仅作为当期报告背景展示"
+            "[V6.2] SEC/FRED 当前快照未注入历史/旧分析记录；仅作为当期报告背景展示"
         )
 
     maturation = mature_outcomes(store, stock_db_path)
+    accuracy_lab = run_accuracy_lab(
+        v6_db_path,
+        stock_db_path,
+        report_dir=report_dir,
+        min_samples=max(3, int(min_samples)),
+        promotion_min_samples=max(int(accuracy_lab_promotion_min_samples), int(min_samples)),
+        cost_bps=max(0.0, float(accuracy_lab_cost_bps)),
+        max_holding_bars=max(1, int(accuracy_lab_max_holding_bars)),
+    )
+
     quick = store.quick_check()
     if quick.strip().lower() != "ok":
         raise RuntimeError(f"V6 database quick_check failed: {quick}")
@@ -307,6 +326,7 @@ def run(
         for item in board_before_report
         if str(item.get("code") or "").strip()
     ]
+    lab_run = accuracy_lab.get("run") or {}
     run_stats: Dict[str, Any] = {
         "analysis_records_seen": len(records),
         "canonical_signals_seen": len(provisional),
@@ -316,6 +336,11 @@ def run(
         "skipped_unusable": skipped_unusable,
         "new_outcomes": maturation["evaluated"],
         "not_yet_mature": maturation["not_yet_mature"],
+        "accuracy_lab_status": accuracy_lab.get("status"),
+        "new_shadow_forecasts": lab_run.get("new_shadow_forecasts", 0),
+        "new_shadow_outcomes": lab_run.get("new_shadow_outcomes", 0),
+        "new_trade_outcomes": lab_run.get("new_trade_outcomes", 0),
+        "promotion_candidates": len(accuracy_lab.get("promotion_candidates") or []),
         "quick_check": quick,
         "free_source_enrichment": (public_context.get("status") or {}).get("enabled", False),
         "external_numeric_trade_date": latest_effective_date if external_numeric_signals else None,
@@ -330,6 +355,13 @@ def run(
         min_samples=max(3, int(min_samples)),
         report_date=report_date,
         public_context=public_context,
+    )
+    # Keep the existing report writer stable while exposing V6.2 research data
+    # to the unified report and machine-readable daily payload.
+    payload["accuracy_lab"] = accuracy_lab
+    (Path(report_dir) / "v6_daily_latest.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
     )
 
     unified_report = _finalize_report(
@@ -348,11 +380,19 @@ def run(
 
     result = {
         "version": engine.version,
+        "accuracy_layer": "v6.2",
         "database": str(store.path),
         "report": str(report_path),
         "unified_report": unified_report,
         "run": run_stats,
         "scoreboard_status": (payload.get("scoreboard") or {}).get("status"),
+        "accuracy_lab": {
+            "version": accuracy_lab.get("version"),
+            "status": accuracy_lab.get("status"),
+            "promotion_candidates": accuracy_lab.get("promotion_candidates") or [],
+            "strategy_status": (accuracy_lab.get("strategy") or {}).get("status"),
+            "artifacts": accuracy_lab.get("artifacts") or {},
+        },
         "free_sources": public_context.get("status") or {},
         "notification": notification,
     }
@@ -364,7 +404,7 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the V6.1 deterministic multi-horizon US-stock daily intelligence layer")
+    parser = argparse.ArgumentParser(description="Run the V6.2 deterministic multi-horizon US-stock daily intelligence and accuracy lab")
     parser.add_argument("--stock-db", default=os.getenv("STOCK_DB_PATH", "data/stock_analysis.db"))
     parser.add_argument("--v6-db", default=os.getenv("V6_DAILY_DB_PATH", "v6_data/v6_daily.db"))
     parser.add_argument("--report-dir", default=os.getenv("V6_DAILY_REPORT_DIR", "v6_reports"))
@@ -373,6 +413,21 @@ def main() -> int:
     parser.add_argument("--min-samples", type=int, default=int(os.getenv("V6_DAILY_MIN_SAMPLES", "50")))
     parser.add_argument("--primary-model", default=os.getenv("LITELLM_MODEL") or os.getenv("V6_PRIMARY_LLM_MODEL"))
     parser.add_argument("--notify", action="store_true", default=_truthy(os.getenv("V6_DAILY_NOTIFY", "false")))
+    parser.add_argument(
+        "--accuracy-lab-cost-bps",
+        type=float,
+        default=float(os.getenv("V6_ACCURACY_LAB_COST_BPS", str(DEFAULT_COST_BPS))),
+    )
+    parser.add_argument(
+        "--accuracy-lab-max-holding-bars",
+        type=int,
+        default=int(os.getenv("V6_ACCURACY_LAB_MAX_HOLDING_BARS", str(DEFAULT_MAX_HOLDING_BARS))),
+    )
+    parser.add_argument(
+        "--accuracy-lab-promotion-min-samples",
+        type=int,
+        default=int(os.getenv("V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES", str(DEFAULT_PROMOTION_MIN_SAMPLES))),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -388,6 +443,9 @@ def main() -> int:
         primary_model=args.primary_model,
         notify=args.notify,
         v4_report_path=args.v4_report,
+        accuracy_lab_cost_bps=args.accuracy_lab_cost_bps,
+        accuracy_lab_max_holding_bars=args.accuracy_lab_max_holding_bars,
+        accuracy_lab_promotion_min_samples=args.accuracy_lab_promotion_min_samples,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
