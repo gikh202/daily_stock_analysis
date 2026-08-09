@@ -81,7 +81,21 @@ class GenerationError(Exception):
 
     @property
     def message(self) -> str:
-        return f"{self.error_code.value} at {self.stage} for backend {self.backend}"
+        base = f"{self.error_code.value} at {self.stage} for backend {self.backend}"
+        # Validation used to collapse into only `schema_validation_failed`, which
+        # made production logs unable to distinguish forecast, JSON, and Evidence
+        # failures. Surface only the deterministic reason/message fields; other
+        # detail payloads may contain routing/config metadata and stay out of the
+        # exception string.
+        reason = str(self.details.get("reason") or "").strip()
+        detail_message = str(self.details.get("message") or "").strip()
+        if reason and detail_message:
+            return f"{base}: {reason}: {detail_message}"
+        if reason:
+            return f"{base}: {reason}"
+        if detail_message:
+            return f"{base}: {detail_message}"
+        return base
 
 
 class GenerationBackend(Protocol):
