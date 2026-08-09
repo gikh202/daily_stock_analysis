@@ -35,8 +35,8 @@ def test_structured_generation_caps_temperature_without_touching_free_form() -> 
 
     assert calls[0][1]["temperature"] == pytest.approx(0.2)
     assert calls[1][1]["temperature"] == pytest.approx(0.7)
-    assert structured.diagnostics == {"validator_repair_used": False}
-    assert free_form.diagnostics == {"validator_repair_used": False}
+    assert structured.diagnostics == {}
+    assert free_form.diagnostics == {}
 
 
 def test_structured_generation_preserves_lower_caller_temperature() -> None:
