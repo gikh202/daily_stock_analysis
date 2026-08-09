@@ -67,7 +67,7 @@ def run(
         min_samples=max(3, int(min_samples)),
         primary_horizon=max(1, int(primary_horizon)),
         stem="backtest_summary",
-        title="V5 Alpha Historical Replay Backtest",
+        title="V6-compatible Alpha Historical Replay Backtest",
     )
     evidence_state = _evidence_state(validation)
     payload = {
@@ -96,7 +96,7 @@ def run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Replay historical production analysis snapshots through V5 Alpha"
+        description="Replay historical production analysis snapshots through deterministic Alpha"
     )
     parser.add_argument(
         "--stock-db",
@@ -118,7 +118,7 @@ def main() -> int:
     parser.add_argument(
         "--min-samples",
         type=int,
-        default=int(os.getenv("ALPHA_VALIDATION_MIN_SAMPLES", "20")),
+        default=int(os.getenv("ALPHA_VALIDATION_MIN_SAMPLES", "50")),
     )
     parser.add_argument(
         "--primary-horizon",
