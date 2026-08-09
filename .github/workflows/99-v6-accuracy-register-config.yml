@@ -71,3 +71,5 @@ V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES=100
           git add .env.example docs/CHANGELOG.md
           git commit -m 'docs(v6): register V6.2 Accuracy Lab configuration'
           git push origin HEAD:feature/v6-2-accuracy-lab
+
+# one-shot trigger: 2026-08-09
