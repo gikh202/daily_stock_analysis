@@ -145,6 +145,9 @@ jobs:
           V6_DAILY_MIN_SAMPLES: ${{ inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
           V6_DAILY_SCAN_LIMIT: ${{ inputs.scan_limit || vars.V6_DAILY_SCAN_LIMIT || '5000' }}
           V6_FREE_SOURCE_ENRICHMENT: ${{ vars.V6_FREE_SOURCE_ENRICHMENT || 'true' }}
+          V6_ACCURACY_LAB_COST_BPS: ${{ vars.V6_ACCURACY_LAB_COST_BPS || '10' }}
+          V6_ACCURACY_LAB_MAX_HOLDING_BARS: ${{ vars.V6_ACCURACY_LAB_MAX_HOLDING_BARS || '20' }}
+          V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES: ${{ vars.V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES || '100' }}
           SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT || secrets.SEC_USER_AGENT }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
@@ -177,7 +180,7 @@ jobs:
             --min-samples "${V6_DAILY_MIN_SAMPLES}" \
             "${EXTRA_ARGS[@]}"
 
-      - name: 校验 V6 数据库与综合日报
+      - name: 校验 V6 数据库、Accuracy Lab 与综合日报
         id: validate_v6
         shell: bash
         env:
@@ -193,9 +196,11 @@ jobs:
           report = 'v6_reports/v6_daily_latest.md'
           run = 'v6_reports/v6_run.json'
           payload_path = 'v6_reports/v6_daily_latest.json'
+          lab_json = 'v6_reports/v6_accuracy_lab.json'
+          lab_md = 'v6_reports/v6_accuracy_lab.md'
           output = os.environ['GITHUB_OUTPUT']
 
-          for path in (db, report, run, payload_path):
+          for path in (db, report, run, payload_path, lab_json, lab_md):
               if not os.path.isfile(path):
                   raise SystemExit(f'missing V6 output: {path}')
               if os.path.getsize(path) <= 0:
@@ -204,6 +209,10 @@ jobs:
           conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=10)
           try:
               quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              tables = {
+                  row[0]
+                  for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+              }
               signals = int(conn.execute('SELECT COUNT(*) FROM v6_signals').fetchone()[0])
               outcomes = int(conn.execute('SELECT COUNT(*) FROM v6_outcomes').fetchone()[0])
           finally:
@@ -212,11 +221,16 @@ jobs:
               raise SystemExit(f'v6_daily.db quick_check failed: {quick!r}')
           if signals <= 0:
               raise SystemExit('V6 generated zero usable signals')
+          missing_lab_tables = {'v6_shadow_forecasts', 'v6_shadow_outcomes', 'v6_trade_outcomes'} - tables
+          if missing_lab_tables:
+              raise SystemExit(f'missing V6.2 Accuracy Lab tables: {sorted(missing_lab_tables)}')
 
           with open(run, encoding='utf-8') as f:
               run_payload = json.load(f)
           with open(payload_path, encoding='utf-8') as f:
               payload = json.load(f)
+          with open(lab_json, encoding='utf-8') as f:
+              lab_payload = json.load(f)
           with open(report, encoding='utf-8') as f:
               report_text = f.read()
 
@@ -225,6 +239,8 @@ jobs:
               raise SystemExit(f"unexpected V6 report language metadata: {unified.get('language')!r}")
           if unified.get('fusion_mode') != 'structured_v4_v6':
               raise SystemExit(f"unexpected V6 fusion mode: {unified.get('fusion_mode')!r}")
+          if unified.get('accuracy_layer') != 'v6.2' or run_payload.get('accuracy_layer') != 'v6.2':
+              raise SystemExit('V6.2 accuracy layer metadata missing')
           if os.getenv('EXPECT_V4_MERGED') == 'true' and unified.get('v4_merged') is not True:
               raise SystemExit('workflow_run expected same-run V4 structured data, but v4_merged is not true')
 
@@ -251,6 +267,20 @@ jobs:
           if str(payload.get('version') or '') != str(run_payload.get('version') or ''):
               raise SystemExit('V6 JSON payload version does not match v6_run.json version')
 
+          embedded_lab = payload.get('accuracy_lab') or {}
+          run_lab = run_payload.get('accuracy_lab') or {}
+          if embedded_lab.get('version') != lab_payload.get('version'):
+              raise SystemExit('embedded Accuracy Lab version does not match artifact')
+          if run_lab.get('version') != lab_payload.get('version'):
+              raise SystemExit('v6_run Accuracy Lab version does not match artifact')
+          policy = lab_payload.get('policy') or {}
+          if policy.get('auto_promotion') is not False or policy.get('auto_weight_tuning') is not False:
+              raise SystemExit('unsafe Accuracy Lab policy: automatic promotion/tuning must remain disabled')
+          if policy.get('non_overlapping_validation') is not True:
+              raise SystemExit('Accuracy Lab non-overlapping validation is not enabled')
+          if not isinstance(lab_payload.get('champion'), list) or not isinstance(lab_payload.get('challengers'), list):
+              raise SystemExit('Accuracy Lab metrics payload is incomplete')
+
           notification = run_payload.get('notification') or {}
           if notification.get('status') != 'disabled' or notification.get('attempted') is not False:
               raise SystemExit('V6 generation attempted notification before validation')
@@ -264,9 +294,10 @@ jobs:
           with open(output, 'a', encoding='utf-8') as f:
               f.write('valid=true\n')
           print(
-              'V6 validation: PASS '
+              'V6.2 validation: PASS '
               f'signals={signals} outcomes={outcomes} board={len(board)} '
               f"scoreboard={run_payload.get('scoreboard_status')} "
+              f"accuracy_lab={lab_payload.get('status')} "
               f"v4_merged={unified.get('v4_merged')} chinese_chars={chinese_chars}"
           )
           PY
