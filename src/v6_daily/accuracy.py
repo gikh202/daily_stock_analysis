@@ -9,10 +9,10 @@ from src.alpha_engine.models import AlphaFeatures
 
 
 HORIZONS: Tuple[int, ...] = (5, 10, 20)
+MIN_EXTERNAL_FUNDAMENTAL_COVERAGE = 0.60
 
-# Distinct horizons intentionally use different evidence mixes.  The 5D model
-# favours short-term confirmation; the 20D model gives more weight to durable
-# trend/quality.  Missing evidence is re-normalised and lowers coverage.
+# Each horizon uses its own evidence mix. Missing evidence is re-normalised and
+# lowers coverage instead of being converted to a fake neutral value.
 STOCK_HORIZON_WEIGHTS: Dict[int, Dict[str, float]] = {
     5: {
         "trend": 0.20,
@@ -64,8 +64,6 @@ ETF_HORIZON_WEIGHTS: Dict[int, Dict[str, float]] = {
     },
 }
 
-# Conservative neutral bands reduce false precision.  They can later be
-# calibrated by walk-forward replay without changing the report contract.
 HORIZON_BULLISH_THRESHOLD = {5: 60.0, 10: 60.0, 20: 62.0}
 HORIZON_BEARISH_THRESHOLD = {5: 40.0, 10: 40.0, 20: 38.0}
 
@@ -144,15 +142,10 @@ def _find_value(root: Mapping[str, Any], names: Iterable[str]) -> Any:
 def classify_instrument(code: str, context: Mapping[str, Any]) -> str:
     symbol = str(code or "").strip().upper()
     explicit = str(
-        _find_value(
-            context,
-            ("instrument_type", "quote_type", "security_type", "asset_type"),
-        )
+        _find_value(context, ("instrument_type", "quote_type", "security_type", "asset_type"))
         or ""
     ).strip().upper()
-    if explicit in {"ETF", "FUND", "MUTUALFUND", "INDEXFUND"}:
-        return "ETF"
-    if symbol in KNOWN_ETFS:
+    if explicit in {"ETF", "FUND", "MUTUALFUND", "INDEXFUND"} or symbol in KNOWN_ETFS:
         return "ETF"
     return "STOCK"
 
@@ -176,12 +169,9 @@ def extract_sector_relative_strength(context: Mapping[str, Any]) -> Optional[flo
         if not isinstance(block, dict):
             continue
         value = _finite(block.get("excess_vs_sector_pct"))
-        if value is None:
-            continue
-        scores.append(_clamp(50.0 + 50.0 * math.tanh(value / scale)))
-    if not scores:
-        return None
-    return round(sum(scores) / len(scores), 2)
+        if value is not None:
+            scores.append(_clamp(50.0 + 50.0 * math.tanh(value / scale)))
+    return None if not scores else round(sum(scores) / len(scores), 2)
 
 
 def _evidence_age_hours(item: Mapping[str, Any]) -> Optional[float]:
@@ -195,13 +185,22 @@ def _evidence_age_hours(item: Mapping[str, Any]) -> Optional[float]:
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds() / 3600.0)
+        return max(
+            0.0,
+            (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+            / 3600.0,
+        )
     except ValueError:
         return None
 
 
 def deterministic_catalyst_score(raw_result: Mapping[str, Any]) -> Tuple[Optional[float], Dict[str, Any]]:
-    """Score only structured, source-backed events; never score free-form LLM prose."""
+    """Score structured events only when they carry a traceable source.
+
+    Free-form LLM prose and structured-but-unsourced payloads have zero numeric
+    influence. A non-empty source/source_type is the minimum provenance gate;
+    optional URL/evidence_id metadata is persisted for auditability.
+    """
     dashboard = _find_mapping(raw_result, ("dashboard",))
     intelligence = dashboard.get("intelligence") if isinstance(dashboard, dict) else None
     if not isinstance(intelligence, dict):
@@ -217,6 +216,7 @@ def deterministic_catalyst_score(raw_result: Mapping[str, Any]) -> Tuple[Optiona
 
     signed: list[float] = []
     accepted: list[Dict[str, Any]] = []
+    rejected_unsourced = 0
     for raw in candidates:
         if not isinstance(raw, dict):
             continue
@@ -228,41 +228,74 @@ def deterministic_catalyst_score(raw_result: Mapping[str, Any]) -> Tuple[Optiona
         else:
             continue
 
-        source = str(raw.get("source_type") or raw.get("source") or "").strip().lower()
-        source_weight = 1.0 if any(token in source for token in ("sec", "company", "ir", "official")) else 0.80
+        source = str(raw.get("source_type") or raw.get("source") or "").strip()
+        if not source or source.lower() in {"unknown", "none", "llm"}:
+            rejected_unsourced += 1
+            continue
+        source_lower = source.lower()
+        source_weight = (
+            1.0
+            if any(token in source_lower for token in ("sec", "company", "ir", "official"))
+            else 0.80
+        )
         reliability = _finite(raw.get("reliability") or raw.get("source_reliability"))
         if reliability is not None:
             source_weight *= _clamp(reliability, 0.0, 1.0)
 
         importance_text = str(raw.get("importance") or raw.get("materiality") or "medium").strip().lower()
-        importance = {"high": 1.0, "material": 1.0, "medium": 0.70, "low": 0.40}.get(importance_text, 0.60)
+        importance = {
+            "high": 1.0,
+            "material": 1.0,
+            "medium": 0.70,
+            "low": 0.40,
+        }.get(importance_text, 0.60)
         age = _evidence_age_hours(raw)
         freshness = 1.0 if age is None else max(0.25, math.exp(-age / (24.0 * 14.0)))
         contribution = sign * 32.0 * source_weight * importance * freshness
         signed.append(contribution)
-        accepted.append({
-            "direction": "positive" if sign > 0 else "negative",
-            "source": source or "unknown",
-            "importance": importance_text,
-            "age_hours": None if age is None else round(age, 1),
-            "contribution": round(contribution, 2),
-        })
+        accepted.append(
+            {
+                "direction": "positive" if sign > 0 else "negative",
+                "source": source,
+                "url": str(raw.get("url") or "").strip() or None,
+                "evidence_id": str(raw.get("evidence_id") or raw.get("id") or "").strip() or None,
+                "importance": importance_text,
+                "age_hours": None if age is None else round(age, 1),
+                "contribution": round(contribution, 2),
+            }
+        )
 
-    if not signed:
-        return None, {"eligible_events": 0, "rule": "structured-source-backed-only"}
-    score = _clamp(50.0 + sum(signed))
-    return round(score, 2), {
+    diagnostics = {
         "eligible_events": len(signed),
+        "rejected_unsourced": rejected_unsourced,
         "accepted": accepted[:8],
-        "rule": "structured-source-backed-only",
+        "rule": "structured-traceable-source-only",
     }
+    if not signed:
+        return None, diagnostics
+    return round(_clamp(50.0 + sum(signed)), 2), diagnostics
 
 
-def external_fundamental_quality(external_context: Mapping[str, Any], code: str) -> Optional[float]:
+def _external_fundamental_snapshot(
+    external_context: Mapping[str, Any], code: str
+) -> Tuple[Optional[float], Optional[float]]:
     sec = external_context.get("sec") if isinstance(external_context, dict) else None
     item = sec.get(str(code).upper()) if isinstance(sec, dict) else None
     fundamentals = item.get("fundamentals") if isinstance(item, dict) else None
-    return _finite(fundamentals.get("quality_score")) if isinstance(fundamentals, dict) else None
+    if not isinstance(fundamentals, dict):
+        return None, None
+    quality = _finite(fundamentals.get("quality_score"))
+    coverage = _finite(fundamentals.get("coverage"))
+    if quality is None or coverage is None or coverage < MIN_EXTERNAL_FUNDAMENTAL_COVERAGE:
+        return None, coverage
+    return quality, coverage
+
+
+def external_fundamental_quality(
+    external_context: Mapping[str, Any], code: str
+) -> Optional[float]:
+    quality, _ = _external_fundamental_snapshot(external_context, code)
+    return quality
 
 
 def external_macro_risk(external_context: Mapping[str, Any]) -> Optional[float]:
@@ -282,10 +315,11 @@ def enrich_features(
     support: Optional[float],
     atr: Optional[float],
 ) -> Tuple[AlphaFeatures, Dict[str, Any]]:
+    external = external_context or {}
     sector_rs = extract_sector_relative_strength(context)
     catalyst, catalyst_diag = deterministic_catalyst_score(raw_result)
-    fundamental = external_fundamental_quality(external_context or {}, code)
-    macro_risk = external_macro_risk(external_context or {})
+    fundamental, fundamental_coverage = _external_fundamental_snapshot(external, code)
+    macro_risk = external_macro_risk(external)
 
     gap_risk = _finite(_find_value(context, ("gap_risk_score", "gap_risk")))
     trend_breakdown_risk: Optional[float] = None
@@ -307,7 +341,9 @@ def enrich_features(
 
     updated = replace(
         features,
-        sector_relative_strength=sector_rs if sector_rs is not None else features.sector_relative_strength,
+        sector_relative_strength=(
+            sector_rs if sector_rs is not None else features.sector_relative_strength
+        ),
         catalyst=catalyst if catalyst is not None else features.catalyst,
         fundamental_quality=(
             features.fundamental_quality
@@ -326,6 +362,8 @@ def enrich_features(
         "sector_benchmark": sector_benchmark(context),
         "sector_relative_strength": sector_rs,
         "external_fundamental_quality": fundamental,
+        "external_fundamental_coverage": fundamental_coverage,
+        "external_fundamental_min_coverage": MIN_EXTERNAL_FUNDAMENTAL_COVERAGE,
         "macro_risk": macro_risk,
         "gap_risk": gap_risk,
         "trend_breakdown_risk": trend_breakdown_risk,
@@ -333,7 +371,9 @@ def enrich_features(
     }
 
 
-def _weighted_score(features: AlphaFeatures, weights: Mapping[str, float]) -> Tuple[Optional[float], float]:
+def _weighted_score(
+    features: AlphaFeatures, weights: Mapping[str, float]
+) -> Tuple[Optional[float], float]:
     numerator = 0.0
     observed = 0.0
     total = sum(max(0.0, float(weight)) for weight in weights.values())
@@ -358,8 +398,14 @@ def _direction(score: Optional[float], coverage: float, horizon: int) -> str:
     return "neutral"
 
 
-def build_horizon_forecasts(features: AlphaFeatures, *, instrument_type: str) -> Dict[str, Dict[str, Any]]:
-    profile = ETF_HORIZON_WEIGHTS if str(instrument_type).upper() == "ETF" else STOCK_HORIZON_WEIGHTS
+def build_horizon_forecasts(
+    features: AlphaFeatures, *, instrument_type: str
+) -> Dict[str, Dict[str, Any]]:
+    profile = (
+        ETF_HORIZON_WEIGHTS
+        if str(instrument_type).upper() == "ETF"
+        else STOCK_HORIZON_WEIGHTS
+    )
     result: Dict[str, Dict[str, Any]] = {}
     for horizon in HORIZONS:
         score, coverage = _weighted_score(features, profile[horizon])
@@ -373,7 +419,9 @@ def build_horizon_forecasts(features: AlphaFeatures, *, instrument_type: str) ->
     return result
 
 
-def primary_forecast(horizons: Mapping[str, Mapping[str, Any]], primary_horizon: int = 10) -> Tuple[Optional[float], str, float]:
+def primary_forecast(
+    horizons: Mapping[str, Mapping[str, Any]], primary_horizon: int = 10
+) -> Tuple[Optional[float], str, float]:
     block = horizons.get(f"{int(primary_horizon)}d") or {}
     score = _finite(block.get("score"))
     direction = str(block.get("direction") or "neutral")
