@@ -392,10 +392,13 @@ def test_upstream_v4_email_is_suppressed_but_final_v6_is_allowed(monkeypatch) ->
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("MERGE_EMAIL_NOTIFICATION", "true")
     monkeypatch.delenv("V6_UNIFIED_EMAIL_FINAL", raising=False)
-    assert sender._is_email_configured() is False
+    assert sender._is_email_configured() is True
+    assert sender._is_upstream_unified_email_suppressed() is True
+    assert sender.send_to_email("upstream report intentionally suppressed") is True
 
     monkeypatch.setenv("V6_UNIFIED_EMAIL_FINAL", "true")
     assert sender._is_email_configured() is True
+    assert sender._is_upstream_unified_email_suppressed() is False
 
 
 def test_v6_runner_generates_integrated_chinese_report_and_database(tmp_path: Path, monkeypatch) -> None:
