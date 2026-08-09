@@ -4,6 +4,8 @@ on:
   workflow_run:
     workflows: ['每日股票分析']
     types: [completed]
+    # 只有 main 上的生产 V4 运行才自动触发最终日报，避免功能分支误发邮件/污染研究历史。
+    branches: [main]
   workflow_dispatch:
     inputs:
       notify:
@@ -26,12 +28,14 @@ permissions:
   contents: read
   actions: read
 
+# V6 持有独立 SQLite 研究历史，所有运行必须串行，且不应取消正在落盘的运行。
 concurrency:
-  group: v6-daily-${{ github.event.workflow_run.head_branch || github.ref }}
-  cancel-in-progress: true
+  group: v6-daily
+  cancel-in-progress: false
 
 env:
   PYTHONPATH: ${{ github.workspace }}
+  V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
 
 jobs:
   v6-daily:
@@ -39,8 +43,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: 检出代码
+      - name: 检出与上游一致的代码
         uses: actions/checkout@v5
+        with:
+          # workflow_run 必须与触发它的 V4 使用同一 commit，避免“旧 Artifact + 新代码”的版本漂移。
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: 设置 Python
         uses: actions/setup-python@v6
@@ -56,7 +63,7 @@ jobs:
       - name: 准备 V6 目录
         run: mkdir -p data v6_data v6_reports upstream_v4
 
-      - name: 下载本次上游 V4 分析报告
+      - name: 下载本次上游 V4 分析 Artifact
         if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/download-artifact@v5
         with:
@@ -66,7 +73,21 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 恢复最近有效生产数据库
+      - name: 使用本次上游 Artifact 的生产数据库
+        if: ${{ github.event_name == 'workflow_run' }}
+        shell: bash
+        run: |
+          mapfile -t SOURCE_DBS < <(find upstream_v4 -type f -path '*/data/stock_analysis.db' -print | sort)
+          if [ "${#SOURCE_DBS[@]}" -ne 1 ]; then
+            echo "::error::预期从本次 V4 Artifact 找到 1 个 data/stock_analysis.db，实际找到 ${#SOURCE_DBS[@]} 个"
+            printf '%s\n' "${SOURCE_DBS[@]}"
+            exit 2
+          fi
+          cp "${SOURCE_DBS[0]}" data/stock_analysis.db
+          echo "✅ 已绑定本次 V4 Artifact 数据库: ${SOURCE_DBS[0]}"
+
+      - name: 手动运行时恢复最近有效生产数据库
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/cache/restore@v5
         with:
           path: data/
@@ -121,17 +142,146 @@ jobs:
 
       - name: 运行 V6 并生成 V4+V6 中文综合日报
         env:
-          V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
           V6_DAILY_MIN_SAMPLES: ${{ inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
           V6_DAILY_SCAN_LIMIT: ${{ inputs.scan_limit || vars.V6_DAILY_SCAN_LIMIT || '5000' }}
           V6_FREE_SOURCE_ENRICHMENT: ${{ vars.V6_FREE_SOURCE_ENRICHMENT || 'true' }}
-          V6_UNIFIED_EMAIL_FINAL: 'true'
           SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT || secrets.SEC_USER_AGENT }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
           REPORT_LANGUAGE: zh
+          LOG_LEVEL: INFO
+        shell: bash
+        run: |
+          EXTRA_ARGS=()
 
-          # 复用现有通知配置。V4 本身不再推送日报，只有这里发送最终综合邮件。
+          V4_REPORT_PATH="$(find upstream_v4 -type f -path '*/reports/report_*.md' -print 2>/dev/null | sort | tail -n 1 || true)"
+          if [ -z "$V4_REPORT_PATH" ]; then
+            V4_REPORT_PATH="$(find upstream_v4 -type f -name 'report_*.md' -print 2>/dev/null | sort | tail -n 1 || true)"
+          fi
+          if [ -n "$V4_REPORT_PATH" ]; then
+            echo "✅ 找到本次上游 V4 报告，将合并到最终中文日报: $V4_REPORT_PATH"
+            EXTRA_ARGS+=(--v4-report "$V4_REPORT_PATH")
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "::error::本次 V4 Artifact 缺少 reports/report_*.md，拒绝使用陈旧报告降级"
+            exit 2
+          else
+            echo "⚠️ 手动 V6 未提供上游 V4 报告，将仅使用生产数据库中的 V4 结构化记录"
+          fi
+
+          # 这里只生成并持久化结果，不发送通知。最终邮件必须在完整校验通过后再发送。
+          V6_DAILY_NOTIFY=false python scripts/run_v6_daily.py \
+            --stock-db data/stock_analysis.db \
+            --v6-db v6_data/v6_daily.db \
+            --report-dir v6_reports \
+            --limit "${V6_DAILY_SCAN_LIMIT}" \
+            --min-samples "${V6_DAILY_MIN_SAMPLES}" \
+            "${EXTRA_ARGS[@]}"
+
+      - name: 校验 V6 数据库与综合日报
+        id: validate_v6
+        shell: bash
+        env:
+          EXPECT_V4_MERGED: ${{ github.event_name == 'workflow_run' && 'true' || 'false' }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import sqlite3
+
+          db = 'v6_data/v6_daily.db'
+          report = 'v6_reports/v6_daily_latest.md'
+          run = 'v6_reports/v6_run.json'
+          payload_path = 'v6_reports/v6_daily_latest.json'
+          output = os.environ['GITHUB_OUTPUT']
+
+          for path in (db, report, run, payload_path):
+              if not os.path.isfile(path):
+                  raise SystemExit(f'missing V6 output: {path}')
+              if os.path.getsize(path) <= 0:
+                  raise SystemExit(f'empty V6 output: {path}')
+
+          conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=10)
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              signals = int(conn.execute('SELECT COUNT(*) FROM v6_signals').fetchone()[0])
+              outcomes = int(conn.execute('SELECT COUNT(*) FROM v6_outcomes').fetchone()[0])
+          finally:
+              conn.close()
+          if quick != 'ok':
+              raise SystemExit(f'v6_daily.db quick_check failed: {quick!r}')
+          if signals <= 0:
+              raise SystemExit('V6 generated zero usable signals')
+
+          with open(run, encoding='utf-8') as f:
+              run_payload = json.load(f)
+          with open(payload_path, encoding='utf-8') as f:
+              payload = json.load(f)
+          with open(report, encoding='utf-8') as f:
+              report_text = f.read()
+
+          unified = run_payload.get('unified_report') or {}
+          if unified.get('language') != 'zh':
+              raise SystemExit(f"unexpected V6 report language metadata: {unified.get('language')!r}")
+          if unified.get('fusion_mode') != 'structured_v4_v6':
+              raise SystemExit(f"unexpected V6 fusion mode: {unified.get('fusion_mode')!r}")
+          if os.getenv('EXPECT_V4_MERGED') == 'true' and unified.get('v4_merged') is not True:
+              raise SystemExit('workflow_run expected same-run V4 structured data, but v4_merged is not true')
+
+          # 不再绑定某个会随报告版式变化的固定标题；验证真实中文内容和结构。
+          chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', report_text))
+          heading_count = len(re.findall(r'(?m)^##\s+', report_text))
+          if chinese_chars < 40:
+              raise SystemExit(f'V6 final report has insufficient Chinese content: {chinese_chars} chars')
+          if heading_count < 3:
+              raise SystemExit(f'V6 final report structure is incomplete: {heading_count} section headings')
+
+          board = [item for item in (payload.get('board') or []) if isinstance(item, dict)]
+          if not board:
+              raise SystemExit('V6 JSON payload has an empty board')
+          missing_codes = [
+              str(item.get('code') or '').strip().upper()
+              for item in board
+              if str(item.get('code') or '').strip().upper() not in report_text
+          ]
+          if missing_codes:
+              raise SystemExit(f'V6 report is missing board symbols: {missing_codes}')
+          if signals < len(board):
+              raise SystemExit(f'V6 database signal count {signals} is smaller than board size {len(board)}')
+          if str(payload.get('version') or '') != str(run_payload.get('version') or ''):
+              raise SystemExit('V6 JSON payload version does not match v6_run.json version')
+
+          notification = run_payload.get('notification') or {}
+          if notification.get('status') != 'disabled' or notification.get('attempted') is not False:
+              raise SystemExit('V6 generation attempted notification before validation')
+
+          run_stats = run_payload.get('run') or {}
+          if str(run_stats.get('quick_check') or '').strip().lower() != 'ok':
+              raise SystemExit('V6 run metadata does not confirm quick_check=ok')
+          if int(run_stats.get('canonical_signals_seen') or 0) <= 0:
+              raise SystemExit('V6 run metadata has zero canonical signals')
+
+          with open(output, 'a', encoding='utf-8') as f:
+              f.write('valid=true\n')
+          print(
+              'V6 validation: PASS '
+              f'signals={signals} outcomes={outcomes} board={len(board)} '
+              f"scoreboard={run_payload.get('scoreboard_status')} "
+              f"v4_merged={unified.get('v4_merged')} chinese_chars={chinese_chars}"
+          )
+          PY
+
+      - name: 保存 V6 研究历史
+        if: ${{ !cancelled() && steps.validate_v6.outputs.valid == 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: v6_data/
+          key: v6-daily-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: 校验通过后发送最终综合日报
+        if: ${{ success() && steps.validate_v6.outputs.valid == 'true' }}
+        env:
+          V6_UNIFIED_EMAIL_FINAL: 'true'
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
@@ -160,82 +310,76 @@ jobs:
           LOG_LEVEL: INFO
         shell: bash
         run: |
-          EXTRA_ARGS=()
-
-          case "${V6_DAILY_NOTIFY,,}" in
-            1|true|yes|on) EXTRA_ARGS+=(--notify) ;;
-          esac
-
-          V4_REPORT_PATH="$(find upstream_v4 -type f -path '*/reports/report_*.md' -print 2>/dev/null | sort | tail -n 1 || true)"
-          if [ -z "$V4_REPORT_PATH" ]; then
-            V4_REPORT_PATH="$(find upstream_v4 -type f -name 'report_*.md' -print 2>/dev/null | sort | tail -n 1 || true)"
-          fi
-          if [ -n "$V4_REPORT_PATH" ]; then
-            echo "✅ 找到上游 V4 报告，将合并到最终中文日报: $V4_REPORT_PATH"
-            EXTRA_ARGS+=(--v4-report "$V4_REPORT_PATH")
-          else
-            echo "⚠️ 未找到上游 V4 报告，本次降级为仅发送 V6 中文日报"
-          fi
-
-          python scripts/run_v6_daily.py \
-            --stock-db data/stock_analysis.db \
-            --v6-db v6_data/v6_daily.db \
-            --report-dir v6_reports \
-            --limit "${V6_DAILY_SCAN_LIMIT}" \
-            --min-samples "${V6_DAILY_MIN_SAMPLES}" \
-            "${EXTRA_ARGS[@]}"
-
-      - name: 校验 V6 数据库与综合日报
-        shell: bash
-        run: |
           python - <<'PY'
           import json
+          import logging
           import os
-          import sqlite3
+          from datetime import datetime
+          from pathlib import Path
 
-          db = 'v6_data/v6_daily.db'
-          report = 'v6_reports/v6_daily_latest.md'
-          run = 'v6_reports/v6_run.json'
-          payload = 'v6_reports/v6_daily_latest.json'
-          for path in (db, report, run, payload):
-              if not os.path.isfile(path):
-                  raise SystemExit(f'missing V6 output: {path}')
-
-          conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=10)
-          try:
-              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
-              signals = int(conn.execute('SELECT COUNT(*) FROM v6_signals').fetchone()[0])
-              outcomes = int(conn.execute('SELECT COUNT(*) FROM v6_outcomes').fetchone()[0])
-          finally:
-              conn.close()
-          if quick != 'ok':
-              raise SystemExit(f'v6_daily.db quick_check failed: {quick!r}')
-          if signals <= 0:
-              raise SystemExit('V6 generated zero usable signals')
-
-          with open(report, encoding='utf-8') as f:
-              report_text = f.read()
-          if '## 1. 市场脉搏' not in report_text:
-              raise SystemExit('V6 final report is not Chinese')
-
-          with open(run, encoding='utf-8') as f:
-              run_payload = json.load(f)
-          unified = run_payload.get('unified_report') or {}
-          print(
-              'V6 validation: PASS '
-              f'signals={signals} outcomes={outcomes} '
-              f"scoreboard={run_payload.get('scoreboard_status')} "
-              f"v4_merged={unified.get('v4_merged')} "
-              f"notification={run_payload.get('notification', {}).get('status')}"
+          logging.basicConfig(
+              level=os.getenv('LOG_LEVEL', 'INFO').upper(),
+              format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
           )
-          PY
 
-      - name: 保存 V6 研究历史
-        if: success()
-        uses: actions/cache/save@v5
-        with:
-          path: v6_data/
-          key: v6-daily-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          def truthy(value):
+              return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+          run_path = Path('v6_reports/v6_run.json')
+          payload_path = Path('v6_reports/v6_daily_latest.json')
+          report_path = Path('v6_reports/v6_daily_latest.md')
+
+          with run_path.open(encoding='utf-8') as f:
+              run_payload = json.load(f)
+
+          if not truthy(os.getenv('V6_DAILY_NOTIFY')):
+              print('V6 通知已禁用；报告和研究历史仍已正常生成并保存。')
+              raise SystemExit(0)
+
+          with payload_path.open(encoding='utf-8') as f:
+              payload = json.load(f)
+          codes = [
+              str(item.get('code') or '').strip().upper()
+              for item in (payload.get('board') or [])
+              if isinstance(item, dict) and str(item.get('code') or '').strip()
+          ]
+
+          notification = {
+              'attempted': True,
+              'success': False,
+              'status': 'failed',
+          }
+          try:
+              from src.notification import NotificationService
+
+              service = NotificationService()
+              if not service.is_available():
+                  notification['status'] = 'no_channel'
+              else:
+                  success = service.send(
+                      report_path.read_text(encoding='utf-8'),
+                      email_stock_codes=codes,
+                      email_send_to_all=True,
+                      route_type='report',
+                      severity='info',
+                      dedup_key=f"v6-unified-daily-{datetime.now().strftime('%Y%m%d')}",
+                  )
+                  notification['success'] = bool(success)
+                  notification['status'] = 'sent' if success else 'failed'
+          except Exception as exc:
+              notification['status'] = 'exception'
+              notification['error'] = f'{type(exc).__name__}: {exc}'
+
+          run_payload['notification'] = notification
+          run_path.write_text(
+              json.dumps(run_payload, ensure_ascii=False, indent=2, sort_keys=True),
+              encoding='utf-8',
+          )
+
+          if not notification['success']:
+              raise SystemExit(f"V6 final notification failed: {notification}")
+          print('V6 final notification: PASS')
+          PY
 
       - name: 上传 V6 综合日报 Artifact
         if: always()
