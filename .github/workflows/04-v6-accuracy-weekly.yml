@@ -1,0 +1,144 @@
+name: V6 准确率研究周报
+
+on:
+  schedule:
+    # 每周日 UTC 23:30（北京时间周一 07:30），使用最近一次生产历史 Cache 做离线研究。
+    - cron: '30 23 * * 0'
+  workflow_dispatch:
+    inputs:
+      codes:
+        description: '可选：逗号分隔标的；留空则回放数据库中的全部非基准标的'
+        required: false
+        default: ''
+        type: string
+      min_samples:
+        description: '统计结果最小样本门槛'
+        required: false
+        default: '50'
+        type: string
+      promotion_min_samples:
+        description: 'Challenger 晋级研究所需最小非重叠样本'
+        required: false
+        default: '100'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: v6-accuracy-weekly
+  cancel-in-progress: false
+
+jobs:
+  accuracy-weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出 main 研究代码
+        uses: actions/checkout@v5
+
+      - name: 设置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 恢复最近有效生产数据库
+        uses: actions/cache/restore@v5
+        with:
+          path: data/
+          key: v6-accuracy-source-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-analysis-data-${{ runner.os }}-
+
+      - name: 校验研究数据源
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = 'data/stock_analysis.db'
+          if not os.path.isfile(path):
+              raise SystemExit('stock_analysis.db missing; weekly accuracy replay cannot run')
+          if os.path.getsize(path) < 4096:
+              raise SystemExit('stock_analysis.db unexpectedly small')
+
+          conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              tables = {
+                  row[0]
+                  for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+              }
+              bars = int(conn.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]) if 'stock_daily' in tables else 0
+          finally:
+              conn.close()
+
+          if quick != 'ok':
+              raise SystemExit(f'stock_analysis.db quick_check failed: {quick!r}')
+          if 'stock_daily' not in tables:
+              raise SystemExit('stock_daily table missing')
+          if bars <= 0:
+              raise SystemExit('stock_daily is empty')
+          print(f'Accuracy research source: PASS stock_daily={bars}')
+          PY
+
+      - name: 运行严格 no-lookahead Champion/Challenger 回放
+        env:
+          INPUT_CODES: ${{ inputs.codes || '' }}
+          MIN_SAMPLES: ${{ inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
+          PROMOTION_MIN_SAMPLES: ${{ inputs.promotion_min_samples || vars.V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES || '100' }}
+        shell: bash
+        run: |
+          python scripts/run_v6_accuracy_weekly.py \
+            --stock-db data/stock_analysis.db \
+            --codes "$INPUT_CODES" \
+            --min-samples "$MIN_SAMPLES" \
+            --promotion-min-samples "$PROMOTION_MIN_SAMPLES" \
+            --output-dir v6_reports/accuracy_weekly
+
+      - name: 校验准确率周报
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          json_path = 'v6_reports/accuracy_weekly/v6_accuracy_weekly.json'
+          md_path = 'v6_reports/accuracy_weekly/v6_accuracy_weekly.md'
+          for path in (json_path, md_path):
+              if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                  raise SystemExit(f'missing/empty weekly accuracy artifact: {path}')
+
+          with open(json_path, encoding='utf-8') as f:
+              payload = json.load(f)
+          if payload.get('auto_promotion') is not False:
+              raise SystemExit('unsafe weekly replay: auto_promotion must be false')
+          if payload.get('auto_weight_tuning') is not False:
+              raise SystemExit('unsafe weekly replay: auto_weight_tuning must be false')
+          if payload.get('method') != 'strict no-lookahead rolling price-feature replay':
+              raise SystemExit(f"unexpected replay method: {payload.get('method')!r}")
+          if not isinstance(payload.get('results'), list):
+              raise SystemExit('weekly replay results must be a list')
+          print(
+              'Weekly accuracy validation: PASS '
+              f"observations={payload.get('observations', 0)} "
+              f"candidates={len(payload.get('promotion_candidates') or [])}"
+          )
+          PY
+
+      - name: 上传准确率研究 Artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: v6-accuracy-weekly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: v6_reports/accuracy_weekly/
+          if-no-files-found: warn
+          retention-days: 90
