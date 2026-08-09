@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.run_alpha_backtest import _reset_backtest_database
+from scripts.run_alpha_backtest import _evidence_state, _reset_backtest_database
 from src.alpha_engine.shadow_store import AlphaShadowStore
 from src.alpha_engine.validation import (
     build_validation_summary,
@@ -162,6 +162,27 @@ def test_backtest_reset_refuses_shadow_database_name(tmp_path: Path) -> None:
         _reset_backtest_database(protected)
 
     assert protected.read_text(encoding="utf-8") == "do-not-delete"
+
+
+def test_backtest_evidence_state_does_not_overclaim_results() -> None:
+    assert _evidence_state(
+        {
+            "coverage": {"outcomes": 0, "evaluated_signals": 0},
+            "research_gate": {"status": "insufficient_data"},
+        }
+    ) == "no_mature_outcomes"
+    assert _evidence_state(
+        {
+            "coverage": {"outcomes": 8, "evaluated_signals": 4},
+            "research_gate": {"status": "insufficient_data"},
+        }
+    ) == "below_sample_floor"
+    assert _evidence_state(
+        {
+            "coverage": {"outcomes": 40, "evaluated_signals": 20},
+            "research_gate": {"status": "research_hold"},
+        }
+    ) == "measurable"
 
 
 def test_render_validation_markdown_handles_empty_database(tmp_path: Path) -> None:
