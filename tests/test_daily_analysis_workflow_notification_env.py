@@ -24,7 +24,6 @@ NOTIFICATIONS_DOC_PATH = ROOT_DIR / "docs/notifications.md"
 
 P0_EXCLUDED_BEHAVIOR_SWITCHES = {
     "MARKDOWN_TO_IMAGE_CHANNELS",
-    "MERGE_EMAIL_NOTIFICATION",
 }
 
 
@@ -84,6 +83,14 @@ def test_daily_analysis_keeps_deferred_behavior_switches_unmapped() -> None:
 
     for key in P0_EXCLUDED_BEHAVIOR_SWITCHES:
         assert key not in env
+
+
+def test_daily_analysis_maps_merge_email_notification_with_safe_default() -> None:
+    env = _load_daily_analysis_env()
+
+    expression = str(env["MERGE_EMAIL_NOTIFICATION"])
+    assert "vars.MERGE_EMAIL_NOTIFICATION" in expression
+    assert "'true'" in expression
 
 
 def test_notification_actions_env_table_matches_generated_output() -> None:
