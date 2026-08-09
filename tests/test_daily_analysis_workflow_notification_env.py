@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Static checks for notification env mappings in 00-daily-analysis.yml."""
+"""Static regression checks for notification env mappings in 00-daily-analysis.yml."""
 
 from pathlib import Path
 
