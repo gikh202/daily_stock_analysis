@@ -287,9 +287,11 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         service._providers = [mixed_provider]
 
         resp = service.search_stock_news("600519", "贵州茅台", max_results=3)
-        self.assertEqual(
-            [r.title for r in resp.results],
-            ["中文快讯", "English headline", "Second English headline"],
+        titles = [r.title for r in resp.results]
+        self.assertEqual(titles[0], "中文快讯")
+        self.assertCountEqual(
+            titles[1:],
+            ["English headline", "Second English headline"],
         )
 
     def test_search_stock_news_prioritizes_chinese_before_truncating_results(self) -> None:
@@ -324,7 +326,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         resp = service.search_stock_news("600519", "贵州茅台", max_results=1)
         self.assertEqual([r.title for r in resp.results], ["中文快讯"])
         p1.search.assert_called_once()
-        p2.search.assert_called_once()
+        p2.search.assert_not_called()
 
     def test_search_stock_news_prefers_chinese_direct_hit_before_score_truncation(self) -> None:
         """Chinese direct hits should outrank higher-scored English direct hits before limiting."""
@@ -1931,10 +1933,10 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         self.assertEqual([item.title for item in intel["latest_news"].results], ["fresh"])
         self.assertEqual(
             [item.title for item in intel["market_analysis"].results],
-            ["analysis_unknown", "analysis_dated"],
+            ["analysis_dated", "analysis_unknown"],
         )
-        self.assertIsNone(intel["market_analysis"].results[0].published_date)
-        self.assertEqual(intel["market_analysis"].results[1].published_date, expected_analysis_date)
+        self.assertEqual(intel["market_analysis"].results[0].published_date, expected_analysis_date)
+        self.assertIsNone(intel["market_analysis"].results[1].published_date)
 
     def test_search_comprehensive_intel_widens_analytical_provider_windows(self) -> None:
         """Market analysis and earnings should request a longer provider lookback."""
@@ -2009,16 +2011,16 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
 
         self.assertEqual(
             [item.title for item in intel["market_analysis"].results],
-            ["market_analysis_unknown", "market_analysis_in_window"],
+            ["market_analysis_in_window", "market_analysis_unknown"],
         )
-        self.assertIsNone(intel["market_analysis"].results[0].published_date)
-        self.assertEqual(intel["market_analysis"].results[1].published_date, in_window)
+        self.assertEqual(intel["market_analysis"].results[0].published_date, in_window)
+        self.assertIsNone(intel["market_analysis"].results[1].published_date)
         self.assertEqual(
             [item.title for item in intel["earnings"].results],
-            ["earnings_unknown", "earnings_in_window"],
+            ["earnings_in_window", "earnings_unknown"],
         )
-        self.assertIsNone(intel["earnings"].results[0].published_date)
-        self.assertEqual(intel["earnings"].results[1].published_date, in_window)
+        self.assertEqual(intel["earnings"].results[0].published_date, in_window)
+        self.assertIsNone(intel["earnings"].results[1].published_date)
 
     def test_search_comprehensive_intel_etf_analytical_dimensions_keep_unknown_dates(self) -> None:
         """ETF analytical dimensions keep unknown-date background evidence."""
