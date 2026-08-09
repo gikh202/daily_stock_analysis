@@ -166,6 +166,8 @@ V6_ACCURACY_LAB_MAX_HOLDING_BARS=20
 V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES=100
 ```
 
+All three variables are optional. The GitHub Actions workflows and the V6.2 runtime have matching built-in defaults, so the Accuracy Lab works without adding any new Secret or Variable. Configure repository Variables only when intentionally overriding the research assumptions.
+
 The defaults are intentionally conservative. Increasing/decreasing them changes research evaluation only; it does not directly change the production V6 forecast.
 
 ## Anti-overfitting policy
