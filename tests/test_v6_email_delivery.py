@@ -153,7 +153,9 @@ def test_investor_email_keeps_one_canonical_execution_view() -> None:
     assert "新闻证据仅视为强势确认" not in email
     assert "（因子覆盖来自公司公告）" not in email
     assert "## 标的详解" in email
-    assert "执行优先级：今日动作与确定性交易计划优先" in email
+    assert "执行优先级：今日动作优先" in email
+    assert "仅当确定性交易计划具有正数最大仓位上限时" in email
+    assert "组合风控将最大仓位压至 0 时，保留价位不可执行" in email
     assert "投研摘要" in email
     assert "量化视角" in email
     assert "总体证据覆盖 **80%**" in email
