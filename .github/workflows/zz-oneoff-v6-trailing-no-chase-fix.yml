@@ -1,0 +1,80 @@
+name: One-off V6 trailing no-chase fix
+
+on:
+  push:
+    branches:
+      - fix/v6-daily-execution-view
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v5
+        with:
+          ref: fix/v6-daily-execution-view
+          fetch-depth: 0
+
+      - name: Preserve trailing no-chase guards
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path('src/v6_daily/accuracy_report.py')
+          text = source.read_text(encoding='utf-8')
+          old = '''    masked = re.sub(
+        rf"{_CHASE_PATTERN}[^，,。；;]*",
+        "仅视为强势确认，不追价",
+        masked,
+    )
+'''
+          new = '''    masked = re.sub(
+        rf"{_CHASE_PATTERN}(?:(?!(?:但|且|并且|同时)?__DSA_NO_CHASE_)[^，,。；;])*",
+        "仅视为强势确认，不追价",
+        masked,
+    )
+'''
+          if old not in text:
+              raise SystemExit('chase rewrite anchor not found')
+          source.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          test = Path('tests/test_v6_email_delivery.py')
+          t = test.read_text(encoding='utf-8')
+          fixture_old = '''  - 若高开超过3%，突破后不可追高，回踩企稳后可以追涨
+  - 若价格跌破498.50元则继续观望
+'''
+          fixture_new = '''  - 若高开超过3%，突破后不可追高，回踩企稳后可以追涨
+  - 回踩后可以追涨但不可追高
+  - 若价格跌破498.50元则继续观望
+'''
+          if fixture_old not in t:
+              raise SystemExit('trailing guard fixture anchor not found')
+          t = t.replace(fixture_old, fixture_new, 1)
+
+          assertion_old = '''    assert "回踩企稳后仅视为强势确认，不追价" in email
+    assert "V4执行护栏" not in email
+'''
+          assertion_new = '''    assert "回踩企稳后仅视为强势确认，不追价" in email
+    assert "回踩后可以追涨但不可追高" not in email
+    assert "回踩后仅视为强势确认，不追价但不可追高" in email
+    assert "V4执行护栏" not in email
+'''
+          if assertion_old not in t:
+              raise SystemExit('trailing guard assertion anchor not found')
+          test.write_text(t.replace(assertion_old, assertion_new, 1), encoding='utf-8')
+          PY
+          rm .github/workflows/zz-oneoff-v6-trailing-no-chase-fix.yml
+
+      - name: Commit review fix
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/v6_daily/accuracy_report.py tests/test_v6_email_delivery.py .github/workflows/zz-oneoff-v6-trailing-no-chase-fix.yml
+          git commit -m 'fix(v6): preserve trailing no-chase guards'
+          git push origin HEAD:fix/v6-daily-execution-view
