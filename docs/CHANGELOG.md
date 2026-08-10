@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] V6.4 Research Governance 在周度 Accuracy / Alpha Lab 中新增 Alpha 年度 Walk-forward、统一全局 non-overlap 时间轴校准、Holm-Bonferroni 多重检验、方向暴露诊断、0/10/20/40bps 成本敏感度与冻结候选 forward-only 观察；冻结候选同时锁定 Shadow variant revision/profile identity，定义漂移时 forward evidence 自动失效；保持 Champion、生产阈值、自动调权/晋级、自动交易与通知链路不变。
 - [新功能] V6.3 Alpha Target Lab 在周度严格 no-lookahead 回放中新增相对 SPY 的方向目标、0–2/2–5/5–10/10pt+ 固定分数余量校准桶与按 as-of SPY 趋势/波动划分的 Regime Matrix；统一报告 Wilson 95% CI 和方向化 Alpha Spread，保持 Champion、生产阈值、自动调权/晋级与既有 Promotion Gate 不变。
 - [改进] V6.2 周度 Accuracy Replay 新增研究型置信度/选择性切片：按现有 5D/10D/20D bullish/bearish 触发阈值计算 0/2/5/10pt 分数余量，先过滤方向信号再做全时间轴 non-overlap，报告参与率、Wilson 95% CI、方向策略收益与 SPY 超额；仅用于研究，不自动修改生产阈值、Champion 权重或晋级门禁。
 - [修复] V6.2 周度 Accuracy Replay 改为按各 Champion/Challenger 的预测方向计算无杠杆研究收益与 SPY 超额（bullish=+1x、bearish=-1x、neutral=现金），避免不同模型共享同一底层股票收益导致 Alpha 恒等；同时保留底层收益字段用于审计。
@@ -153,7 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] Tushare 数据源支持通过 `TUSHARE_HTTP_URL` 环境变量自定义接入地址，便于网络无法直达 `api.tushare.pro` 时切换自建网关或第三方兼容镜像；留空保持官方默认地址不变（fixes #1985）
 - [文档] `.env.example` 与 `.github/workflows/00-daily-analysis.yml` 同步映射 `TUSHARE_HTTP_URL`，避免出现"配置项有但 workflow 漏映射"的半修状态
 - [修复] #2051 PR Review 的特权 `pull_request_target` 流程不再检出 fork PR head：敏感文件、标签、报告与 AI 审查统一通过 GitHub API 将 PR 元数据和 diff 作为数据读取，只执行主分支可信脚本；Python 语法、Flake8、确定性检查和离线测试继续由无 secrets 的 `pull_request` CI / `backend-gate` 执行，兼容 `actions/checkout` 新增的 fork checkout 安全保护。
-- [修复] 修复 Windows 上 mimetypes 冷启动时读取注册表导致的进程卡死
+- [修复] 修复 Windows 上 mimetypes 冷启动时读取注册表导致进程卡死
 
 ## [3.27.0] - 2026-07-19
 
@@ -854,7 +855,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Agent 模式未生成有效决策仪表盘时保留本地趋势分析的评分、趋势和操作建议，并将强买/强卖 fallback 归一到兼容的 `buy`/`sell` 决策类型，避免首页结果被 `50 / 观望 / 未知` 缺省值覆盖。
 - 持仓快照现价缺失时不再静默回退为持仓成本；当天快照优先使用历史收盘价，仅在缺失时使用实时价 fallback，缺价持仓不再污染市值与未实现盈亏汇总，并为持仓明细返回价格来源、日期、stale 与缺价状态。
 - 分析 Prompt 在注入 `trend_analysis` 前按最终 `trend_status` / `ma_alignment` 清洗互斥理由：空头结构移除看多理由、多头结构移除空头结构风险，并在事件/技术冲突与异常放量（>10 倍）时强制提示“事件先行、技术待确认”与量能降权。
-- LLM 返回非 JSON 响应时同样触发备用模型切换：主模型成功返回但无法解析 JSON 时，不再立即降级为纯文本 fallback，而是依次尝试 `LITELLM_FALLBACK_MODELS` 中的备用模型；所有模型均无法返回合法 JSON 时，再降级为文本 fallback。
+- LLM 返回非 JSON 响应时同样触发备用模型切换：主模型成功返回但无法解析 JSON 时，不再立即降级为纯文本 fallback，而是依次尝试 `LITELM_FALLBACK_MODELS` 中的备用模型；所有模型均无法返回合法 JSON 时，再降级为文本 fallback。
 - LiteLLM 内部 DEBUG 日志默认压低到 WARNING，避免流式生成时 token 级日志污染 `stock_analysis_debug_*.log`；如需排查 LiteLLM 内部细节，可临时设置 `LITELLM_LOG_LEVEL=DEBUG`（Fixes #1156）。
 
 ### 文档
@@ -1365,7 +1366,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - 🤖 **Agent background execution** (#495) — analysis continues when switching pages; badge notification on completion; auto-cancel in-progress stream on session switch
 - 📝 **Report Engine P0** — Pydantic schema validation for LLM JSON; Jinja2 templates (markdown/wechat/brief) with legacy fallback; content integrity checks with retry; brief mode (`REPORT_TYPE=brief`); history signal comparison
 - 📦 **Smart import** — multi-source import from image/CSV/Excel/clipboard; Vision LLM extracts code+name+confidence; name→code resolver (local map + pinyin + AkShare); confidence-tiered confirmation
-- ⚙️ **GitHub Actions LiteLLM config** — workflow supports `LITELLM_CONFIG`/`LITELLM_CONFIG_YAML` for flexible AI provider configuration
+- ⚙️ **GitHub Actions LiteLLM config** — workflow supports `LITELLM_CONFIG`/`LITELM_CONFIG_YAML` for flexible AI provider configuration
 - ⚙️ **Config engine refactor & system API** (#602) — unified config registry, validation and API exposure
 - 📖 **LLM configuration guide** — new `docs/LLM_CONFIG_GUIDE.md` covering 3-tier config, quick start, Vision/Agent/troubleshooting
 
