@@ -43,8 +43,16 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         == "若股价跌破并收于$110下方"
     )
     assert (
+        _normalize_watch_price_yuan("若股价跌破并且收于110元下方")
+        == "若股价跌破并且收于$110下方"
+    )
+    assert (
         _normalize_watch_price_yuan("若股价走弱但公司获得99元补贴则关注基本面")
         == "若股价走弱但公司获得99元补贴则关注基本面"
+    )
+    assert (
+        _normalize_watch_price_yuan("若股价表现改善同时公司支付99元罚款则关注基本面")
+        == "若股价表现改善同时公司支付99元罚款则关注基本面"
     )
     assert (
         _normalize_watch_price_yuan("若股价表现改善同时关注中国售价99元的销量反馈")
