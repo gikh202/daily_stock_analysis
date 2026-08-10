@@ -48,12 +48,16 @@ _RISK_CONTROL_LABEL_RE = re.compile(
 )
 _WATCH_PRICE_CONTEXT_RE = re.compile(
     r"(?:价格|股价|现价|收盘价|开盘价|入场|买入|买点|卖点|止损|止盈|目标|"
-    r"支撑|压力|突破|上破|下破|跌破|站上|守住|回踩|高开|低开|价位|点位|区间)"
+    r"支撑|压力|突破|上破|下破|跌破|跌至|涨至|触及|达到|到达|逼近|接近|"
+    r"站上|守住|回踩|高开|低开|价位|点位|区间)"
 )
 _CNY_FACT_CONTEXT_RE = re.compile(
-    r"(?:售价|定价|人民币|成本|费用|营收|收入|销售额|订单金额|产品价格|服务价格)"
+    r"(?:售价|定价|人民币|成本|费用|营收|收入|销售额|订单金额|补贴|产品价格|服务价格)"
 )
-_WATCH_PRICE_BARRIER_RE = re.compile(r"[，,。；;\n]")
+# Coordinating conjunctions such as “并” can sit inside one stock-price phrase
+# (e.g. “股价跌破并收于110元”), so only punctuation and explicit contrast
+# connectors delimit the inherited price context here.
+_WATCH_PRICE_BARRIER_RE = re.compile(r"(?:[，,。；;\n]|但|然而|不过|可是|却)")
 
 
 def _num(value: Any, digits: int = 1) -> str:
