@@ -231,6 +231,21 @@ def test_investor_email_recognizes_descriptive_no_chase_guard() -> None:
     assert "若站上365仅视为强势确认，不追价" in email
 
 
+def test_investor_email_marks_preserved_zero_position_plan_inactive() -> None:
+    report = _full_report().replace(
+        "  - **V6 最大仓位上限**: `10%`\n",
+        "",
+    )
+    email = build_investor_email_markdown(report)
+
+    assert "**交易计划（当前不可执行）**" in email
+    assert "**保留入场区间（当前不可执行）**: `[495.0, 500.0]`（组合风控当前禁止新仓）" in email
+    assert "确定性风控计划为唯一执行价格口径" not in email
+    assert "（唯一执行价格口径）" not in email
+    assert "**辅助价格参考（非执行）**" in email
+    assert "**辅助风险控制（非执行）**" in email
+
+
 def test_investor_email_subject_uses_top_stock_actions(monkeypatch) -> None:
     email = build_investor_email_markdown(_full_report())
     assert extract_investor_email_subject(email) == "美股决策日报｜MSFT 观察 · QQQM 观察｜08-09"
