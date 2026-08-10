@@ -11,7 +11,7 @@ _TYPE = {"STOCK": "个股", "ETF": "ETF"}
 
 
 _EMAIL_SUBJECT_META_RE = re.compile(r"^\[dsa-email-subject\]:\s+#\s+\(([^)\n]+)\)\s*$", re.MULTILINE)
-_CHASE_SUFFIX_OR_BOUNDARY = r"(?:高|涨|价|买|(?=$|[\s，,。；;、但]))"
+_CHASE_SUFFIX_OR_BOUNDARY = r"(?:高|涨|价|买|(?=$|[\s，,。；;、但！？!?]))"
 _CHASE_TARGET = rf"追{_CHASE_SUFFIX_OR_BOUNDARY}"
 _CHASE_PATTERN = rf"(?:日内)?(?:可|可以){_CHASE_TARGET}"
 _NEGATED_CHASE_GAP = (
@@ -47,7 +47,7 @@ _RISK_CONTROL_LABEL_RE = re.compile(
     r"\*\*(?:风险控制|辅助风险控制（非执行）)\*\*"
 )
 _WATCH_PRICE_CONTEXT_RE = re.compile(
-    r"(?:价格|股价|现价|收盘价|开盘价|入场|买入|买点|卖点|止损|止盈|目标|"
+    r"(?:股价|现价|收盘价|开盘价|入场|买入|买点|卖点|止损|止盈|目标|"
     r"支撑|压力|突破|上破|下破|跌破|站上|守住|回踩|高开|低开|价位|点位|区间)"
 )
 _GENERIC_PRICE_MOVEMENT_RE = re.compile(
@@ -354,12 +354,36 @@ def _has_positive_max_position(section: str) -> bool:
     return bool(_MAX_POSITION_RE.search(section))
 
 
+def _has_active_no_chase_guard(section: str) -> bool:
+    """Detect no-chase guards only in current execution/risk fields."""
+    active_block: Optional[str] = None
+    for line in section.splitlines():
+        top_label = re.match(r"^-\s+\*\*([^*]+)\*\*[:：]", line)
+        if top_label:
+            label = top_label.group(1)
+            active_block = label if label in {"主要风险", "交易计划", "下一次确认条件"} else None
+
+        if "执行护栏" in line and re.search(_NEGATED_CHASE_PATTERN, line):
+            return True
+        if active_block == "主要风险" and re.search(_NEGATED_CHASE_PATTERN, line):
+            return True
+        if active_block == "下一次确认条件" and re.search(_NEGATED_CHASE_PATTERN, line):
+            return True
+        if (
+            active_block == "交易计划"
+            and _RISK_CONTROL_LABEL_RE.search(line)
+            and re.search(_NEGATED_CHASE_PATTERN, line)
+        ):
+            return True
+    return False
+
+
 def _standardize_stock_card(section: str) -> str:
     """Make one investor card use one execution-price hierarchy."""
     has_deterministic_levels = "**融合入场区间**" in section
     has_deterministic_plan = has_deterministic_levels and _has_positive_max_position(section)
     inactive_deterministic_levels = has_deterministic_levels and not has_deterministic_plan
-    no_chase_guard = bool(re.search(_NEGATED_CHASE_PATTERN, section))
+    no_chase_guard = _has_active_no_chase_guard(section)
     output: list[str] = []
     execution_note_added = False
     price_block: Optional[str] = None
