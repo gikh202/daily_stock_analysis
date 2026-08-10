@@ -79,8 +79,10 @@ def _full_report() -> str:
   - **V6 最大仓位上限**: `10%`
   - **V4 价格参考**: 理想买入点：496.00元；止损位：466.00元；目标位：510.00元
   - **V4 仓位参考**: 小仓/低仓位
+  - **V4 风险控制**: 止损参考466.00元；仓位不超过3%
 - **下一次确认条件**：
   - 若放量上涨突破515，日内可追但仅限小仓位
+  - 若高开超过3%，突破后不可追高
   - 若价格跌破498.50元则继续观望
   - 下次检查：**2026-08-10 09:30 EDT**
 - **数据限制**：催化因子尚未进入数值评分
@@ -158,10 +160,17 @@ def test_investor_email_keeps_one_canonical_execution_view() -> None:
     assert "理想买入点：$496.00" not in email
     assert "止损位：$466.00" not in email
     assert "目标位：$510.00" not in email
+    assert "止损参考$466.00" not in email
+    assert "仓位不超过3%" not in email
     assert "**价格参考**" not in email
+    assert "**风险控制**" not in email
     assert "500亿级别成交额" not in email
     assert "日内可追" not in email
     assert "仅视为强势确认，不追价" in email
+    assert "突破后不可追高" in email
+    assert "突破后不仅视为强势确认" not in email
+    assert "V4执行护栏" not in email
+    assert "执行护栏：等待盘中确认，禁止追高" in email
     assert "$498.50" in email
     assert "ET（美东）" in email
     assert " EDT" not in email
