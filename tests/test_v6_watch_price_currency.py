@@ -34,6 +34,12 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
     )
     assert (
         _normalize_watch_price_yuan(
+            "若产品售价200美元后回踩99元则观察销量"
+        )
+        == "若产品售价200美元后回踩99元则观察销量"
+    )
+    assert (
+        _normalize_watch_price_yuan(
             "关注中国售价99元的销量反馈，同时股价回踩180-182元"
         )
         == "关注中国售价99元的销量反馈，同时股价回踩$180-182"
