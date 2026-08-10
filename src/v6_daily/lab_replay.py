@@ -10,6 +10,7 @@ from .replay import _features_at, _finite, load_sqlite_series
 
 
 STRATEGY_RETURN_METHOD = "gross_directional_position_v1"
+YEARLY_WALK_FORWARD_METHOD = "raw_and_global_non_overlapping_by_calendar_year_v2"
 
 
 @dataclass(frozen=True)
@@ -193,7 +194,21 @@ def summarize_accuracy_replay(
             yearly = []
             for year in sorted({item.as_of[:4] for item in bucket if len(item.as_of) >= 4}):
                 yearly_rows = [item for item in bucket if item.as_of.startswith(year)]
-                yearly.append({"year": year, **_metric(yearly_rows)})
+                yearly_independent = [
+                    item for item in independent if item.as_of.startswith(year)
+                ]
+                raw_metric = _metric(yearly_rows)
+                independent_metric = _metric(yearly_independent)
+                yearly.append(
+                    {
+                        "year": year,
+                        "raw": raw_metric,
+                        "non_overlapping": independent_metric,
+                        # Preserve the pre-v2 flattened yearly fields as the raw view for
+                        # downstream readers while the report migrates to explicit views.
+                        **raw_metric,
+                    }
+                )
             rows.append(
                 {
                     "variant": variant,
@@ -252,6 +267,7 @@ def summarize_accuracy_replay(
         "method": "strict no-lookahead rolling price-feature replay",
         "scope": "price/volume/benchmark features only; current SEC/FRED snapshots are excluded from historical replay",
         "strategy_return_method": STRATEGY_RETURN_METHOD,
+        "yearly_walk_forward_method": YEARLY_WALK_FORWARD_METHOD,
         "strategy_return_definition": {
             "bullish_position": 1.0,
             "bearish_position": -1.0,
