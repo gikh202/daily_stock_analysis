@@ -1,0 +1,72 @@
+name: One-off V6 execution hierarchy fix
+
+on:
+  push:
+    branches:
+      - fix/v6-daily-execution-view
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v5
+        with:
+          ref: fix/v6-daily-execution-view
+          fetch-depth: 0
+
+      - name: Qualify active-plan hierarchy
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path('src/v6_daily/accuracy_report.py')
+          text = source.read_text(encoding='utf-8')
+          old = '''        "## 标的详解\\n\\n> 执行优先级：今日动作与确定性交易计划优先；投研摘要用于解释。"
+        "若价格或追价口径冲突，以确定性风控计划为准。",
+'''
+          new = '''        "## 标的详解\\n\\n> 执行优先级：今日动作优先；仅当确定性交易计划具有正数最大仓位上限时，"
+        "其价格口径才可执行并优先。组合风控将最大仓位压至 0 时，保留价位不可执行，"
+        "不能覆盖其他上下文；投研摘要仅用于解释。",
+'''
+          if old not in text:
+              raise SystemExit('execution hierarchy text anchor not found')
+          source.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          test = Path('tests/test_v6_email_delivery.py')
+          t = test.read_text(encoding='utf-8')
+          old_assert = '    assert "执行优先级：今日动作与确定性交易计划优先" in email\n'
+          new_assert = (
+              '    assert "执行优先级：今日动作优先" in email\n'
+              '    assert "仅当确定性交易计划具有正数最大仓位上限时" in email\n'
+          )
+          if old_assert not in t:
+              raise SystemExit('active hierarchy assertion anchor not found')
+          t = t.replace(old_assert, new_assert, 1)
+
+          inactive_anchor = '    assert "**交易计划（当前不可执行）**" in email\n'
+          inactive_extra = (
+              '    assert "**交易计划（当前不可执行）**" in email\n'
+              '    assert "组合风控将最大仓位压至 0 时，保留价位不可执行" in email\n'
+              '    assert "若价格或追价口径冲突，以确定性风控计划为准" not in email\n'
+          )
+          if inactive_anchor not in t:
+              raise SystemExit('inactive hierarchy assertion anchor not found')
+          t = t.replace(inactive_anchor, inactive_extra, 1)
+          test.write_text(t, encoding='utf-8')
+          PY
+          rm .github/workflows/zz-oneoff-v6-execution-header-fix.yml
+
+      - name: Commit review fix
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/v6_daily/accuracy_report.py tests/test_v6_email_delivery.py .github/workflows/zz-oneoff-v6-execution-header-fix.yml
+          git commit -m 'fix(v6): qualify active execution hierarchy'
+          git push origin HEAD:fix/v6-daily-execution-view
