@@ -51,19 +51,34 @@ class AccuracyReplayObservation:
     spy_vol_regime: Optional[str] = None
 
 
+def _latest_index_at_or_before(
+    rows: Sequence[Mapping[str, Any]],
+    date_value: str,
+) -> Optional[int]:
+    target = str(date_value or "")
+    latest: Optional[int] = None
+    for index, row in enumerate(rows):
+        row_date = str(row.get("date") or "")
+        if row_date and row_date <= target:
+            latest = index
+        elif row_date and row_date > target:
+            break
+    return latest
+
+
 def _spy_future_return(
     series: Mapping[str, Sequence[Mapping[str, Any]]],
     *,
-    as_of: str,
-    horizon: int,
+    start_date: str,
+    end_date: str,
 ) -> Optional[float]:
     rows = list(series.get("SPY") or ())
-    date_to_index = {str(row.get("date") or ""): index for index, row in enumerate(rows)}
-    index = date_to_index.get(str(as_of))
-    if index is None or index + int(horizon) >= len(rows):
+    start_index = _latest_index_at_or_before(rows, start_date)
+    end_index = _latest_index_at_or_before(rows, end_date)
+    if start_index is None or end_index is None or end_index <= start_index:
         return None
-    start = _finite(rows[index].get("close"))
-    end = _finite(rows[index + int(horizon)].get("close"))
+    start = _finite(rows[start_index].get("close"))
+    end = _finite(rows[end_index].get("close"))
     if start is None or end is None or start <= 0:
         return None
     return (end / start - 1.0) * 100.0
@@ -94,8 +109,7 @@ def _spy_market_regime(
     as_of: str,
 ) -> tuple[str, str]:
     rows = list(series.get("SPY") or ())
-    date_to_index = {str(row.get("date") or ""): index for index, row in enumerate(rows)}
-    index = date_to_index.get(str(as_of))
+    index = _latest_index_at_or_before(rows, as_of)
     if index is None:
         return "unknown", "unknown"
     closes = [
@@ -170,11 +184,17 @@ def replay_accuracy_lab(
             spy_trend_regime, spy_vol_regime = _spy_market_regime(series, as_of=as_of)
             for horizon in horizons:
                 horizon_i = int(horizon)
-                future = _finite(rows[index + horizon_i].get("close"))
+                future_row = rows[index + horizon_i]
+                future = _finite(future_row.get("close"))
                 if future is None or future <= 0:
                     continue
+                future_date = str(future_row.get("date") or "")
                 future_return = (future / current - 1.0) * 100.0
-                spy_return = _spy_future_return(series, as_of=as_of, horizon=horizon_i)
+                spy_return = _spy_future_return(
+                    series,
+                    start_date=as_of,
+                    end_date=future_date,
+                )
                 underlying_excess = None if spy_return is None else future_return - spy_return
                 for variant, forecast in variants.items():
                     block = forecast.get(f"{horizon_i}d") or {}
