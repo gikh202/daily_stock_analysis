@@ -1,0 +1,47 @@
+name: One-off V6 execution changelog update
+
+on:
+  push:
+    branches:
+      - fix/v6-daily-execution-view
+
+permissions:
+  contents: write
+
+jobs:
+  update-changelog:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v5
+        with:
+          ref: fix/v6-daily-execution-view
+          fetch-depth: 0
+
+      - name: Insert changelog entry and remove one-off workflow
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('docs/CHANGELOG.md')
+          text = path.read_text(encoding='utf-8')
+          entry = '- [改进] V6 最终美股决策邮件统一执行口径：存在确定性风控计划时只展示其入场、止损、目标与最大仓位，并将无确定性计划的回退交易方案显式标记为非执行参考；隐藏未校准上行概率，统一美元/美东时区/证据覆盖标签，消除禁止追高与“可追”冲突及明显 A 股模板污染；完整原始 Markdown/JSON 继续保留用于审计。\n'
+          marker = '## [Unreleased]\n\n'
+          if entry not in text:
+              if marker not in text:
+                  raise SystemExit('Unreleased marker missing')
+              text = text.replace(marker, marker + entry, 1)
+              path.write_text(text, encoding='utf-8')
+          PY
+          rm .github/workflows/zz-oneoff-v6-execution-changelog.yml
+
+      - name: Commit changelog
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/CHANGELOG.md .github/workflows/zz-oneoff-v6-execution-changelog.yml
+          git commit -m 'docs: update changelog for V6 execution email'
+          git push origin HEAD:fix/v6-daily-execution-view
