@@ -11,6 +11,77 @@ _TYPE = {"STOCK": "个股", "ETF": "ETF"}
 
 
 _EMAIL_SUBJECT_META_RE = re.compile(r"^\[dsa-email-subject\]:\s+#\s+\(([^)\n]+)\)\s*$", re.MULTILINE)
+_CHASE_SUFFIX_OR_BOUNDARY = r"(?:高|涨|价|买|(?=$|[\s，,。；;、但！？!?]))"
+_CHASE_TARGET = rf"追{_CHASE_SUFFIX_OR_BOUNDARY}"
+_CHASE_PATTERN = rf"(?:日内)?(?:可|可以){_CHASE_TARGET}"
+_NEGATED_CHASE_GAP = (
+    r"(?:(?!(?:但|并且|同时|以及|然后|然而|不过|可是|却|而且|且|而|或者|或))"
+    r"[^，,。；;！？!?\n]){0,20}?"
+)
+_NEGATED_CHASE_PATTERN = (
+    rf"(?:不可以|不可|不应|不得|禁止|严禁|不要|不宜|切勿|勿|别)"
+    rf"{_NEGATED_CHASE_GAP}{_CHASE_TARGET}"
+    rf"|不\s*{_CHASE_TARGET}"
+)
+_PRICE_NUMBER_PATTERN = (
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    r"(?:\s*[-–—~～至]\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)?"
+)
+_PRICE_YUAN_RE = re.compile(
+    rf"(?<![\d.,])\$?({_PRICE_NUMBER_PATTERN})\s*元"
+)
+_NON_YUAN_PRICE_AMOUNT_RE = re.compile(
+    rf"(?:\$\s*{_PRICE_NUMBER_PATTERN}|"
+    rf"{_PRICE_NUMBER_PATTERN}\s*(?:美元|美金|USD\b)|"
+    rf"USD\s*{_PRICE_NUMBER_PATTERN})",
+    re.IGNORECASE,
+)
+_MAX_POSITION_RE = re.compile(
+    r"\*\*最大仓位上限\*\*[:：]\s*`?\s*(\d+(?:\.\d+)?)\s*%"
+)
+_PLAN_PRICE_LABEL_RE = re.compile(
+    r"\*\*(?:融合入场区间|保留入场区间（当前不可执行）|参考入场|辅助入场参考（非执行）|"
+    r"止损/失效位|目标位|价格参考|辅助价格参考（非执行）)\*\*"
+)
+_RISK_CONTROL_LABEL_RE = re.compile(
+    r"\*\*(?:风险控制|辅助风险控制（非执行）)\*\*"
+)
+# Direct currency conversion in arbitrary prose requires an unambiguous
+# stock/execution anchor. Action verbs such as “跌破/突破” are handled by the
+# stricter movement path below so ordinary CNY facts cannot be relabeled.
+_WATCH_PRICE_CONTEXT_RE = re.compile(
+    r"(?:股价|现价|收盘价|开盘价|入场(?:价|位)?|买点|卖点|"
+    r"止损(?:价|位)?|止盈(?:价|位)?|目标(?:价|位)|支撑(?:价|位)|"
+    r"压力(?:价|位)|价位|点位)"
+)
+_GENERIC_PRICE_MOVEMENT_RE = re.compile(
+    r"(?:突破|上破|下破|跌破|站上|守住|回踩|高开|低开|"
+    r"跌至|涨至|触及|达到|到达|逼近|接近)"
+)
+_GENERIC_MOVEMENT_PREFIX_RE = re.compile(
+    r"^(?:若|如果|一旦|当)?\s*(?:价格\s*)?(?:能否\s*)?"
+    r"(?:(?:开盘后|盘中|盘前|日内|尾盘|收盘前|回踩后|突破后|再次|继续|直接)\s*)*$"
+)
+_POST_AMOUNT_EXECUTION_RE = re.compile(
+    r"^[^，,。；;\n]{0,16}(?:止损|止盈|减仓|加仓|买入|卖出|开仓|平仓|入场|出场|分批|观望|等待|确认)"
+)
+_CNY_FACT_CONTEXT_RE = re.compile(
+    r"(?:售价|定价|人民币|成本|费用|营收|收入|销售额|订单金额|补贴|产品价格|服务价格)"
+)
+# Treat punctuation and clause-level conjunctions as context boundaries, but
+# preserve a conjunction when it directly continues the same price phrase
+# (for example, “股价跌破并收于110元”).
+_WATCH_PRICE_BARRIER_RE = re.compile(
+    r"(?:[，,。；;！？!?\n]|但|然而|不过|可是|却|并且|同时|以及|然后|而且|或者|并|且|或)"
+)
+_PRICE_CONTINUATION_PREFIX_RE = re.compile(
+    r"^\s*(?:收于|站上|守住|回踩|触及|跌至|涨至|达到|到达|逼近|接近|"
+    r"突破|上破|下破|跌破|高于|低于|位于)"
+)
+_POST_PRICE_CONTINUATION_RE = re.compile(
+    r"^\s*后?\s*(?:收于|站上|守住|回踩|触及|跌至|涨至|达到|到达|逼近|接近|"
+    r"突破|上破|下破|跌破|高于|低于|位于)\s*$"
+)
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -32,7 +103,7 @@ def _horizon_cell(item: Mapping[str, Any], key: str) -> str:
         coverage_text = f"{100.0 * float(coverage):.0f}%"
     except (TypeError, ValueError):
         coverage_text = "N/A"
-    return f"{direction} {score}（证据{coverage_text}）"
+    return f"{direction} {score}（因子覆盖{coverage_text}）"
 
 
 def _accuracy_section(payload: Mapping[str, Any]) -> str:
@@ -184,13 +255,280 @@ def _compact_validation(section: str) -> str:
     return "\n".join(lines)
 
 
+def _normalize_us_investor_terms(text: str) -> str:
+    """Normalize table coverage and U.S. timezone labels without touching prose."""
+    normalized: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("|"):
+            line = re.sub(
+                r"（证据(\d+(?:\.\d+)?%|N/A)）",
+                r"（因子覆盖\1）",
+                line,
+            )
+        line = re.sub(r"\((?:EDT|EST|美东时间)\)", "ET（美东）", line)
+        line = re.sub(r"（(?:EDT|EST|美东时间)）", "ET（美东）", line)
+        line = re.sub(r"\b(?:EDT|EST)\b|美东时间", "ET（美东）", line)
+        normalized.append(line)
+    return "\n".join(normalized)
+
+
+def _normalize_execution_price_yuan(line: str) -> str:
+    """Convert a legacy yuan suffix when its line is known to describe stock price."""
+    return _PRICE_YUAN_RE.sub(r"$\1", line)
+
+
+def _price_context_positions(text: str) -> tuple[int, int]:
+    """Return the latest explicit stock-price and CNY-fact markers in one local phrase."""
+    boundary_end = 0
+    for boundary in _WATCH_PRICE_BARRIER_RE.finditer(text):
+        token = boundary.group(0)
+        suffix = text[boundary.end() :]
+        if token not in {"，", ",", "。", "；", ";", "！", "？", "!", "?", "\n", "但", "然而", "不过", "可是", "却"}:
+            if _PRICE_CONTINUATION_PREFIX_RE.match(suffix):
+                continue
+        boundary_end = max(boundary_end, boundary.end())
+    local_text = text[boundary_end:]
+    price_contexts = list(_WATCH_PRICE_CONTEXT_RE.finditer(local_text))
+    cny_contexts = list(_CNY_FACT_CONTEXT_RE.finditer(local_text))
+    latest_price_context = price_contexts[-1].start() if price_contexts else -1
+    latest_cny_context = cny_contexts[-1].start() if cny_contexts else -1
+    return latest_price_context, latest_cny_context
+
+
+def _normalize_watch_price_yuan(line: str) -> str:
+    """Convert only yuan amounts locally bound to a stock-price watch phrase."""
+    matches = list(_PRICE_YUAN_RE.finditer(line))
+    if not matches:
+        return line
+
+    output: list[str] = []
+    cursor = 0
+    previous_amount_end = 0
+    for match in matches:
+        prefix = line[previous_amount_end : match.start()]
+        boundary_end = 0
+        for boundary in _WATCH_PRICE_BARRIER_RE.finditer(prefix):
+            token = boundary.group(0)
+            suffix = prefix[boundary.end() :]
+            if token not in {"，", ",", "。", "；", ";", "！", "？", "!", "?", "\n", "但", "然而", "不过", "可是", "却"}:
+                if _PRICE_CONTINUATION_PREFIX_RE.match(suffix):
+                    continue
+            boundary_end = max(boundary_end, boundary.end())
+        for amount in _NON_YUAN_PRICE_AMOUNT_RE.finditer(prefix):
+            prior_price_context, prior_cny_context = _price_context_positions(
+                prefix[: amount.start()]
+            )
+            post_price_text = prefix[amount.end() :]
+            continues_stock_price = bool(
+                prior_price_context >= 0
+                and prior_price_context > prior_cny_context
+                and _POST_PRICE_CONTINUATION_RE.fullmatch(post_price_text)
+            )
+            if not continues_stock_price:
+                boundary_end = max(boundary_end, amount.end())
+        local_prefix = prefix[boundary_end:]
+        price_contexts = list(_WATCH_PRICE_CONTEXT_RE.finditer(local_prefix))
+        movement_contexts = list(_GENERIC_PRICE_MOVEMENT_RE.finditer(local_prefix))
+        cny_contexts = list(_CNY_FACT_CONTEXT_RE.finditer(local_prefix))
+        price_contexts = [
+            price_context
+            for price_context in price_contexts
+            if not any(
+                cny_context.start() <= price_context.start()
+                and price_context.end() <= cny_context.end()
+                for cny_context in cny_contexts
+            )
+        ]
+        latest_price_context = price_contexts[-1].start() if price_contexts else -1
+        latest_cny_context = cny_contexts[-1].start() if cny_contexts else -1
+
+        generic_execution_context = False
+        if movement_contexts:
+            movement = movement_contexts[-1]
+            movement_prefix = local_prefix[: movement.start()]
+            movement_prefix = re.sub(r"^\s*[-*]\s*", "", movement_prefix).strip()
+            post_amount = line[match.end() :]
+            generic_execution_context = bool(
+                latest_cny_context < 0
+                and _GENERIC_MOVEMENT_PREFIX_RE.fullmatch(movement_prefix)
+                and (
+                    _POST_AMOUNT_EXECUTION_RE.search(post_amount)
+                    or ("能否" in movement_prefix and not post_amount.strip())
+                )
+            )
+
+        output.append(line[cursor : match.start()])
+        if latest_price_context >= 0 and latest_price_context > latest_cny_context:
+            output.append(f"${match.group(1)}")
+        elif generic_execution_context:
+            output.append(f"${match.group(1)}")
+        else:
+            output.append(match.group(0))
+        cursor = match.end()
+        previous_amount_end = match.end()
+
+    output.append(line[cursor:])
+    return "".join(output)
+
+
+def _rewrite_affirmative_chase_clauses(line: str) -> str:
+    """Rewrite only the affirmative chase token and preserve all trailing qualifiers."""
+    protected: Dict[str, str] = {}
+
+    def protect(match: re.Match[str]) -> str:
+        key = f"__DSA_NO_CHASE_{len(protected)}__"
+        protected[key] = match.group(0)
+        return key
+
+    masked = re.sub(_NEGATED_CHASE_PATTERN, protect, line)
+    masked = re.sub(_CHASE_PATTERN, "仅视为强势确认，不追价", masked)
+    for key, value in protected.items():
+        masked = masked.replace(key, value)
+    return masked
+
+
+def _has_positive_max_position(section: str) -> bool:
+    # The upstream plan renderer emits this marker only when the raw position
+    # allowance is strictly positive. A tiny positive cap can display as 0.0%
+    # after one-decimal rounding, so marker presence is the source of truth.
+    return bool(_MAX_POSITION_RE.search(section))
+
+
+def _has_active_no_chase_guard(section: str) -> bool:
+    """Detect no-chase guards only in current execution/risk fields."""
+    active_block: Optional[str] = None
+    for line in section.splitlines():
+        top_label = re.match(r"^-\s+\*\*([^*]+)\*\*[:：]", line)
+        if top_label:
+            label = top_label.group(1)
+            active_block = label if label in {"主要风险", "交易计划", "下一次确认条件"} else None
+
+        if "执行护栏" in line and re.search(_NEGATED_CHASE_PATTERN, line):
+            return True
+        if active_block == "主要风险" and re.search(_NEGATED_CHASE_PATTERN, line):
+            return True
+        if active_block == "下一次确认条件" and re.search(_NEGATED_CHASE_PATTERN, line):
+            return True
+        if (
+            active_block == "交易计划"
+            and _RISK_CONTROL_LABEL_RE.search(line)
+            and re.search(_NEGATED_CHASE_PATTERN, line)
+        ):
+            return True
+    return False
+
+
+def _standardize_stock_card(section: str) -> str:
+    """Make one investor card use one execution-price hierarchy."""
+    has_deterministic_levels = "**融合入场区间**" in section
+    has_deterministic_plan = has_deterministic_levels and _has_positive_max_position(section)
+    inactive_deterministic_levels = has_deterministic_levels and not has_deterministic_plan
+    no_chase_guard = _has_active_no_chase_guard(section)
+    output: list[str] = []
+    execution_note_added = False
+    price_block: Optional[str] = None
+
+    for line in section.splitlines():
+        top_label = re.match(r"^-\s+\*\*([^*]+)\*\*[:：]", line)
+        if top_label:
+            label = top_label.group(1)
+            if label in {"交易计划", "下一次确认条件"}:
+                price_block = label
+            else:
+                price_block = None
+
+        # Uncalibrated model probability is useful in raw research artifacts but
+        # must not look like a live win probability in the investor inbox.
+        line = re.sub(
+            r"\s*\|\s*模型上行概率\s+\*\*[^*\n]*未校准[^*\n]*\*\*",
+            "",
+            line,
+        )
+
+        if "量化视角" in line:
+            line = line.replace("| 证据 **", "| 总体证据覆盖 **")
+
+        # A positive deterministic position allowance is required before V6
+        # levels are presented as executable. Legacy V4 price/position/risk
+        # instructions are suppressed only for an active deterministic plan.
+        if has_deterministic_plan and re.match(
+            r"^\s*-\s+\*\*(?:价格参考|仓位参考|风险控制)\*\*[:：]", line
+        ):
+            continue
+
+        if not has_deterministic_plan:
+            line = line.replace("**价格参考**", "**辅助价格参考（非执行）**")
+            line = line.replace("**仓位参考**", "**辅助仓位参考（非执行）**")
+            line = line.replace("**风险控制**", "**辅助风险控制（非执行）**")
+            line = line.replace("**参考入场**", "**辅助入场参考（非执行）**")
+
+        # Remove an obvious A-share turnover template that has no valid place in
+        # a U.S. investor email. The raw report remains available for audit.
+        if "亿级别成交额" in line:
+            continue
+
+        if no_chase_guard:
+            line = _rewrite_affirmative_chase_clauses(line)
+
+        if has_deterministic_plan:
+            line = line.replace(
+                "（优先采用 确定性风控计划）",
+                "（唯一执行价格口径）",
+            )
+        elif inactive_deterministic_levels:
+            line = line.replace(
+                "**融合入场区间**",
+                "**保留入场区间（当前不可执行）**",
+            )
+            line = line.replace(
+                "（优先采用 确定性风控计划）",
+                "（组合风控当前禁止新仓）",
+            )
+
+        if re.match(r"^\s*-\s+\*\*交易计划\*\*[:：]\s*$", line):
+            if inactive_deterministic_levels:
+                line = line.replace("**交易计划**", "**交易计划（当前不可执行）**")
+            elif not has_deterministic_levels:
+                line = line.replace("**交易计划**", "**辅助交易计划（未触发）**")
+
+        if price_block == "交易计划":
+            if _RISK_CONTROL_LABEL_RE.search(line):
+                line = _normalize_watch_price_yuan(line)
+            elif _PLAN_PRICE_LABEL_RE.search(line):
+                line = _normalize_execution_price_yuan(line)
+        elif price_block == "下一次确认条件":
+            line = _normalize_watch_price_yuan(line)
+
+        output.append(line)
+
+        if (
+            has_deterministic_plan
+            and not execution_note_added
+            and re.match(r"^\s*-\s+\*\*交易计划\*\*[:：]\s*$", line)
+        ):
+            output.append(
+                "  - **执行口径**: 确定性风控计划为唯一执行价格口径；"
+                "投研层价格仅用于解释，不作为下单依据。"
+            )
+            execution_note_added = True
+
+    return "\n".join(output)
+
+
+def _standardize_stock_cards(text: str) -> str:
+    pattern = re.compile(
+        r"(?ms)^### \d+\. .*?(?=^### \d+\.|^## \d+\.|^## 预测可信度|\Z)"
+    )
+    return pattern.sub(lambda match: _standardize_stock_card(match.group(0)), text)
+
+
 def build_investor_email_markdown(report: str) -> str:
     """Convert the full V6 research report into a concise stock-only email view.
 
     The full Markdown/JSON artifacts keep diagnostics, source health and validation
-    details.  The email intentionally removes implementation/runtime noise and
-    keeps only market context, stock decisions, multi-horizon forecasts, trade
-    plans, catalysts/risks and meaningful historical validation.
+    details. The investor email keeps one execution hierarchy: daily action and a
+    deterministic V6 trade plan are authoritative only when a positive position
+    allowance makes the plan active; V4 narrative remains explanatory.
     """
     text = str(report or "").replace("\r\n", "\n").strip()
     if not text:
@@ -229,7 +567,7 @@ def build_investor_email_markdown(report: str) -> str:
     text = text.replace("## V6.1 多周期确定性预测", "## 多周期预测")
     text = re.sub(
         r"(?m)^> 5D、10D、20D 使用不同的确定性权重；.*$",
-        "> 5D / 10D / 20D 分别观察短、中、稍长周期；分数用于相对比较，不直接等同于胜率。",
+        "> 5D / 10D / 20D 分别观察短、中、稍长周期；分数与因子覆盖率用于相对比较，均不直接等同于胜率或概率。",
         text,
     )
 
@@ -246,6 +584,13 @@ def build_investor_email_markdown(report: str) -> str:
     )
 
     text = text.replace("## 3. 标的融合分析", "## 标的详解")
+    text = text.replace(
+        "## 标的详解",
+        "## 标的详解\n\n> 执行优先级：今日动作优先；仅当确定性交易计划具有正数最大仓位上限时，"
+        "其价格口径才可执行并优先。组合风控将最大仓位压至 0 时，保留价位不可执行，"
+        "不能覆盖其他上下文；投研摘要仅用于解释。",
+        1,
+    )
     replacements = (
         ("V4 投研摘要", "投研摘要"),
         ("V6 确定性视角", "量化视角"),
@@ -256,11 +601,15 @@ def build_investor_email_markdown(report: str) -> str:
         ("V4 仓位参考", "仓位参考"),
         ("V4 价格参考", "价格参考"),
         ("V6确定性方向", "量化方向"),
+        ("V4执行护栏", "执行护栏"),
         ("V4 ", ""),
         ("V6 ", ""),
     )
     for old, new in replacements:
         text = text.replace(old, new)
+
+    text = _standardize_stock_cards(text)
+    text = _normalize_us_investor_terms(text)
 
     # Remove operational/model/source-health sections from email.
     text = re.sub(
