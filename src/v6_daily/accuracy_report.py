@@ -67,7 +67,7 @@ _CNY_FACT_CONTEXT_RE = re.compile(
 # preserve a conjunction when it directly continues the same price phrase
 # (for example, “股价跌破并收于110元”).
 _WATCH_PRICE_BARRIER_RE = re.compile(
-    r"(?:[，,。；;\n]|但|然而|不过|可是|却|并且|同时|以及|然后|而且|或者|并|且|或)"
+    r"(?:[，,。；;！？!?\n]|但|然而|不过|可是|却|并且|同时|以及|然后|而且|或者|并|且|或)"
 )
 _PRICE_CONTINUATION_PREFIX_RE = re.compile(
     r"^\s*(?:收于|站上|守住|回踩|触及|跌至|涨至|达到|到达|逼近|接近|"
@@ -283,7 +283,7 @@ def _normalize_watch_price_yuan(line: str) -> str:
         for boundary in _WATCH_PRICE_BARRIER_RE.finditer(prefix):
             token = boundary.group(0)
             suffix = prefix[boundary.end() :]
-            if token not in {"，", ",", "。", "；", ";", "\n", "但", "然而", "不过", "可是", "却"}:
+            if token not in {"，", ",", "。", "；", ";", "！", "？", "!", "?", "\n", "但", "然而", "不过", "可是", "却"}:
                 if _PRICE_CONTINUATION_PREFIX_RE.match(suffix):
                     continue
             boundary_end = max(boundary_end, boundary.end())
