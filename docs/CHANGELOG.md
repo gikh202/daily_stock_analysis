@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] V6 最终美股决策邮件统一执行口径：存在确定性风控计划时只展示其入场、止损、目标与最大仓位，并将无确定性计划的回退交易方案显式标记为非执行参考；隐藏未校准上行概率，统一美元/美东时区/证据覆盖标签，消除禁止追高与“可追”冲突及明显 A 股模板污染；完整原始 Markdown/JSON 继续保留用于审计。
 - [新功能] V6.4 Research Governance 在周度 Accuracy / Alpha Lab 中新增 Alpha 年度 Walk-forward、统一全局 non-overlap 时间轴校准、Holm-Bonferroni 多重检验、方向暴露诊断、0/10/20/40bps 成本敏感度与冻结候选 forward-only 观察；冻结候选同时锁定 Shadow variant revision/profile identity，定义漂移时 forward evidence 自动失效；保持 Champion、生产阈值、自动调权/晋级、自动交易与通知链路不变。
 - [新功能] V6.3 Alpha Target Lab 在周度严格 no-lookahead 回放中新增相对 SPY 的方向目标、0–2/2–5/5–10/10pt+ 固定分数余量校准桶与按 as-of SPY 趋势/波动划分的 Regime Matrix；统一报告 Wilson 95% CI 和方向化 Alpha Spread，保持 Champion、生产阈值、自动调权/晋级与既有 Promotion Gate 不变。
 - [改进] V6.2 周度 Accuracy Replay 新增研究型置信度/选择性切片：按现有 5D/10D/20D bullish/bearish 触发阈值计算 0/2/5/10pt 分数余量，先过滤方向信号再做全时间轴 non-overlap，报告参与率、Wilson 95% CI、方向策略收益与 SPY 超额；仅用于研究，不自动修改生产阈值、Champion 权重或晋级门禁。
