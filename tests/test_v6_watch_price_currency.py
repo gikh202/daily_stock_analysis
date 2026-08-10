@@ -103,6 +103,14 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         == "若营收突破99元则关注基本面"
     )
     assert (
+        _normalize_watch_price_yuan("若产品单价跌破99元则观察销量")
+        == "若产品单价跌破99元则观察销量"
+    )
+    assert (
+        _normalize_watch_price_yuan("若商品价格突破99元则观察需求")
+        == "若商品价格突破99元则观察需求"
+    )
+    assert (
         _normalize_watch_price_yuan("若产品成本恶化后股价跌破99元则止损")
         == "若产品成本恶化后股价跌破$99则止损"
     )
@@ -127,11 +135,14 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         == "关注订阅价格99元的续费反馈"
     )
     assert _normalize_watch_price_yuan("若价格跌破110元则止损") == "若价格跌破$110则止损"
+    assert _normalize_watch_price_yuan("若价格突破110元则买入") == "若价格突破$110则买入"
     assert _normalize_watch_price_yuan("若股价接近99元则止损") == "若股价接近$99则止损"
     assert _normalize_watch_price_yuan("若跌至110元则止损") == "若跌至$110则止损"
     assert _normalize_watch_price_yuan("若触及110元则减仓") == "若触及$110则减仓"
+    assert _normalize_watch_price_yuan("若回踩110元则分批") == "若回踩$110则分批"
     assert _normalize_watch_price_yuan("跌破 110 元止损") == "跌破 $110止损"
     assert _normalize_watch_price_yuan("股价回踩120-121 元分批") == "股价回踩$120-121分批"
+    assert _normalize_watch_price_yuan("目标位110元") == "目标位$110"
 
 
 def test_negated_chase_span_stops_at_clause_connectors() -> None:
