@@ -9,6 +9,9 @@ from .accuracy_lab import build_shadow_forecasts, wilson_interval
 from .replay import _features_at, _finite, load_sqlite_series
 
 
+STRATEGY_RETURN_METHOD = "gross_directional_position_v1"
+
+
 @dataclass(frozen=True)
 class AccuracyReplayObservation:
     variant: str
@@ -21,6 +24,8 @@ class AccuracyReplayObservation:
     future_return_pct: float
     directional_hit: int
     excess_vs_spy_pct: Optional[float]
+    strategy_return_pct: float
+    strategy_excess_vs_spy_pct: Optional[float]
 
 
 def _spy_future_return(
@@ -39,6 +44,15 @@ def _spy_future_return(
     if start is None or end is None or start <= 0:
         return None
     return (end / start - 1.0) * 100.0
+
+
+def _directional_position(direction: str) -> float:
+    normalized = str(direction or "").strip().lower()
+    if normalized == "bullish":
+        return 1.0
+    if normalized == "bearish":
+        return -1.0
+    return 0.0
 
 
 def replay_accuracy_lab(
@@ -83,7 +97,7 @@ def replay_accuracy_lab(
                     continue
                 future_return = (future / current - 1.0) * 100.0
                 spy_return = _spy_future_return(series, as_of=as_of, horizon=horizon_i)
-                excess = None if spy_return is None else future_return - spy_return
+                underlying_excess = None if spy_return is None else future_return - spy_return
                 for variant, forecast in variants.items():
                     block = forecast.get(f"{horizon_i}d") or {}
                     direction = str(block.get("direction") or "neutral")
@@ -93,6 +107,11 @@ def replay_accuracy_lab(
                         hit = int(future_return < 0.0)
                     else:
                         hit = int(abs(future_return) <= abs(float(neutral_band_pct)))
+                    position = _directional_position(direction)
+                    strategy_return = position * future_return
+                    strategy_excess = (
+                        None if spy_return is None else strategy_return - spy_return
+                    )
                     observations.append(
                         AccuracyReplayObservation(
                             variant=variant,
@@ -104,7 +123,13 @@ def replay_accuracy_lab(
                             direction=direction,
                             future_return_pct=round(future_return, 6),
                             directional_hit=hit,
-                            excess_vs_spy_pct=None if excess is None else round(excess, 6),
+                            excess_vs_spy_pct=(
+                                None if underlying_excess is None else round(underlying_excess, 6)
+                            ),
+                            strategy_return_pct=round(strategy_return, 6),
+                            strategy_excess_vs_spy_pct=(
+                                None if strategy_excess is None else round(strategy_excess, 6)
+                            ),
                         )
                     )
     return observations
@@ -114,15 +139,25 @@ def _metric(rows: Sequence[AccuracyReplayObservation]) -> Dict[str, Any]:
     n = len(rows)
     hits = sum(int(item.directional_hit) for item in rows)
     low, high = wilson_interval(hits, n)
-    returns = [item.future_return_pct for item in rows]
-    excess = [item.excess_vs_spy_pct for item in rows if item.excess_vs_spy_pct is not None]
+    strategy_returns = [item.strategy_return_pct for item in rows]
+    strategy_excess = [
+        item.strategy_excess_vs_spy_pct
+        for item in rows
+        if item.strategy_excess_vs_spy_pct is not None
+    ]
+    underlying_returns = [item.future_return_pct for item in rows]
+    underlying_excess = [
+        item.excess_vs_spy_pct for item in rows if item.excess_vs_spy_pct is not None
+    ]
     return {
         "samples": n,
         "directional_hit_rate_pct": None if n == 0 else round(100.0 * hits / n, 2),
         "hit_rate_ci95_low_pct": low,
         "hit_rate_ci95_high_pct": high,
-        "avg_return_pct": None if not returns else round(statistics.fmean(returns), 4),
-        "avg_excess_vs_spy_pct": None if not excess else round(statistics.fmean(excess), 4),
+        "avg_return_pct": None if not strategy_returns else round(statistics.fmean(strategy_returns), 4),
+        "avg_excess_vs_spy_pct": None if not strategy_excess else round(statistics.fmean(strategy_excess), 4),
+        "avg_underlying_return_pct": None if not underlying_returns else round(statistics.fmean(underlying_returns), 4),
+        "avg_underlying_excess_vs_spy_pct": None if not underlying_excess else round(statistics.fmean(underlying_excess), 4),
     }
 
 
@@ -216,6 +251,14 @@ def summarize_accuracy_replay(
     return {
         "method": "strict no-lookahead rolling price-feature replay",
         "scope": "price/volume/benchmark features only; current SEC/FRED snapshots are excluded from historical replay",
+        "strategy_return_method": STRATEGY_RETURN_METHOD,
+        "strategy_return_definition": {
+            "bullish_position": 1.0,
+            "bearish_position": -1.0,
+            "neutral_position": 0.0,
+            "benchmark": "SPY long-only",
+            "trading_costs": "excluded",
+        },
         "minimum_samples": max(3, int(min_samples)),
         "promotion_min_samples": floor,
         "observations": len(observations),
