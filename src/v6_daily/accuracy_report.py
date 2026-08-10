@@ -50,9 +50,10 @@ _WATCH_PRICE_CONTEXT_RE = re.compile(
     r"(?:价格|股价|现价|收盘价|开盘价|入场|买入|买点|卖点|止损|止盈|目标|"
     r"支撑|压力|突破|上破|下破|跌破|站上|守住|回踩|高开|低开|价位|点位|区间)"
 )
-_WATCH_PRICE_BARRIER_RE = re.compile(
-    r"(?:[，,。；;\n]|并且|同时|以及|然后|但|且|而|或|并|与)"
+_CNY_FACT_CONTEXT_RE = re.compile(
+    r"(?:售价|定价|人民币|成本|费用|营收|收入|销售额|订单金额|产品价格|服务价格)"
 )
+_WATCH_PRICE_BARRIER_RE = re.compile(r"[，,。；;\n]")
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -265,9 +266,13 @@ def _normalize_watch_price_yuan(line: str) -> str:
         for amount in _NON_YUAN_PRICE_AMOUNT_RE.finditer(prefix):
             boundary_end = max(boundary_end, amount.end())
         local_prefix = prefix[boundary_end:]
+        price_contexts = list(_WATCH_PRICE_CONTEXT_RE.finditer(local_prefix))
+        cny_contexts = list(_CNY_FACT_CONTEXT_RE.finditer(local_prefix))
+        latest_price_context = price_contexts[-1].start() if price_contexts else -1
+        latest_cny_context = cny_contexts[-1].start() if cny_contexts else -1
 
         output.append(line[cursor : match.start()])
-        if _WATCH_PRICE_CONTEXT_RE.search(local_prefix):
+        if latest_price_context >= 0 and latest_price_context > latest_cny_context:
             output.append(f"${match.group(1)}")
         else:
             output.append(match.group(0))
