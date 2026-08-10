@@ -127,6 +127,42 @@ For every historical as-of date, this replay builds features only from observati
 
 Historical replay intentionally excludes **current** SEC/FRED snapshots. Without a true point-in-time historical SEC/FRED dataset, injecting today's official/macro values into old dates would be look-ahead leakage. The replay therefore measures the historically reconstructible price/volume/benchmark layer and labels that scope explicitly.
 
+## Weekly isolated history backfill
+
+The scheduled `V6 准确率研究周报` must not report a successful research result merely because a newly created production cache contains only a few recent trading days. The replay needs more than 60 lookback bars plus the longest 20-bar outcome horizon before it can create an observation.
+
+The weekly workflow therefore prepares a separate research database before replay:
+
+```text
+production data/stock_analysis.db (read-only)
+        ↓ SQLite backup
+v6_research/stock_analysis_research.db
+        ↓ existing YfinanceFetcher, fixed 3-year window
+current target symbols + SPY + QQQ
+        ↓
+strict no-lookahead Champion/Challenger replay
+```
+
+Safety and provenance rules:
+
+- the production SQLite database is opened read-only and is never used as the backfill write target;
+- the clone is created with SQLite's backup API so the research job starts from a consistent production snapshot;
+- historical OHLCV is fetched through the repository's existing `YfinanceFetcher` path instead of adding a parallel market-data implementation;
+- the research clone uses a fixed three-year window and requires at least 81 bars per replay-eligible symbol;
+- `SPY` and `QQQ` are backfilled as benchmark histories; both must meet the minimum history requirement;
+- an individual target with insufficient history can be reported as partial, but at least one target plus both benchmarks must be replay-eligible;
+- the workflow records source row counts before and after backfill and fails if the production source changed;
+- the weekly validation now fails when `observations=0`, when Champion 5D/10D/20D results are missing, or when independent samples, Wilson CI, SPY excess, or yearly walk-forward evidence is absent;
+- the temporary research SQLite file is not uploaded as an artifact and does not replace the normal production cache.
+
+The backfill audit sidecar is included in the weekly report artifact:
+
+```text
+v6_reports/accuracy_weekly/v6_accuracy_history_backfill.json
+```
+
+No new Secret or Repository Variable is required for this preparation step. YFinance is already an existing free fallback dependency of the project.
+
 ## Persistence
 
 V6.2 adds migration-safe tables to `v6_data/v6_daily.db`:
@@ -154,6 +190,14 @@ Historical replay is intentionally an explicit research command rather than an e
 
 ```text
 v6_reports/v6_accuracy_replay.json
+```
+
+The weekly workflow additionally uploads:
+
+```text
+v6_reports/accuracy_weekly/v6_accuracy_weekly.json
+v6_reports/accuracy_weekly/v6_accuracy_weekly.md
+v6_reports/accuracy_weekly/v6_accuracy_history_backfill.json
 ```
 
 ## Configuration
