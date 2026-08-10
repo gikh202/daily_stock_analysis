@@ -11,9 +11,11 @@ _TYPE = {"STOCK": "个股", "ETF": "ETF"}
 
 
 _EMAIL_SUBJECT_META_RE = re.compile(r"^\[dsa-email-subject\]:\s+#\s+\(([^)\n]+)\)\s*$", re.MULTILINE)
-_CHASE_PATTERN = r"(?:日内)?(?:可|可以)追(?:高|涨|价)?"
+_CHASE_SUFFIX_OR_BOUNDARY = r"(?:高|涨|价|买|(?=$|[\s，,。；;、但]))"
+_CHASE_PATTERN = rf"(?:日内)?(?:可|可以)追{_CHASE_SUFFIX_OR_BOUNDARY}"
 _NEGATED_CHASE_PATTERN = (
-    r"(?:不可以|不可|不应|禁止|严禁|不要|不宜|切勿|勿|别|不)\s*追(?:高|涨|价)?"
+    rf"(?:不可以|不可|不应|不得|禁止|严禁|不要|不宜|切勿|勿|别|不)\s*追"
+    rf"{_CHASE_SUFFIX_OR_BOUNDARY}"
 )
 _PRICE_YUAN_RE = re.compile(
     r"(?<![\d.,])\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
