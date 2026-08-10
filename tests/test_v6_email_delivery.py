@@ -62,7 +62,7 @@ def _full_report() -> str:
 ### 1. MSFT · Microsoft Corporation · 最终：观察 · 方向一致
 
 - **最终结论**：**观察**。V4 10d预测看多，V6确定性方向看多，机会分72.0、风险分38.0，两层方向一致。 V4执行护栏：等待盘中确认，严禁追高。
-- **V4 投研摘要**：云业务保持增长，趋势偏多但等待价格确认（证据来自公司公告）。
+- **V4 投研摘要**：云业务保持增长，趋势偏多但等待价格确认（证据来自公司公告）。新闻证据可追溯。
 - **V6 确定性视角**：方向 **看多** | 预测分 **78.0** | 机会/质量/风险 **72.0/84.0/38.0** | 证据 **80%**
 - **V6 因子**：趋势 82 | 动量 70 | 相对强弱 76 | 量能 64 | 基本面 88 | 市场状态 80
 - **预测层 vs 执行层**：10d **看多** | 预期收益 **+5.0%** | 模型上行概率 **65%（未校准）** | 当前执行 **观望**
@@ -89,7 +89,7 @@ def _full_report() -> str:
 
 ### 2. GOOGL · Alphabet Inc. · 最终：等待 · 部分一致
 
-- **最终结论**：**等待**。10d预测看多，但V6确定性方向中性，尚未形成完全共振。 V4执行护栏：暂不追高。
+- **最终结论**：**等待**。10d预测看多，但V6确定性方向中性，尚未形成完全共振。 V4执行护栏：暂不追高，接近压力时不得追买。
 - **V4 投研摘要**：中长期趋势仍在，等待确定性风控计划确认后再判断短中期机会；新品在中国售价99元（证据不足）。
 - **V6 确定性视角**：方向 **中性** | 预测分 **56.0** | 机会/质量/风险 **59.0/70.0/45.0** | 证据 **77%**
 - **融合交易计划**：
@@ -149,6 +149,8 @@ def test_investor_email_keeps_one_canonical_execution_view() -> None:
     assert "因子覆盖80%" in email
     assert "分数与因子覆盖率用于相对比较" in email
     assert "（证据来自公司公告）" in email
+    assert "新闻证据可追溯" in email
+    assert "新闻证据仅视为强势确认" not in email
     assert "（因子覆盖来自公司公告）" not in email
     assert "## 标的详解" in email
     assert "执行优先级：今日动作与确定性交易计划优先" in email
@@ -204,7 +206,7 @@ def test_investor_email_marks_fallback_plan_as_non_execution() -> None:
     assert "新品在中国售价99元（证据不足）" in email
     assert "新品在中国售价$99" not in email
     assert "因子覆盖不足" not in email
-    assert "执行护栏：暂不追高" in email
+    assert "执行护栏：暂不追高，接近压力时不得追买" in email
     assert "若站上365可以追涨" not in email
     assert "若站上365仅视为强势确认，不追价" in email
     assert "**辅助交易计划（未触发）**" in email
