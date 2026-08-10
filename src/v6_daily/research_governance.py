@@ -4,6 +4,14 @@ import math
 import statistics
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from .accuracy import HORIZON_BEARISH_THRESHOLD, HORIZON_BULLISH_THRESHOLD
+from .accuracy_lab import (
+    ACCURACY_LAB_VERSION,
+    SHADOW_VARIANT_REVISION,
+    _variant_identity,
+    shadow_profiles,
+    wilson_interval,
+)
 from .lab_replay import (
     ALPHA_CALIBRATION_BUCKETS,
     AccuracyReplayObservation,
@@ -21,12 +29,43 @@ COMMON_TIMELINE_CALIBRATION_METHOD = "global_alpha_non_overlap_then_fixed_margin
 MULTIPLE_TESTING_METHOD = "holm_bonferroni_exact_one_sided_binomial_v1"
 DIRECTION_DIAGNOSTICS_METHOD = "global_alpha_non_overlap_by_direction_v1"
 COST_SENSITIVITY_METHOD = "global_alpha_non_overlap_fixed_total_cost_bps_v1"
-FORWARD_WATCH_METHOD = "frozen_candidates_global_non_overlap_post_freeze_v1"
+FORWARD_WATCH_METHOD = "frozen_candidates_global_non_overlap_post_freeze_v2"
 ALPHA_COST_BPS = (0, 10, 20, 40)
 FORWARD_FREEZE_DATE = "2026-08-10"
-FROZEN_ALPHA_CANDIDATES = (
-    ("momentum_focus", 10),
-    ("relative_strength_focus", 20),
+
+# The frozen candidates are hypotheses, not merely labels.  Their profile
+# identities, direction thresholds and Accuracy Lab revision are captured at
+# the discovery freeze. If any of those definitions drift, later replay rows
+# are reported as incompatible instead of being counted as forward evidence.
+FROZEN_ALPHA_CANDIDATE_SPECS = (
+    {
+        "variant": "momentum_focus",
+        "horizon_days": 10,
+        "accuracy_lab_version": "v6.2-accuracy-lab.2",
+        "shadow_variant_revision": "v1",
+        "bullish_threshold": 60.0,
+        "bearish_threshold": 40.0,
+        "profile_identities": {
+            "STOCK": "momentum_focus@v1-13288051",
+            "ETF": "momentum_focus@v1-418a7262",
+        },
+    },
+    {
+        "variant": "relative_strength_focus",
+        "horizon_days": 20,
+        "accuracy_lab_version": "v6.2-accuracy-lab.2",
+        "shadow_variant_revision": "v1",
+        "bullish_threshold": 62.0,
+        "bearish_threshold": 38.0,
+        "profile_identities": {
+            "STOCK": "relative_strength_focus@v1-fbd6365d",
+            "ETF": "relative_strength_focus@v1-13734693",
+        },
+    },
+)
+FROZEN_ALPHA_CANDIDATES = tuple(
+    (str(spec["variant"]), int(spec["horizon_days"]))
+    for spec in FROZEN_ALPHA_CANDIDATE_SPECS
 )
 
 
@@ -171,8 +210,6 @@ def _net_alpha_metric(
     ]
     n = len(net_returns)
     positive = sum(1 for value in net_returns if value > 0.0)
-    from .accuracy_lab import wilson_interval
-
     low, high = wilson_interval(positive, n)
     return {
         "samples": n,
@@ -237,11 +274,7 @@ def _multiple_testing(
         (str(item.get("variant") or ""), int(item.get("horizon_days") or 0)): item
         for item in result_rows
     }
-    keys = sorted(
-        lookup,
-        key=lambda item: (item[0] != "champion", item[0], item[1]),
-    )
-    raw_p_values: list[float] = []
+    keys = sorted(lookup, key=lambda item: (item[0] != "champion", item[0], item[1]))
     temporary: list[tuple[tuple[str, int], int, int, float]] = []
     for key in keys:
         variant, horizon = key
@@ -253,11 +286,9 @@ def _multiple_testing(
         independent = _non_overlapping(_eligible_alpha(rows), int(horizon))
         n = len(independent)
         hits = sum(int(item.alpha_target_hit or 0) for item in independent)
-        raw_p = _exact_one_sided_binomial_pvalue(hits, n)
-        raw_p_values.append(raw_p)
-        temporary.append((key, n, hits, raw_p))
+        temporary.append((key, n, hits, _exact_one_sided_binomial_pvalue(hits, n)))
 
-    adjusted_values = _holm_adjust(raw_p_values)
+    adjusted_values = _holm_adjust([item[3] for item in temporary])
     mapping: Dict[tuple[str, int], Dict[str, Any]] = {}
     candidates: list[Dict[str, Any]] = []
     floor = max(
@@ -301,6 +332,48 @@ def _multiple_testing(
     return mapping, candidates
 
 
+def _current_frozen_definition(spec: Mapping[str, Any]) -> Dict[str, Any]:
+    variant = str(spec.get("variant") or "")
+    horizon = int(spec.get("horizon_days") or 0)
+    identities: Dict[str, str] = {}
+    for instrument_type in ("STOCK", "ETF"):
+        profiles = shadow_profiles(instrument_type)
+        weights = (profiles.get(variant) or {}).get(horizon)
+        identities[instrument_type] = (
+            "missing"
+            if not weights
+            else _variant_identity(variant, weights)
+        )
+    return {
+        "variant": variant,
+        "horizon_days": horizon,
+        "accuracy_lab_version": ACCURACY_LAB_VERSION,
+        "shadow_variant_revision": SHADOW_VARIANT_REVISION,
+        "bullish_threshold": float(HORIZON_BULLISH_THRESHOLD.get(horizon, math.nan)),
+        "bearish_threshold": float(HORIZON_BEARISH_THRESHOLD.get(horizon, math.nan)),
+        "profile_identities": identities,
+    }
+
+
+def _definition_matches_freeze(
+    frozen: Mapping[str, Any], current: Mapping[str, Any]
+) -> bool:
+    return (
+        str(current.get("variant") or "") == str(frozen.get("variant") or "")
+        and int(current.get("horizon_days") or 0) == int(frozen.get("horizon_days") or 0)
+        and str(current.get("accuracy_lab_version") or "")
+        == str(frozen.get("accuracy_lab_version") or "")
+        and str(current.get("shadow_variant_revision") or "")
+        == str(frozen.get("shadow_variant_revision") or "")
+        and float(current.get("bullish_threshold"))
+        == float(frozen.get("bullish_threshold"))
+        and float(current.get("bearish_threshold"))
+        == float(frozen.get("bearish_threshold"))
+        and dict(current.get("profile_identities") or {})
+        == dict(frozen.get("profile_identities") or {})
+    )
+
+
 def _forward_watch(
     payload: Mapping[str, Any],
     observations: Sequence[AccuracyReplayObservation],
@@ -308,13 +381,17 @@ def _forward_watch(
     floor = max(3, int(payload.get("minimum_samples") or 50))
     records: list[Dict[str, Any]] = []
     raw_forward_p_values: list[float] = []
-    for variant, horizon in FROZEN_ALPHA_CANDIDATES:
+    for frozen_spec in FROZEN_ALPHA_CANDIDATE_SPECS:
+        variant = str(frozen_spec["variant"])
+        horizon = int(frozen_spec["horizon_days"])
+        current_definition = _current_frozen_definition(frozen_spec)
+        definition_matches = _definition_matches_freeze(frozen_spec, current_definition)
         rows = [
             item
             for item in observations
-            if item.variant == variant and int(item.horizon_days) == int(horizon)
+            if item.variant == variant and int(item.horizon_days) == horizon
         ]
-        independent = _non_overlapping(_eligible_alpha(rows), int(horizon))
+        independent = _non_overlapping(_eligible_alpha(rows), horizon)
         discovery = [item for item in independent if item.as_of < FORWARD_FREEZE_DATE]
         forward = [item for item in independent if item.as_of >= FORWARD_FREEZE_DATE]
         forward_metric = _alpha_metric(forward)
@@ -328,6 +405,9 @@ def _forward_watch(
                 "horizon_days": horizon,
                 "freeze_date": FORWARD_FREEZE_DATE,
                 "selection_state": "frozen",
+                "definition_matches_freeze": definition_matches,
+                "frozen_definition": dict(frozen_spec),
+                "current_definition": current_definition,
                 "discovery": _alpha_metric(discovery),
                 "forward": forward_metric,
                 "_raw_forward_p": raw_p,
@@ -342,7 +422,9 @@ def _forward_watch(
         ci_low = forward.get("alpha_hit_ci95_low_pct")
         avg_alpha = forward.get("avg_alpha_trade_return_pct")
         significant = bool(adjusted < 0.05)
-        if n == 0:
+        if not record.get("definition_matches_freeze"):
+            status = "definition_drifted"
+        elif n == 0:
             status = "waiting_for_outcomes"
         elif n < floor:
             status = "collecting"
@@ -368,10 +450,14 @@ def _forward_watch(
         "method": FORWARD_WATCH_METHOD,
         "freeze_date": FORWARD_FREEZE_DATE,
         "selection_basis": (
-            "Frozen after the 2026-08-10 V6.3 historical discovery; "
-            "post-freeze observations cannot reselect the watched candidates."
+            "Frozen after the 2026-08-10 V6.3 historical discovery; candidate labels, "
+            "horizons, shadow profile identities, thresholds and Accuracy Lab revision "
+            "are immutable. Post-freeze rows are incompatible if the definition drifts."
         ),
         "candidate_family_size": len(records),
+        "definitions_match_freeze": all(
+            bool(record.get("definition_matches_freeze")) for record in records
+        ),
         "ready_for_manual_review": ready,
         "auto_promotion": False,
         "candidates": records,
@@ -396,9 +482,7 @@ def enrich_accuracy_payload(
             and int(observation.horizon_days) == horizon
         ]
         item["alpha_yearly_walk_forward"] = _alpha_yearly_walk_forward(rows, horizon)
-        item["alpha_calibration_common_timeline"] = _common_timeline_calibration(
-            rows, horizon
-        )
+        item["alpha_calibration_common_timeline"] = _common_timeline_calibration(rows, horizon)
         item["alpha_direction_diagnostics"] = _direction_diagnostics(rows, horizon)
         item["alpha_cost_sensitivity"] = _cost_sensitivity(rows, horizon)
         item["alpha_multiple_testing"] = multiple_testing.get(
@@ -420,9 +504,7 @@ def enrich_accuracy_payload(
     enriched["results"] = result_rows
     enriched["research_governance_version"] = RESEARCH_GOVERNANCE_VERSION
     enriched["alpha_yearly_walk_forward_method"] = ALPHA_YEARLY_WALK_FORWARD_METHOD
-    enriched["alpha_calibration_common_timeline_method"] = (
-        COMMON_TIMELINE_CALIBRATION_METHOD
-    )
+    enriched["alpha_calibration_common_timeline_method"] = COMMON_TIMELINE_CALIBRATION_METHOD
     enriched["alpha_multiple_testing_method"] = MULTIPLE_TESTING_METHOD
     enriched["alpha_direction_diagnostics_method"] = DIRECTION_DIAGNOSTICS_METHOD
     enriched["alpha_cost_sensitivity_method"] = COST_SENSITIVITY_METHOD
@@ -454,9 +536,7 @@ def enrich_accuracy_payload_from_stock_db(
     codes: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     requested = [str(code).upper() for code in (codes or []) if str(code).strip()]
-    source_codes = (
-        list(dict.fromkeys(requested + ["SPY", "QQQ"])) if requested else None
-    )
+    source_codes = list(dict.fromkeys(requested + ["SPY", "QQQ"])) if requested else None
     series = load_sqlite_series(stock_db_path, source_codes)
     observations = replay_accuracy_lab(series, codes=requested or None)
     return enrich_accuracy_payload(payload, observations)
@@ -482,33 +562,23 @@ def validate_research_governance(payload: Mapping[str, Any]) -> None:
         horizon = int(item.get("horizon_days") or 0)
         alpha = item.get("alpha_target") or {}
         alpha_raw_n = int((alpha.get("raw") or {}).get("samples") or 0)
-        alpha_independent_n = int(
-            (alpha.get("non_overlapping") or {}).get("samples") or 0
-        )
+        alpha_independent_n = int((alpha.get("non_overlapping") or {}).get("samples") or 0)
 
         yearly = list(item.get("alpha_yearly_walk_forward") or [])
         if alpha_raw_n > 0 and not yearly:
             raise ValueError(f"missing alpha yearly walk-forward for {horizon}D")
         if sum(int((year.get("raw") or {}).get("samples") or 0) for year in yearly) != alpha_raw_n:
             raise ValueError(f"alpha yearly raw partition mismatch for {horizon}D")
-        if (
-            sum(
-                int((year.get("non_overlapping") or {}).get("samples") or 0)
-                for year in yearly
-            )
-            != alpha_independent_n
-        ):
-            raise ValueError(
-                f"alpha yearly independent partition mismatch for {horizon}D"
-            )
+        if sum(
+            int((year.get("non_overlapping") or {}).get("samples") or 0)
+            for year in yearly
+        ) != alpha_independent_n:
+            raise ValueError(f"alpha yearly independent partition mismatch for {horizon}D")
 
         common = item.get("alpha_calibration_common_timeline") or {}
         buckets = list(common.get("buckets") or [])
         if [bucket.get("label") for bucket in buckets] != [
-            "0-2pt",
-            "2-5pt",
-            "5-10pt",
-            "10pt+",
+            "0-2pt", "2-5pt", "5-10pt", "10pt+"
         ]:
             raise ValueError(f"invalid common-timeline calibration buckets for {horizon}D")
         independent_bucket_n = sum(
@@ -516,32 +586,22 @@ def validate_research_governance(payload: Mapping[str, Any]) -> None:
             for bucket in buckets
         )
         independent_unscored_n = int(
-            ((common.get("unscored") or {}).get("non_overlapping") or {}).get(
-                "samples"
-            )
-            or 0
+            ((common.get("unscored") or {}).get("non_overlapping") or {}).get("samples") or 0
         )
         if independent_bucket_n + independent_unscored_n != alpha_independent_n:
-            raise ValueError(
-                f"common-timeline calibration partition mismatch for {horizon}D"
-            )
+            raise ValueError(f"common-timeline calibration partition mismatch for {horizon}D")
 
         directions = list(item.get("alpha_direction_diagnostics") or [])
         if [entry.get("direction") for entry in directions] != ["bullish", "bearish"]:
             raise ValueError(f"invalid direction diagnostics for {horizon}D")
-        if (
-            sum(
-                int((entry.get("non_overlapping") or {}).get("samples") or 0)
-                for entry in directions
-            )
-            != alpha_independent_n
-        ):
+        if sum(
+            int((entry.get("non_overlapping") or {}).get("samples") or 0)
+            for entry in directions
+        ) != alpha_independent_n:
             raise ValueError(f"direction diagnostics partition mismatch for {horizon}D")
 
         costs = list(item.get("alpha_cost_sensitivity") or [])
-        if [int(entry.get("total_cost_bps") or 0) for entry in costs] != list(
-            ALPHA_COST_BPS
-        ):
+        if [int(entry.get("total_cost_bps") or 0) for entry in costs] != list(ALPHA_COST_BPS):
             raise ValueError(f"invalid cost sensitivity grid for {horizon}D")
         if any(int(entry.get("samples") or 0) != alpha_independent_n for entry in costs):
             raise ValueError(f"cost sensitivity sample mismatch for {horizon}D")
@@ -550,10 +610,7 @@ def validate_research_governance(payload: Mapping[str, Any]) -> None:
             for entry in costs
             if entry.get("avg_net_alpha_trade_return_pct") is not None
         ]
-        if any(
-            float(right) > float(left) + 1e-9
-            for left, right in zip(avg_values, avg_values[1:])
-        ):
+        if any(float(right) > float(left) + 1e-9 for left, right in zip(avg_values, avg_values[1:])):
             raise ValueError(f"cost sensitivity must not improve with higher cost for {horizon}D")
 
         testing = item.get("alpha_multiple_testing") or {}
@@ -574,13 +631,27 @@ def validate_research_governance(payload: Mapping[str, Any]) -> None:
     if watch.get("auto_promotion") is not False:
         raise ValueError("forward watch must not auto-promote")
     watched = list(watch.get("candidates") or [])
-    expected = list(FROZEN_ALPHA_CANDIDATES)
     actual = [
         (str(item.get("variant") or ""), int(item.get("horizon_days") or 0))
         for item in watched
     ]
-    if actual != expected:
+    if actual != list(FROZEN_ALPHA_CANDIDATES):
         raise ValueError("frozen forward candidate set drifted")
+    if len(watched) != len(FROZEN_ALPHA_CANDIDATE_SPECS):
+        raise ValueError("frozen forward candidate spec count drifted")
+    for record, spec in zip(watched, FROZEN_ALPHA_CANDIDATE_SPECS):
+        if dict(record.get("frozen_definition") or {}) != dict(spec):
+            raise ValueError("frozen forward candidate definition drifted")
+        matches = bool(record.get("definition_matches_freeze"))
+        status = str(record.get("status") or "")
+        if not matches and status != "definition_drifted":
+            raise ValueError("definition drift must invalidate forward evidence")
+        if status == "ready_for_manual_review" and not matches:
+            raise ValueError("definition-drifted candidate cannot be review-ready")
+    if bool(watch.get("definitions_match_freeze")) != all(
+        bool(item.get("definition_matches_freeze")) for item in watched
+    ):
+        raise ValueError("forward definition aggregate state mismatch")
 
 
 def _fmt(value: Any, *, suffix: str = "", digits: int = 2) -> str:
@@ -599,6 +670,7 @@ def _alpha_ci(metric: Mapping[str, Any]) -> str:
 
 
 def render_research_governance_markdown(payload: Mapping[str, Any]) -> str:
+    watch = payload.get("forward_alpha_watch") or {}
     lines = [
         "## V6.4 统计治理摘要",
         "",
@@ -608,7 +680,8 @@ def render_research_governance_markdown(payload: Mapping[str, Any]) -> str:
         f"- Alpha 年度稳定性：**{payload.get('alpha_yearly_walk_forward_method', '-')}**",
         f"- 统一时间轴校准：**{payload.get('alpha_calibration_common_timeline_method', '-')}**",
         f"- 成本敏感度：**{payload.get('alpha_cost_sensitivity_method', '-')}**",
-        f"- 冻结候选 Forward Watch：**{(payload.get('forward_alpha_watch') or {}).get('method', '-')}**",
+        f"- 冻结候选 Forward Watch：**{watch.get('method', '-')}**",
+        f"- 冻结候选定义一致：**{watch.get('definitions_match_freeze', False)}**",
         f"- 经 Holm-Bonferroni 后的 Alpha 研究候选：**{len(payload.get('alpha_research_candidates') or [])}**",
         "",
         "## Alpha 多重检验（全模型 × 全周期）",
@@ -634,9 +707,7 @@ def render_research_governance_markdown(payload: Mapping[str, Any]) -> str:
         )
 
     lines.extend(["", "## Champion Alpha 年度 Walk-forward", ""])
-    lines.append(
-        "| 周期 | 年份 | 原始N | 非重叠N | Alpha命中 | 95% CI | 平均Alpha | 中位Alpha |"
-    )
+    lines.append("| 周期 | 年份 | 原始N | 非重叠N | Alpha命中 | 95% CI | 平均Alpha | 中位Alpha |")
     lines.append("|---:|---|---:|---:|---:|---|---:|---:|")
     for item in list(payload.get("results") or []):
         if item.get("variant") != "champion":
@@ -651,12 +722,8 @@ def render_research_governance_markdown(payload: Mapping[str, Any]) -> str:
                     n=independent.get("samples", 0),
                     hit=_fmt(independent.get("alpha_hit_rate_pct"), suffix="%"),
                     ci=_alpha_ci(independent),
-                    avg=_fmt(
-                        independent.get("avg_alpha_trade_return_pct"), suffix="%"
-                    ),
-                    median=_fmt(
-                        independent.get("median_alpha_trade_return_pct"), suffix="%"
-                    ),
+                    avg=_fmt(independent.get("avg_alpha_trade_return_pct"), suffix="%"),
+                    median=_fmt(independent.get("median_alpha_trade_return_pct"), suffix="%"),
                 )
             )
 
@@ -665,9 +732,7 @@ def render_research_governance_markdown(payload: Mapping[str, Any]) -> str:
         "> 与 V6.3 的“每个桶先过滤再 non-overlap”策略视图并列；这里先生成唯一全局 Alpha non-overlap 时间轴，再把同一批独立样本分桶，专门用于公平比较不同分数余量的校准质量。"
     )
     lines.append("")
-    lines.append(
-        "| 周期 | 分数余量桶 | 独立占比 | 非重叠N | Alpha命中 | 95% CI | 平均Alpha |"
-    )
+    lines.append("| 周期 | 分数余量桶 | 独立占比 | 非重叠N | Alpha命中 | 95% CI | 平均Alpha |")
     lines.append("|---:|---|---:|---:|---:|---|---:|")
     for item in list(payload.get("results") or []):
         if item.get("variant") != "champion":
@@ -683,16 +748,12 @@ def render_research_governance_markdown(payload: Mapping[str, Any]) -> str:
                     n=independent.get("samples", 0),
                     hit=_fmt(independent.get("alpha_hit_rate_pct"), suffix="%"),
                     ci=_alpha_ci(independent),
-                    avg=_fmt(
-                        independent.get("avg_alpha_trade_return_pct"), suffix="%"
-                    ),
+                    avg=_fmt(independent.get("avg_alpha_trade_return_pct"), suffix="%"),
                 )
             )
 
     lines.extend(["", "## Champion 方向暴露诊断", ""])
-    lines.append(
-        "| 周期 | 方向 | 独立占比 | 非重叠N | Alpha命中 | 95% CI | 平均Alpha |"
-    )
+    lines.append("| 周期 | 方向 | 独立占比 | 非重叠N | Alpha命中 | 95% CI | 平均Alpha |")
     lines.append("|---:|---|---:|---:|---:|---|---:|")
     for item in list(payload.get("results") or []):
         if item.get("variant") != "champion":
@@ -707,67 +768,54 @@ def render_research_governance_markdown(payload: Mapping[str, Any]) -> str:
                     n=independent.get("samples", 0),
                     hit=_fmt(independent.get("alpha_hit_rate_pct"), suffix="%"),
                     ci=_alpha_ci(independent),
-                    avg=_fmt(
-                        independent.get("avg_alpha_trade_return_pct"), suffix="%"
-                    ),
+                    avg=_fmt(independent.get("avg_alpha_trade_return_pct"), suffix="%"),
                 )
             )
 
     lines.extend(["", "## Champion Alpha 成本敏感度", ""])
     lines.append(
-        "> 这里把固定总摩擦成本直接从每条独立 Alpha Spread 中扣除，仅做压力测试；不包含真实滑点、借券可得性、融资、税费或组合仓位，因此仍不是可执行 P&L。"
+        "> 固定总摩擦成本直接从每条独立 Alpha Spread 中扣除，仅做压力测试；不包含真实滑点、借券可得性、融资、税费或组合仓位，因此仍不是可执行 P&L。"
     )
     lines.append("")
-    lines.append(
-        "| 周期 | 总成本 | 非重叠N | 平均净Alpha | 中位净Alpha | 净Alpha>0 | 95% CI |"
-    )
+    lines.append("| 周期 | 总成本 | 非重叠N | 平均净Alpha | 中位净Alpha | 净Alpha>0 | 95% CI |")
     lines.append("|---:|---:|---:|---:|---:|---:|---|")
     for item in list(payload.get("results") or []):
         if item.get("variant") != "champion":
             continue
         for cost in list(item.get("alpha_cost_sensitivity") or []):
-            ci = "N/A"
             low = cost.get("positive_net_alpha_ci95_low_pct")
             high = cost.get("positive_net_alpha_ci95_high_pct")
-            if low is not None and high is not None:
-                ci = f"{_fmt(low, suffix='%')}–{_fmt(high, suffix='%')}"
+            ci = "N/A" if low is None or high is None else f"{_fmt(low, suffix='%')}–{_fmt(high, suffix='%')}"
             lines.append(
                 "| {h}D | {cost}bps | {n} | {avg} | {median} | {positive} | {ci} |".format(
                     h=item.get("horizon_days") or "-",
                     cost=cost.get("total_cost_bps", 0),
                     n=cost.get("samples", 0),
-                    avg=_fmt(
-                        cost.get("avg_net_alpha_trade_return_pct"), suffix="%"
-                    ),
-                    median=_fmt(
-                        cost.get("median_net_alpha_trade_return_pct"), suffix="%"
-                    ),
-                    positive=_fmt(
-                        cost.get("positive_net_alpha_rate_pct"), suffix="%"
-                    ),
+                    avg=_fmt(cost.get("avg_net_alpha_trade_return_pct"), suffix="%"),
+                    median=_fmt(cost.get("median_net_alpha_trade_return_pct"), suffix="%"),
+                    positive=_fmt(cost.get("positive_net_alpha_rate_pct"), suffix="%"),
                     ci=ci,
                 )
             )
 
-    watch = payload.get("forward_alpha_watch") or {}
     lines.extend(["", "## 冻结候选 Forward Watch", ""])
     lines.append(
-        f"> 冻结日期：**{watch.get('freeze_date', '-')}**。候选集合冻结后不再根据同一历史区间重新选择；只有冻结日及之后的新预测/成熟 outcome 才能提供 forward confirmation。"
+        f"> 冻结日期：**{watch.get('freeze_date', '-')}**。候选集合和实现身份同时冻结；只有冻结日及之后、且定义仍与冻结身份一致的新预测/成熟 outcome 才能提供 forward confirmation。"
     )
     lines.append("")
     lines.append(
-        "| 候选 | 周期 | Discovery N | Discovery Alpha命中 | Forward N | Forward Alpha命中 | Forward 95% CI | Forward平均Alpha | Holm调整p | 状态 |"
+        "| 候选 | 周期 | 定义一致 | Discovery N | Forward N | Forward Alpha命中 | Forward 95% CI | Forward平均Alpha | Holm调整p | 状态 |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---|---:|---:|---|")
+    lines.append("|---|---:|---|---:|---:|---:|---|---:|---:|---|")
     for record in list(watch.get("candidates") or []):
         discovery = record.get("discovery") or {}
         forward = record.get("forward") or {}
         lines.append(
-            "| {variant} | {h}D | {dn} | {dhit} | {fn} | {fhit} | {ci} | {avg} | {p} | {status} |".format(
+            "| {variant} | {h}D | {definition} | {dn} | {fn} | {fhit} | {ci} | {avg} | {p} | {status} |".format(
                 variant=record.get("variant") or "-",
                 h=record.get("horizon_days") or "-",
+                definition="是" if record.get("definition_matches_freeze") else "否",
                 dn=discovery.get("samples", 0),
-                dhit=_fmt(discovery.get("alpha_hit_rate_pct"), suffix="%"),
                 fn=forward.get("samples", 0),
                 fhit=_fmt(forward.get("alpha_hit_rate_pct"), suffix="%"),
                 ci=_alpha_ci(forward),
@@ -783,7 +831,8 @@ def render_research_governance_markdown(payload: Mapping[str, Any]) -> str:
             "### V6.4 生产边界",
             "",
             "- 历史研究只负责提出假设；不会根据一次历史最优结果自动修改 Champion、阈值、Regime Gate 或权重。",
-            "- Alpha 候选先经过全模型/周期 Holm-Bonferroni 多重检验；冻结候选随后只使用新产生的 forward 样本验证。",
+            "- Alpha 候选先经过全模型/周期 Holm-Bonferroni 多重检验；冻结候选随后只使用定义一致的新 forward 样本验证。",
+            "- 冻结后的 Shadow profile identity、方向阈值或 Accuracy Lab revision 发生漂移时，Forward Watch 状态直接变为 `definition_drifted`，不会把新实现的数据冒充旧候选的 OOS 证据。",
             "- `auto_promotion=false`、`auto_weight_tuning=false` 保持硬关闭；任何生产变更仍需要独立 PR、人工审查和明确回滚方案。",
         ]
     )
@@ -799,6 +848,7 @@ __all__ = [
     "FORWARD_FREEZE_DATE",
     "FORWARD_WATCH_METHOD",
     "FROZEN_ALPHA_CANDIDATES",
+    "FROZEN_ALPHA_CANDIDATE_SPECS",
     "MULTIPLE_TESTING_METHOD",
     "RESEARCH_GOVERNANCE_VERSION",
     "enrich_accuracy_payload",
