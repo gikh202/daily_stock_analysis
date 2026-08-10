@@ -185,6 +185,10 @@ jobs:
               raise SystemExit('unsafe weekly replay: auto_weight_tuning must be false')
           if payload.get('method') != 'strict no-lookahead rolling price-feature replay':
               raise SystemExit(f"unexpected replay method: {payload.get('method')!r}")
+          if payload.get('yearly_walk_forward_method') != 'raw_and_global_non_overlapping_by_calendar_year_v2':
+              raise SystemExit(
+                  f"unexpected yearly walk-forward method: {payload.get('yearly_walk_forward_method')!r}"
+              )
           results = payload.get('results')
           if not isinstance(results, list) or not results:
               raise SystemExit('weekly replay results must be a non-empty list')
@@ -208,15 +212,63 @@ jobs:
           if horizons != {5, 10, 20}:
               raise SystemExit(f'weekly champion horizons invalid: {sorted(horizons)}')
           for item in champion:
+              horizon = item.get('horizon_days')
+              raw = item.get('raw') or {}
               independent = item.get('non_overlapping') or {}
               if int(independent.get('samples') or 0) <= 0:
-                  raise SystemExit(f"zero independent samples for champion {item.get('horizon_days')}D")
+                  raise SystemExit(f"zero independent samples for champion {horizon}D")
               if independent.get('hit_rate_ci95_low_pct') is None or independent.get('hit_rate_ci95_high_pct') is None:
-                  raise SystemExit(f"missing Wilson CI for champion {item.get('horizon_days')}D")
+                  raise SystemExit(f"missing Wilson CI for champion {horizon}D")
               if independent.get('avg_excess_vs_spy_pct') is None:
-                  raise SystemExit(f"missing SPY excess for champion {item.get('horizon_days')}D")
-              if not item.get('yearly_walk_forward'):
-                  raise SystemExit(f"missing yearly walk-forward for champion {item.get('horizon_days')}D")
+                  raise SystemExit(f"missing SPY excess for champion {horizon}D")
+
+              yearly = item.get('yearly_walk_forward')
+              if not isinstance(yearly, list) or not yearly:
+                  raise SystemExit(f"missing yearly walk-forward for champion {horizon}D")
+              yearly_raw_samples = 0
+              yearly_independent_samples = 0
+              for year in yearly:
+                  year_raw = year.get('raw')
+                  year_independent = year.get('non_overlapping')
+                  if not isinstance(year_raw, dict) or not isinstance(year_independent, dict):
+                      raise SystemExit(
+                          f"missing raw/non-overlapping yearly views for champion {horizon}D year={year.get('year')}"
+                      )
+                  raw_n = int(year_raw.get('samples') or 0)
+                  independent_n = int(year_independent.get('samples') or 0)
+                  if raw_n <= 0:
+                      raise SystemExit(
+                          f"zero raw yearly samples for champion {horizon}D year={year.get('year')}"
+                      )
+                  if int(year.get('samples') or 0) != raw_n:
+                      raise SystemExit(
+                          f"legacy yearly raw fields drifted for champion {horizon}D year={year.get('year')}"
+                      )
+                  if independent_n > 0:
+                      if (
+                          year_independent.get('hit_rate_ci95_low_pct') is None
+                          or year_independent.get('hit_rate_ci95_high_pct') is None
+                      ):
+                          raise SystemExit(
+                              f"missing yearly independent Wilson CI for champion {horizon}D year={year.get('year')}"
+                          )
+                      if year_independent.get('avg_excess_vs_spy_pct') is None:
+                          raise SystemExit(
+                              f"missing yearly independent SPY excess for champion {horizon}D year={year.get('year')}"
+                          )
+                  yearly_raw_samples += raw_n
+                  yearly_independent_samples += independent_n
+
+              if yearly_raw_samples != int(raw.get('samples') or 0):
+                  raise SystemExit(
+                      f"yearly raw sample partition mismatch for champion {horizon}D: "
+                      f"yearly={yearly_raw_samples} total={raw.get('samples')}"
+                  )
+              if yearly_independent_samples != int(independent.get('samples') or 0):
+                  raise SystemExit(
+                      f"yearly independent sample partition mismatch for champion {horizon}D: "
+                      f"yearly={yearly_independent_samples} total={independent.get('samples')}"
+                  )
 
           print(
               'Weekly accuracy validation: PASS '

@@ -24,6 +24,7 @@ def _fmt(value: Any, *, suffix: str = "", digits: int = 1) -> str:
 def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
     definition = payload.get("strategy_return_definition") or {}
     return_method = payload.get("strategy_return_method") or "-"
+    yearly_method = payload.get("yearly_walk_forward_method") or "-"
     lines = [
         "# V6.2 准确率研究周报",
         "",
@@ -35,6 +36,7 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
         f"- 最小研究样本：**{payload.get('minimum_samples', 50)}**",
         f"- Challenger 晋级研究门槛：**{payload.get('promotion_min_samples', 100)}**",
         f"- 方向收益口径：**{return_method}**（bullish={_fmt(definition.get('bullish_position'), suffix='x')} / bearish={_fmt(definition.get('bearish_position'), suffix='x')} / neutral={_fmt(definition.get('neutral_position'), suffix='x')}；基准={definition.get('benchmark', '-')}；交易成本={definition.get('trading_costs', '-')}）",
+        f"- 年度稳定性口径：**{yearly_method}**（先在完整时间轴选出非重叠样本，再按自然年切片，避免跨年边界重复计入）",
         "",
         "## Champion / Challenger",
         "",
@@ -88,20 +90,28 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
             continue
         lines.append(f"### Champion · {item.get('horizon_days')}D")
         lines.append("")
-        lines.append("| 年份 | N | 命中率 | 95% CI | 方向策略收益 | 方向策略SPY超额 |")
-        lines.append("|---|---:|---:|---|---:|---:|")
+        lines.append(
+            "| 年份 | 原始N | 原始命中 | 原始策略收益 | 原始SPY超额 | 非重叠N | 非重叠命中 | 非重叠95% CI | 非重叠策略收益 | 非重叠SPY超额 |"
+        )
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---|---:|---:|")
         for year in yearly:
-            low = year.get("hit_rate_ci95_low_pct")
-            high = year.get("hit_rate_ci95_high_pct")
+            raw = year.get("raw") or year
+            independent = year.get("non_overlapping") or {}
+            low = independent.get("hit_rate_ci95_low_pct")
+            high = independent.get("hit_rate_ci95_high_pct")
             ci = "N/A" if low is None or high is None else f"{_fmt(low, suffix='%')}–{_fmt(high, suffix='%')}"
             lines.append(
-                "| {year} | {n} | {hit} | {ci} | {strategy_return} | {excess} |".format(
+                "| {year} | {raw_n} | {raw_hit} | {raw_return} | {raw_excess} | {n} | {hit} | {ci} | {strategy_return} | {excess} |".format(
                     year=year.get("year") or "-",
-                    n=year.get("samples", 0),
-                    hit=_fmt(year.get("directional_hit_rate_pct"), suffix="%"),
+                    raw_n=raw.get("samples", 0),
+                    raw_hit=_fmt(raw.get("directional_hit_rate_pct"), suffix="%"),
+                    raw_return=_fmt(raw.get("avg_return_pct"), suffix="%", digits=2),
+                    raw_excess=_fmt(raw.get("avg_excess_vs_spy_pct"), suffix="%", digits=2),
+                    n=independent.get("samples", 0),
+                    hit=_fmt(independent.get("directional_hit_rate_pct"), suffix="%"),
                     ci=ci,
-                    strategy_return=_fmt(year.get("avg_return_pct"), suffix="%", digits=2),
-                    excess=_fmt(year.get("avg_excess_vs_spy_pct"), suffix="%", digits=2),
+                    strategy_return=_fmt(independent.get("avg_return_pct"), suffix="%", digits=2),
+                    excess=_fmt(independent.get("avg_excess_vs_spy_pct"), suffix="%", digits=2),
                 )
             )
         lines.append("")
@@ -114,6 +124,7 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
             f"- 自动晋级：**{payload.get('auto_promotion', False)}**",
             "- 当前 SEC/FRED 快照不会回填历史日期，避免未来数据泄漏。",
             "- 相邻日预测会共享未来窗口，因此晋级判断优先使用非重叠样本。",
+            "- 年度非重叠样本来自完整时间轴上的同一非重叠集合，再按年份分组；不会在每年年初重新启动抽样导致跨年窗口重复计数。",
             "- 方向策略收益是无杠杆、未计交易成本的研究口径；真实 BUY_SETUP 交易计划仍由单独的保守执行回放评估。",
         ]
     )
