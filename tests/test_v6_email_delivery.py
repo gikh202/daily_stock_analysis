@@ -83,6 +83,7 @@ def _full_report() -> str:
 - **下一次确认条件**：
   - 若放量上涨突破515，日内可追但仅限小仓位
   - 若高开超过3%，突破后不可追高，回踩企稳后可以追涨
+  - 回踩后可以追涨但不可追高
   - 若价格跌破498.50元则继续观望
   - 下次检查：**2026-08-10 09:30 EDT**
 - **数据限制**：催化因子尚未进入数值评分
@@ -180,6 +181,8 @@ def test_investor_email_keeps_one_canonical_execution_view() -> None:
     assert "突破后不可追高" in email
     assert "回踩企稳后可以追涨" not in email
     assert "回踩企稳后仅视为强势确认，不追价" in email
+    assert "回踩后可以追涨但不可追高" not in email
+    assert "回踩后仅视为强势确认，不追价但不可追高" in email
     assert "V4执行护栏" not in email
     assert "执行护栏：等待盘中确认，严禁追高" in email
     assert "$498.50" in email
