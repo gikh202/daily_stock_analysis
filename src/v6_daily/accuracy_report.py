@@ -14,14 +14,27 @@ _EMAIL_SUBJECT_META_RE = re.compile(r"^\[dsa-email-subject\]:\s+#\s+\(([^)\n]+)\
 _CHASE_SUFFIX_OR_BOUNDARY = r"(?:高|涨|价|买|(?=$|[\s，,。；;、但]))"
 _CHASE_TARGET = rf"追{_CHASE_SUFFIX_OR_BOUNDARY}"
 _CHASE_PATTERN = rf"(?:日内)?(?:可|可以){_CHASE_TARGET}"
+_NEGATED_CHASE_GAP = (
+    r"(?:(?!(?:但|并且|同时|以及|然后|然而|不过|可是|却|而且|且|而|或者|或))"
+    r"[^，,。；;\n]){0,20}?"
+)
 _NEGATED_CHASE_PATTERN = (
     rf"(?:不可以|不可|不应|不得|禁止|严禁|不要|不宜|切勿|勿|别)"
-    rf"[^，,。；;\n]{{0,20}}?{_CHASE_TARGET}"
+    rf"{_NEGATED_CHASE_GAP}{_CHASE_TARGET}"
     rf"|不\s*{_CHASE_TARGET}"
 )
+_PRICE_NUMBER_PATTERN = (
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    r"(?:\s*[-–—~～至]\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)?"
+)
 _PRICE_YUAN_RE = re.compile(
-    r"(?<![\d.,])\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
-    r"(?:\s*[-–—~～至]\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)?)元"
+    rf"(?<![\d.,])\$?({_PRICE_NUMBER_PATTERN})元"
+)
+_NON_YUAN_PRICE_AMOUNT_RE = re.compile(
+    rf"(?:\$\s*{_PRICE_NUMBER_PATTERN}|"
+    rf"{_PRICE_NUMBER_PATTERN}\s*(?:美元|美金|USD\b)|"
+    rf"USD\s*{_PRICE_NUMBER_PATTERN})",
+    re.IGNORECASE,
 )
 _MAX_POSITION_RE = re.compile(
     r"\*\*最大仓位上限\*\*[:：]\s*`?\s*(\d+(?:\.\d+)?)\s*%"
@@ -243,10 +256,12 @@ def _normalize_watch_price_yuan(line: str) -> str:
     previous_amount_end = 0
     for match in matches:
         prefix = line[previous_amount_end : match.start()]
-        barrier_end = 0
-        for barrier in _WATCH_PRICE_BARRIER_RE.finditer(prefix):
-            barrier_end = barrier.end()
-        local_prefix = prefix[barrier_end:]
+        boundary_end = 0
+        for boundary in _WATCH_PRICE_BARRIER_RE.finditer(prefix):
+            boundary_end = max(boundary_end, boundary.end())
+        for amount in _NON_YUAN_PRICE_AMOUNT_RE.finditer(prefix):
+            boundary_end = max(boundary_end, amount.end())
+        local_prefix = prefix[boundary_end:]
 
         output.append(line[cursor : match.start()])
         if _WATCH_PRICE_CONTEXT_RE.search(local_prefix):
