@@ -50,6 +50,9 @@ _WATCH_PRICE_CONTEXT_RE = re.compile(
     r"(?:股价|现价|收盘价|开盘价|入场|买点|卖点|止损|止盈|目标|"
     r"支撑|压力|突破|上破|下破|跌破|站上|守住|回踩|高开|低开|价位|点位|区间)"
 )
+_STOCK_PRICE_ANCHOR_RE = re.compile(
+    r"(?:股价|现价|收盘价|开盘价|入场|买点|卖点|止损|止盈|价位|点位)"
+)
 _GENERIC_PRICE_MOVEMENT_RE = re.compile(
     r"(?:跌至|涨至|触及|达到|到达|逼近|接近)"
 )
@@ -291,6 +294,7 @@ def _normalize_watch_price_yuan(line: str) -> str:
             boundary_end = max(boundary_end, amount.end())
         local_prefix = prefix[boundary_end:]
         price_contexts = list(_WATCH_PRICE_CONTEXT_RE.finditer(local_prefix))
+        stock_anchors = list(_STOCK_PRICE_ANCHOR_RE.finditer(local_prefix))
         movement_contexts = list(_GENERIC_PRICE_MOVEMENT_RE.finditer(local_prefix))
         cny_contexts = list(_CNY_FACT_CONTEXT_RE.finditer(local_prefix))
         price_contexts = [
@@ -303,7 +307,11 @@ def _normalize_watch_price_yuan(line: str) -> str:
             )
         ]
         latest_price_context = price_contexts[-1].start() if price_contexts else -1
+        latest_stock_anchor = stock_anchors[-1].start() if stock_anchors else -1
         latest_cny_context = cny_contexts[-1].start() if cny_contexts else -1
+        cny_context_is_authoritative = bool(
+            latest_cny_context >= 0 and latest_stock_anchor <= latest_cny_context
+        )
 
         generic_execution_context = False
         if movement_contexts:
@@ -318,7 +326,7 @@ def _normalize_watch_price_yuan(line: str) -> str:
             )
 
         output.append(line[cursor : match.start()])
-        if latest_price_context >= 0 and latest_price_context > latest_cny_context:
+        if latest_price_context >= 0 and not cny_context_is_authoritative:
             output.append(f"${match.group(1)}")
         elif generic_execution_context:
             output.append(f"${match.group(1)}")
