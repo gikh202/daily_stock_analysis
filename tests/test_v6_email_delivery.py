@@ -84,6 +84,7 @@ def _full_report() -> str:
   - 若放量上涨突破515，日内可追但仅限小仓位
   - 若高开超过3%，突破后不可追高，回踩企稳后可以追涨
   - 回踩后可以追涨但不可追高
+  - 回踩后可以追涨但当前位置不可追高
   - 若价格跌破498.50元则继续观望
   - 下次检查：**2026-08-10 09:30 EDT**
 - **数据限制**：催化因子尚未进入数值评分
@@ -102,7 +103,8 @@ def _full_report() -> str:
 - **下一次确认条件**：
   - 价格能否守住354.01元
   - 若站上365可以追涨
-  - 高价股展示样例1,234.56元必须保持完整数字
+  - 若股价接近1,234.56元则等待确认
+  - 关注中国售价99元的销量反馈
   - 下次检查：**2026-08-10 10:00 EST**
 
 ## 4. 大模型与数据健康度
@@ -183,11 +185,15 @@ def test_investor_email_keeps_one_canonical_execution_view() -> None:
     assert "回踩企稳后仅视为强势确认，不追价" in email
     assert "回踩后可以追涨但不可追高" not in email
     assert "回踩后仅视为强势确认，不追价但不可追高" in email
+    assert "回踩后可以追涨但当前位置不可追高" not in email
+    assert "回踩后仅视为强势确认，不追价但当前位置不可追高" in email
     assert "V4执行护栏" not in email
     assert "执行护栏：等待盘中确认，严禁追高" in email
     assert "$498.50" in email
     assert "$1,234.56" in email
     assert "1,$234.56" not in email
+    assert "关注中国售价99元的销量反馈" in email
+    assert "关注中国售价$99" not in email
     assert "ET（美东）" in email
     assert " EDT" not in email
     assert " EST" not in email
@@ -222,6 +228,8 @@ def test_investor_email_marks_fallback_plan_as_non_execution() -> None:
     assert "止损位：$348.85" in email
     assert "目标位：$370.00" in email
     assert "价格能否守住$354.01" in email
+    assert "若股价接近$1,234.56则等待确认" in email
+    assert "关注中国售价99元的销量反馈" in email
 
 
 def test_investor_email_recognizes_descriptive_no_chase_guard() -> None:
