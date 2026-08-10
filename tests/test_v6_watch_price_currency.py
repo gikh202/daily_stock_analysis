@@ -91,6 +91,10 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         == "若公司罚款达到99元则止损"
     )
     assert (
+        _normalize_watch_price_yuan("若客户买入99元套餐则关注订阅转化")
+        == "若客户买入99元套餐则关注订阅转化"
+    )
+    assert (
         _normalize_watch_price_yuan("关注产品价格99元的销量反馈")
         == "关注产品价格99元的销量反馈"
     )
