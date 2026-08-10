@@ -1,0 +1,156 @@
+name: One-off V6 execution email review fixes
+
+on:
+  push:
+    branches:
+      - fix/v6-daily-execution-view
+
+permissions:
+  contents: write
+
+jobs:
+  apply-review-fixes:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v5
+        with:
+          ref: fix/v6-daily-execution-view
+          fetch-depth: 0
+
+      - name: Apply focused review fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path('src/v6_daily/accuracy_report.py')
+          text = source.read_text(encoding='utf-8')
+
+          old = '''        if has_deterministic_plan and re.match(
+            r"^\\s*-\\s+\\*\\*(?:价格参考|仓位参考)\\*\\*[:：]", line
+        ):
+            continue
+
+        if not has_deterministic_plan:
+            line = line.replace("**价格参考**", "**辅助价格参考（非执行）**")
+            line = line.replace("**仓位参考**", "**辅助仓位参考（非执行）**")
+            line = line.replace("**参考入场**", "**辅助入场参考（非执行）**")
+'''
+          new = '''        if has_deterministic_plan and re.match(
+            r"^\\s*-\\s+\\*\\*(?:价格参考|仓位参考|风险控制)\\*\\*[:：]", line
+        ):
+            continue
+
+        if not has_deterministic_plan:
+            line = line.replace("**价格参考**", "**辅助价格参考（非执行）**")
+            line = line.replace("**仓位参考**", "**辅助仓位参考（非执行）**")
+            line = line.replace("**风险控制**", "**辅助风险控制（非执行）**")
+            line = line.replace("**参考入场**", "**辅助入场参考（非执行）**")
+'''
+          if old not in text:
+              raise SystemExit('risk-control filter block not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        if no_chase_guard and re.search(r"(?:日内)?(?:可|可以)追(?:高|涨)?", line):
+            replaced = re.sub(
+                r"([，,])\\s*(?:日内)?(?:可|可以)追(?:高|涨)?[^。；;]*",
+                r"\\1仅视为强势确认，不追价",
+                line,
+            )
+            if replaced == line:
+                replaced = re.sub(
+                    r"(?:日内)?(?:可|可以)追(?:高|涨)?[^。；;]*",
+                    "仅视为强势确认，不追价",
+                    line,
+                )
+            line = replaced
+'''
+          new = '''        chase_pattern = r"(?:日内)?(?:可|可以)追(?:高|涨)?"
+        negated_chase_pattern = r"(?:不可|不可以|禁止|不要|不宜|勿)\\s*追(?:高|涨)?"
+        if (
+            no_chase_guard
+            and re.search(chase_pattern, line)
+            and not re.search(negated_chase_pattern, line)
+        ):
+            replaced = re.sub(
+                rf"([，,])\\s*{chase_pattern}[^。；;]*",
+                r"\\1仅视为强势确认，不追价",
+                line,
+            )
+            if replaced == line:
+                replaced = re.sub(
+                    rf"{chase_pattern}[^。；;]*",
+                    "仅视为强势确认，不追价",
+                    line,
+                )
+            line = replaced
+'''
+          if old not in text:
+              raise SystemExit('chase rewrite block not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        ("V6确定性方向", "量化方向"),
+        ("V4 ", ""),
+'''
+          new = '''        ("V6确定性方向", "量化方向"),
+        ("V4执行护栏", "执行护栏"),
+        ("V4 ", ""),
+'''
+          if old not in text:
+              raise SystemExit('replacement tuple anchor not found')
+          text = text.replace(old, new, 1)
+          source.write_text(text, encoding='utf-8')
+
+          test = Path('tests/test_v6_email_delivery.py')
+          t = test.read_text(encoding='utf-8')
+          old = '''  - **V4 价格参考**: 理想买入点：496.00元；止损位：466.00元；目标位：510.00元
+  - **V4 仓位参考**: 小仓/低仓位
+- **下一次确认条件**：
+  - 若放量上涨突破515，日内可追但仅限小仓位
+  - 若价格跌破498.50元则继续观望
+'''
+          new = '''  - **V4 价格参考**: 理想买入点：496.00元；止损位：466.00元；目标位：510.00元
+  - **V4 仓位参考**: 小仓/低仓位
+  - **V4 风险控制**: 止损参考466.00元；仓位不超过3%
+- **下一次确认条件**：
+  - 若放量上涨突破515，日内可追但仅限小仓位
+  - 若高开超过3%，突破后不可追高
+  - 若价格跌破498.50元则继续观望
+'''
+          if old not in t:
+              raise SystemExit('MSFT fixture anchor not found')
+          t = t.replace(old, new, 1)
+
+          old = '''    assert "500亿级别成交额" not in email
+    assert "日内可追" not in email
+    assert "仅视为强势确认，不追价" in email
+    assert "$498.50" in email
+'''
+          new = '''    assert "500亿级别成交额" not in email
+    assert "止损参考$466.00" not in email
+    assert "仓位不超过3%" not in email
+    assert "日内可追" not in email
+    assert "仅视为强势确认，不追价" in email
+    assert "突破后不可追高" in email
+    assert "突破后不仅视为强势确认" not in email
+    assert "V4执行护栏" not in email
+    assert "执行护栏：等待盘中确认，禁止追高" in email
+    assert "$498.50" in email
+'''
+          if old not in t:
+              raise SystemExit('assertion anchor not found')
+          t = t.replace(old, new, 1)
+          test.write_text(t, encoding='utf-8')
+          PY
+          rm .github/workflows/zz-oneoff-v6-execution-review-fixes.yml
+
+      - name: Commit review fixes
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/v6_daily/accuracy_report.py tests/test_v6_email_delivery.py .github/workflows/zz-oneoff-v6-execution-review-fixes.yml
+          git commit -m 'fix(v6): resolve execution email review findings'
+          git push origin HEAD:fix/v6-daily-execution-view
