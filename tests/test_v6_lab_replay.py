@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from src.v6_daily.lab_replay import replay_accuracy_lab, summarize_accuracy_replay
+from src.v6_daily.lab_replay import (
+    AccuracyReplayObservation,
+    replay_accuracy_lab,
+    summarize_accuracy_replay,
+)
 
 
 def _series_with_future(multiplier: float) -> dict:
@@ -67,6 +71,75 @@ def test_champion_and_challenger_replay_do_not_leak_future_prices() -> None:
         assert left.future_return_pct != right.future_return_pct
 
 
+def test_replay_strategy_return_matches_forecast_direction() -> None:
+    observations = replay_accuracy_lab(
+        _series_with_future(0.4),
+        codes=["MSFT"],
+        min_lookback=60,
+    )
+    assert observations
+
+    for item in observations:
+        if item.direction == "bullish":
+            expected = item.future_return_pct
+        elif item.direction == "bearish":
+            expected = -item.future_return_pct
+        else:
+            expected = 0.0
+        assert item.strategy_return_pct == round(expected, 6)
+
+
+def test_strategy_metrics_are_variant_specific_on_same_underlying_path() -> None:
+    observations = [
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-02",
+            as_of_index=60,
+            horizon_days=5,
+            score=20.0,
+            direction="bullish",
+            future_return_pct=10.0,
+            directional_hit=1,
+            excess_vs_spy_pct=8.0,
+            strategy_return_pct=10.0,
+            strategy_excess_vs_spy_pct=8.0,
+        ),
+        AccuracyReplayObservation(
+            variant="trend_guard",
+            code="MSFT",
+            as_of="2025-01-02",
+            as_of_index=60,
+            horizon_days=5,
+            score=-20.0,
+            direction="bearish",
+            future_return_pct=10.0,
+            directional_hit=0,
+            excess_vs_spy_pct=8.0,
+            strategy_return_pct=-10.0,
+            strategy_excess_vs_spy_pct=-12.0,
+        ),
+    ]
+
+    summary = summarize_accuracy_replay(
+        observations,
+        min_samples=3,
+        promotion_min_samples=3,
+    )
+    champion = next(item for item in summary["results"] if item["variant"] == "champion")
+    challenger = next(item for item in summary["results"] if item["variant"] == "trend_guard")
+
+    assert summary["strategy_return_method"] == "gross_directional_position_v1"
+    assert champion["raw"]["avg_underlying_return_pct"] == 10.0
+    assert challenger["raw"]["avg_underlying_return_pct"] == 10.0
+    assert champion["raw"]["avg_underlying_excess_vs_spy_pct"] == 8.0
+    assert challenger["raw"]["avg_underlying_excess_vs_spy_pct"] == 8.0
+    assert champion["raw"]["avg_return_pct"] == 10.0
+    assert challenger["raw"]["avg_return_pct"] == -10.0
+    assert champion["raw"]["avg_excess_vs_spy_pct"] == 8.0
+    assert challenger["raw"]["avg_excess_vs_spy_pct"] == -12.0
+
+
 def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() -> None:
     observations = replay_accuracy_lab(
         _series_with_future(0.4),
@@ -80,6 +153,7 @@ def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() 
     )
 
     assert summary["method"] == "strict no-lookahead rolling price-feature replay"
+    assert summary["strategy_return_method"] == "gross_directional_position_v1"
     assert summary["auto_promotion"] is False
     assert summary["auto_weight_tuning"] is False
     assert summary["observations"] > 0
@@ -97,6 +171,9 @@ def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() 
     )
     assert champion_20d["raw"]["samples"] > champion_20d["non_overlapping"]["samples"]
     assert champion_20d["non_overlapping"]["hit_rate_ci95_low_pct"] is not None
+    assert champion_20d["non_overlapping"]["avg_return_pct"] is not None
+    assert champion_20d["non_overlapping"]["avg_excess_vs_spy_pct"] is not None
+    assert champion_20d["non_overlapping"]["avg_underlying_return_pct"] is not None
     assert champion_20d["yearly_walk_forward"]
 
     challenger = next(item for item in results if item["variant"] != "champion")

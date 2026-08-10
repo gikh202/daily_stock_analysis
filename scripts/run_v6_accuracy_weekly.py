@@ -22,6 +22,8 @@ def _fmt(value: Any, *, suffix: str = "", digits: int = 1) -> str:
 
 
 def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
+    definition = payload.get("strategy_return_definition") or {}
+    return_method = payload.get("strategy_return_method") or "-"
     lines = [
         "# V6.2 准确率研究周报",
         "",
@@ -32,11 +34,12 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
         f"- 总观察记录：**{payload.get('observations', 0)}**",
         f"- 最小研究样本：**{payload.get('minimum_samples', 50)}**",
         f"- Challenger 晋级研究门槛：**{payload.get('promotion_min_samples', 100)}**",
+        f"- 方向收益口径：**{return_method}**（bullish={_fmt(definition.get('bullish_position'), suffix='x')} / bearish={_fmt(definition.get('bearish_position'), suffix='x')} / neutral={_fmt(definition.get('neutral_position'), suffix='x')}；基准={definition.get('benchmark', '-')}；交易成本={definition.get('trading_costs', '-')}）",
         "",
         "## Champion / Challenger",
         "",
-        "| 模型 | 周期 | 原始N | 原始命中 | 非重叠N | 非重叠命中 | 95% CI | SPY超额 | 相对Champion | 晋级候选 |",
-        "|---|---:|---:|---:|---:|---:|---|---:|---:|---|",
+        "| 模型 | 周期 | 原始N | 原始命中 | 非重叠N | 非重叠命中 | 95% CI | 方向策略收益 | 方向策略SPY超额 | 相对Champion | 晋级候选 |",
+        "|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---|",
     ]
     results = list(payload.get("results") or [])
     for item in results:
@@ -47,7 +50,7 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
         ci = "N/A" if low is None or high is None else f"{_fmt(low, suffix='%')}–{_fmt(high, suffix='%')}"
         delta = item.get("hit_rate_delta_vs_champion_pp")
         lines.append(
-            "| {variant} | {h}D | {raw_n} | {raw_hit} | {n} | {hit} | {ci} | {excess} | {delta} | {candidate} |".format(
+            "| {variant} | {h}D | {raw_n} | {raw_hit} | {n} | {hit} | {ci} | {strategy_return} | {excess} | {delta} | {candidate} |".format(
                 variant=item.get("variant") or "-",
                 h=item.get("horizon_days") or "-",
                 raw_n=raw.get("samples", 0),
@@ -55,13 +58,14 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
                 n=independent.get("samples", 0),
                 hit=_fmt(independent.get("directional_hit_rate_pct"), suffix="%"),
                 ci=ci,
+                strategy_return=_fmt(independent.get("avg_return_pct"), suffix="%", digits=2),
                 excess=_fmt(independent.get("avg_excess_vs_spy_pct"), suffix="%", digits=2),
                 delta="N/A" if delta is None else _fmt(delta, suffix="pp", digits=1),
                 candidate="是（研究）" if item.get("promotion_candidate") else "否",
             )
         )
     if not results:
-        lines.append("| - | - | 0 | N/A | 0 | N/A | N/A | N/A | N/A | 否 |")
+        lines.append("| - | - | 0 | N/A | 0 | N/A | N/A | N/A | N/A | N/A | 否 |")
 
     candidates = list(payload.get("promotion_candidates") or [])
     lines.extend(["", "## 研究结论", ""])
@@ -84,18 +88,19 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
             continue
         lines.append(f"### Champion · {item.get('horizon_days')}D")
         lines.append("")
-        lines.append("| 年份 | N | 命中率 | 95% CI | SPY超额 |")
-        lines.append("|---|---:|---:|---|---:|")
+        lines.append("| 年份 | N | 命中率 | 95% CI | 方向策略收益 | 方向策略SPY超额 |")
+        lines.append("|---|---:|---:|---|---:|---:|")
         for year in yearly:
             low = year.get("hit_rate_ci95_low_pct")
             high = year.get("hit_rate_ci95_high_pct")
             ci = "N/A" if low is None or high is None else f"{_fmt(low, suffix='%')}–{_fmt(high, suffix='%')}"
             lines.append(
-                "| {year} | {n} | {hit} | {ci} | {excess} |".format(
+                "| {year} | {n} | {hit} | {ci} | {strategy_return} | {excess} |".format(
                     year=year.get("year") or "-",
                     n=year.get("samples", 0),
                     hit=_fmt(year.get("directional_hit_rate_pct"), suffix="%"),
                     ci=ci,
+                    strategy_return=_fmt(year.get("avg_return_pct"), suffix="%", digits=2),
                     excess=_fmt(year.get("avg_excess_vs_spy_pct"), suffix="%", digits=2),
                 )
             )
@@ -109,6 +114,7 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
             f"- 自动晋级：**{payload.get('auto_promotion', False)}**",
             "- 当前 SEC/FRED 快照不会回填历史日期，避免未来数据泄漏。",
             "- 相邻日预测会共享未来窗口，因此晋级判断优先使用非重叠样本。",
+            "- 方向策略收益是无杠杆、未计交易成本的研究口径；真实 BUY_SETUP 交易计划仍由单独的保守执行回放评估。",
         ]
     )
     return "\n".join(lines) + "\n"
