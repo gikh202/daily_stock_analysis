@@ -7,11 +7,11 @@ The goal is to separate four questions that were previously too easy to mix toge
 1. Did a model look good in the historical replay?
 2. Is the result statistically credible after testing many model/horizon combinations?
 3. Does the result survive realistic friction and different years/directions?
-4. Does a frozen hypothesis continue to work on genuinely new outcomes?
+4. Does the **same frozen hypothesis** continue to work on genuinely new outcomes?
 
 ## Runtime contract
 
-The weekly job still starts from the isolated, read-only-safe three-year research database and the existing strict no-lookahead replay. `scripts/run_v6_accuracy_weekly.py` then enriches the V6.3 payload with V6.4 governance evidence before writing the JSON and Markdown Artifact.
+The weekly job still starts from the isolated, read-only-safe three-year research database and the existing strict no-lookahead replay. `scripts/run_v6_accuracy_weekly.py` loads the history once, builds one observation sequence, and reuses those observations for both the V6.3 summary and V6.4 governance evidence before writing the JSON and Markdown Artifact.
 
 V6.4 adds these top-level method contracts:
 
@@ -22,7 +22,7 @@ alpha_calibration_common_timeline_method=global_alpha_non_overlap_then_fixed_mar
 alpha_multiple_testing_method=holm_bonferroni_exact_one_sided_binomial_v1
 alpha_direction_diagnostics_method=global_alpha_non_overlap_by_direction_v1
 alpha_cost_sensitivity_method=global_alpha_non_overlap_fixed_total_cost_bps_v1
-forward_alpha_watch.method=frozen_candidates_global_non_overlap_post_freeze_v1
+forward_alpha_watch.method=frozen_candidates_global_non_overlap_post_freeze_v2
 ```
 
 All new metrics are research-only.
@@ -98,7 +98,7 @@ The purpose is to detect whether an apparently good aggregate result is mostly a
 
 ## 5. Cost sensitivity
 
-The weekly report now stress-tests the global independent Alpha Spread under fixed total friction assumptions:
+The weekly report stress-tests the global independent Alpha Spread under fixed total friction assumptions:
 
 ```text
 0 bps
@@ -120,27 +120,45 @@ momentum_focus · 10D
 relative_strength_focus · 20D
 ```
 
-V6.4 freezes that candidate set at:
+V6.4 freezes them at:
 
 ```text
 2026-08-10
 ```
 
-For each frozen candidate, the global non-overlapping Alpha timeline is partitioned into:
+The freeze is not only `(variant, horizon)`. It also records the implementation identity needed to decide whether later observations are comparable with the discovery hypothesis:
+
+- `ACCURACY_LAB_VERSION`;
+- `SHADOW_VARIANT_REVISION`;
+- bullish/bearish threshold for the horizon;
+- existing `_variant_identity()` for both STOCK and ETF shadow profiles.
+
+The discovery definitions are intentionally hard-coded into the frozen candidate specification. At every weekly run V6.4 reconstructs the current identities from `shadow_profiles()` and the current thresholds/revisions, then verifies them against the frozen definitions.
+
+For each compatible frozen candidate, the global non-overlapping Alpha timeline is partitioned into:
 
 - `discovery`: `as_of < 2026-08-10`;
 - `forward`: `as_of >= 2026-08-10`.
 
+If a later change modifies the shadow multiplier, base profile, relevant threshold, Shadow revision, or Accuracy Lab revision, the watch row becomes:
+
+```text
+status=definition_drifted
+definition_matches_freeze=false
+```
+
+The post-change replay values may still be shown for diagnosis, but they cannot become forward confirmation for the old frozen hypothesis and can never reach `ready_for_manual_review`. A materially new model definition therefore needs a new explicit frozen hypothesis rather than silently inheriting the old track record.
+
 The candidate list is not reselected when new data arrives. This prevents later weekly runs from moving the goalposts by choosing whichever historical model/horizon currently looks best.
 
-The two frozen forward hypotheses also receive Holm correction as a fixed family. Status is:
+The two frozen forward hypotheses also receive Holm correction as a fixed family. Compatible definitions use these statuses:
 
 - `waiting_for_outcomes`: no post-freeze mature independent samples yet;
 - `collecting`: some post-freeze samples, but below the minimum forward sample floor;
 - `not_confirmed`: enough samples exist but the confirmation gate fails;
 - `ready_for_manual_review`: enough samples, Wilson lower bound > 50%, positive average Alpha, and Holm-adjusted p < 0.05.
 
-Even `ready_for_manual_review` does not change production automatically.
+`definition_drifted` is a separate fail-safe state. Even `ready_for_manual_review` does not change production automatically.
 
 ## 7. Production governance
 
@@ -172,7 +190,22 @@ Champion Alpha 成本敏感度
 冻结候选 Forward Watch
 ```
 
-The JSON contains the same evidence for every model/horizon, not only Champion.
+The JSON contains the same evidence for every model/horizon, not only Champion, including frozen and current candidate definitions for audit.
+
+## Fail-closed validation
+
+Before the weekly Artifact is written, `validate_research_governance()` checks the V6.4 contract:
+
+- Alpha yearly raw/non-overlapping partitions reconcile to the total Alpha Target sample counts;
+- common-timeline score buckets plus unscored observations reconcile to the same independent timeline;
+- bullish/bearish direction partitions reconcile to the same independent timeline;
+- cost grids keep identical sample counts and higher fixed costs cannot improve average net Alpha;
+- raw and Holm-adjusted probabilities remain valid and adjusted p-values cannot be more optimistic than raw p-values;
+- the frozen candidate set and frozen definitions cannot silently drift;
+- a definition-drifted candidate cannot be marked review-ready;
+- automatic promotion and automatic weight tuning remain disabled.
+
+A contract violation fails report generation instead of publishing a misleading "green" research Artifact.
 
 ## Interpretation
 
@@ -186,7 +219,8 @@ historical signal
 → multiple-testing correction
 → yearly/direction/regime stability
 → friction sensitivity
-→ frozen forward confirmation
+→ immutable frozen definition
+→ genuinely new forward confirmation
 → manual review
 → separate production change
 ```
