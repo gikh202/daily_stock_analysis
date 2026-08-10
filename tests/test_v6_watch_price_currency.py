@@ -38,6 +38,8 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         )
         == "关注中国售价99元的销量反馈，同时股价回踩$180-182"
     )
+    assert _normalize_watch_price_yuan("跌破 110 元止损") == "跌破 $110止损"
+    assert _normalize_watch_price_yuan("股价回踩120-121 元分批") == "股价回踩$120-121分批"
 
 
 def test_negated_chase_span_stops_at_clause_connectors() -> None:
@@ -51,13 +53,17 @@ def test_negated_chase_span_stops_at_clause_connectors() -> None:
     )
 
 
-def test_auxiliary_risk_control_price_uses_usd() -> None:
+def test_auxiliary_risk_control_price_uses_usd_without_touching_cny_facts() -> None:
     section = """### 1. TEST · Example · 最终：等待
 
 - **交易计划**：
-  - **风险控制**: 止损参考466.00元；仓位不超过3%
+  - **风险控制**: 止损参考 466.00 元；若中国售价99元的产品销量恶化则减仓；仓位不超过3%
 """
     email_card = _standardize_stock_card(section)
 
-    assert "**辅助风险控制（非执行）**: 止损参考$466.00；仓位不超过3%" in email_card
-    assert "466.00元" not in email_card
+    assert (
+        "**辅助风险控制（非执行）**: 止损参考 $466.00；若中国售价99元的产品销量恶化则减仓；仓位不超过3%"
+        in email_card
+    )
+    assert "466.00 元" not in email_card
+    assert "中国售价$99" not in email_card
