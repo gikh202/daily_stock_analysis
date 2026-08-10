@@ -32,7 +32,7 @@ def _horizon_cell(item: Mapping[str, Any], key: str) -> str:
         coverage_text = f"{100.0 * float(coverage):.0f}%"
     except (TypeError, ValueError):
         coverage_text = "N/A"
-    return f"{direction} {score}（证据{coverage_text}）"
+    return f"{direction} {score}（因子覆盖{coverage_text}）"
 
 
 def _accuracy_section(payload: Mapping[str, Any]) -> str:
@@ -184,13 +184,110 @@ def _compact_validation(section: str) -> str:
     return "\n".join(lines)
 
 
+def _normalize_us_investor_terms(text: str) -> str:
+    """Normalize investor-facing U.S. price, timezone and evidence labels."""
+    text = re.sub(r"（证据([^）]+)）", r"（因子覆盖\1）", text)
+    text = re.sub(r"(?<![\d.])(\d+(?:\.\d+)?)元", r"$\1", text)
+    text = re.sub(r"\((?:EDT|EST|美东时间)\)", "ET（美东）", text)
+    text = re.sub(r"（(?:EDT|EST|美东时间)）", "ET（美东）", text)
+    text = re.sub(r"\b(?:EDT|EST)\b|美东时间", "ET（美东）", text)
+    return text
+
+
+def _standardize_stock_card(section: str) -> str:
+    """Make one investor card use one execution-price hierarchy."""
+    has_deterministic_plan = (
+        "**融合入场区间**" in section or "确定性风控计划" in section
+    )
+    no_chase_guard = "禁止追高" in section or "禁止追价" in section
+    output: list[str] = []
+    execution_note_added = False
+
+    for line in section.splitlines():
+        # Uncalibrated model probability is useful in raw research artifacts but
+        # must not look like a live win probability in the investor inbox.
+        line = re.sub(
+            r"\s*\|\s*模型上行概率\s+\*\*[^*\n]*未校准[^*\n]*\*\*",
+            "",
+            line,
+        )
+
+        if "量化视角" in line:
+            line = line.replace("| 证据 **", "| 总体证据覆盖 **")
+
+        # A deterministic V6 plan is the only executable price source. Legacy V4
+        # price/position references stay in the raw report but are hidden here.
+        if has_deterministic_plan and re.match(
+            r"^\s*-\s+\*\*(?:价格参考|仓位参考)\*\*[:：]", line
+        ):
+            continue
+
+        if not has_deterministic_plan:
+            line = line.replace("**价格参考**", "**辅助价格参考（非执行）**")
+            line = line.replace("**仓位参考**", "**辅助仓位参考（非执行）**")
+            line = line.replace("**参考入场**", "**辅助入场参考（非执行）**")
+
+        # Remove an obvious A-share turnover template that has no valid place in
+        # a U.S. investor email. The raw report remains available for audit.
+        if "亿级别成交额" in line:
+            continue
+
+        # If the card already says no chasing, an explanatory V4 line must not
+        # instruct the user to chase a breakout in the same card.
+        if no_chase_guard and re.search(r"(?:日内)?(?:可|可以)追(?:高|涨)?", line):
+            replaced = re.sub(
+                r"([，,])\s*(?:日内)?(?:可|可以)追(?:高|涨)?[^。；;]*",
+                r"\1仅视为强势确认，不追价",
+                line,
+            )
+            if replaced == line:
+                replaced = re.sub(
+                    r"(?:日内)?(?:可|可以)追(?:高|涨)?[^。；;]*",
+                    "仅视为强势确认，不追价",
+                    line,
+                )
+            line = replaced
+
+        line = line.replace(
+            "（优先采用 确定性风控计划）",
+            "（唯一执行价格口径）",
+        )
+
+        if not has_deterministic_plan and re.match(
+            r"^\s*-\s+\*\*交易计划\*\*[:：]\s*$", line
+        ):
+            line = line.replace("**交易计划**", "**辅助交易计划（未触发）**")
+
+        output.append(line)
+
+        if (
+            has_deterministic_plan
+            and not execution_note_added
+            and re.match(r"^\s*-\s+\*\*交易计划\*\*[:：]\s*$", line)
+        ):
+            output.append(
+                "  - **执行口径**: 确定性风控计划为唯一执行价格口径；"
+                "投研层价格仅用于解释，不作为下单依据。"
+            )
+            execution_note_added = True
+
+    return "\n".join(output)
+
+
+def _standardize_stock_cards(text: str) -> str:
+    pattern = re.compile(
+        r"(?ms)^### \d+\. .*?(?=^### \d+\.|^## \d+\.|^## 预测可信度|\Z)"
+    )
+    return pattern.sub(lambda match: _standardize_stock_card(match.group(0)), text)
+
+
 def build_investor_email_markdown(report: str) -> str:
     """Convert the full V6 research report into a concise stock-only email view.
 
     The full Markdown/JSON artifacts keep diagnostics, source health and validation
-    details.  The email intentionally removes implementation/runtime noise and
-    keeps only market context, stock decisions, multi-horizon forecasts, trade
-    plans, catalysts/risks and meaningful historical validation.
+    details. The investor email keeps one execution hierarchy: daily action and a
+    deterministic V6 trade plan are authoritative, while V4 narrative remains
+    explanatory and cannot introduce a conflicting executable price instruction.
     """
     text = str(report or "").replace("\r\n", "\n").strip()
     if not text:
@@ -229,7 +326,7 @@ def build_investor_email_markdown(report: str) -> str:
     text = text.replace("## V6.1 多周期确定性预测", "## 多周期预测")
     text = re.sub(
         r"(?m)^> 5D、10D、20D 使用不同的确定性权重；.*$",
-        "> 5D / 10D / 20D 分别观察短、中、稍长周期；分数用于相对比较，不直接等同于胜率。",
+        "> 5D / 10D / 20D 分别观察短、中、稍长周期；分数与因子覆盖率用于相对比较，均不直接等同于胜率或概率。",
         text,
     )
 
@@ -246,6 +343,12 @@ def build_investor_email_markdown(report: str) -> str:
     )
 
     text = text.replace("## 3. 标的融合分析", "## 标的详解")
+    text = text.replace(
+        "## 标的详解",
+        "## 标的详解\n\n> 执行优先级：今日动作与确定性交易计划优先；投研摘要用于解释。"
+        "若价格或追价口径冲突，以确定性风控计划为准。",
+        1,
+    )
     replacements = (
         ("V4 投研摘要", "投研摘要"),
         ("V6 确定性视角", "量化视角"),
@@ -261,6 +364,9 @@ def build_investor_email_markdown(report: str) -> str:
     )
     for old, new in replacements:
         text = text.replace(old, new)
+
+    text = _standardize_stock_cards(text)
+    text = _normalize_us_investor_terms(text)
 
     # Remove operational/model/source-health sections from email.
     text = re.sub(
