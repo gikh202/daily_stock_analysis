@@ -23,6 +23,9 @@ _PRICE_YUAN_RE = re.compile(
     r"(?<![\d.,])\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
     r"(?:\s*[-–—~～至]\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)?)元"
 )
+_MAX_POSITION_RE = re.compile(
+    r"\*\*最大仓位上限\*\*[:：]\s*`?\s*(\d+(?:\.\d+)?)\s*%"
+)
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -238,9 +241,21 @@ def _rewrite_affirmative_chase_clauses(line: str) -> str:
     return masked
 
 
+def _has_positive_max_position(section: str) -> bool:
+    match = _MAX_POSITION_RE.search(section)
+    if not match:
+        return False
+    try:
+        return float(match.group(1)) > 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _standardize_stock_card(section: str) -> str:
     """Make one investor card use one execution-price hierarchy."""
-    has_deterministic_plan = "**融合入场区间**" in section
+    has_deterministic_levels = "**融合入场区间**" in section
+    has_deterministic_plan = has_deterministic_levels and _has_positive_max_position(section)
+    inactive_deterministic_levels = has_deterministic_levels and not has_deterministic_plan
     no_chase_guard = bool(re.search(_NEGATED_CHASE_PATTERN, section))
     output: list[str] = []
     execution_note_added = False
@@ -266,9 +281,9 @@ def _standardize_stock_card(section: str) -> str:
         if "量化视角" in line:
             line = line.replace("| 证据 **", "| 总体证据覆盖 **")
 
-        # A deterministic V6 plan is the only executable price source. Legacy V4
-        # price/position/risk-control references stay in the raw report but are
-        # hidden from the investor inbox.
+        # A positive deterministic position allowance is required before V6
+        # levels are presented as executable. Legacy V4 price/position/risk
+        # instructions are suppressed only for an active deterministic plan.
         if has_deterministic_plan and re.match(
             r"^\s*-\s+\*\*(?:价格参考|仓位参考|风险控制)\*\*[:：]", line
         ):
@@ -288,15 +303,26 @@ def _standardize_stock_card(section: str) -> str:
         if no_chase_guard:
             line = _rewrite_affirmative_chase_clauses(line)
 
-        line = line.replace(
-            "（优先采用 确定性风控计划）",
-            "（唯一执行价格口径）",
-        )
+        if has_deterministic_plan:
+            line = line.replace(
+                "（优先采用 确定性风控计划）",
+                "（唯一执行价格口径）",
+            )
+        elif inactive_deterministic_levels:
+            line = line.replace(
+                "**融合入场区间**",
+                "**保留入场区间（当前不可执行）**",
+            )
+            line = line.replace(
+                "（优先采用 确定性风控计划）",
+                "（组合风控当前禁止新仓）",
+            )
 
-        if not has_deterministic_plan and re.match(
-            r"^\s*-\s+\*\*交易计划\*\*[:：]\s*$", line
-        ):
-            line = line.replace("**交易计划**", "**辅助交易计划（未触发）**")
+        if re.match(r"^\s*-\s+\*\*交易计划\*\*[:：]\s*$", line):
+            if inactive_deterministic_levels:
+                line = line.replace("**交易计划**", "**交易计划（当前不可执行）**")
+            elif not has_deterministic_levels:
+                line = line.replace("**交易计划**", "**辅助交易计划（未触发）**")
 
         if price_block in {"交易计划", "下一次确认条件"}:
             line = _normalize_execution_price_yuan(line)
