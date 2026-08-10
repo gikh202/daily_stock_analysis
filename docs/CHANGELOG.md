@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] V6.3 Alpha Target Lab 在周度严格 no-lookahead 回放中新增相对 SPY 的方向目标、0–2/2–5/5–10/10pt+ 固定分数余量校准桶与按 as-of SPY 趋势/波动划分的 Regime Matrix；统一报告 Wilson 95% CI 和方向化 Alpha Spread，保持 Champion、生产阈值、自动调权/晋级与既有 Promotion Gate 不变。
 - [改进] V6.2 周度 Accuracy Replay 新增研究型置信度/选择性切片：按现有 5D/10D/20D bullish/bearish 触发阈值计算 0/2/5/10pt 分数余量，先过滤方向信号再做全时间轴 non-overlap，报告参与率、Wilson 95% CI、方向策略收益与 SPY 超额；仅用于研究，不自动修改生产阈值、Champion 权重或晋级门禁。
 - [修复] V6.2 周度 Accuracy Replay 改为按各 Champion/Challenger 的预测方向计算无杠杆研究收益与 SPY 超额（bullish=+1x、bearish=-1x、neutral=现金），避免不同模型共享同一底层股票收益导致 Alpha 恒等；同时保留底层收益字段用于审计。
 - [新功能] V6.2 Accuracy Lab 新增 95% Wilson 置信区间、5D/10D/20D 非重叠样本验证、BUY_SETUP 保守执行回测、Champion/Challenger Shadow、严格 no-lookahead 周度回放与研究型晋级门禁；正式 Champion 权重、自动调权和自动晋级保持关闭。

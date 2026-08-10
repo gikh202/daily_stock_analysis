@@ -197,6 +197,25 @@ jobs:
               raise SystemExit(
                   f"unexpected selectivity thresholds: {payload.get('selectivity_margin_thresholds')!r}"
               )
+          if payload.get('alpha_target_method') != 'spy_relative_directional_filter_then_global_non_overlap_v1':
+              raise SystemExit(
+                  f"unexpected alpha target method: {payload.get('alpha_target_method')!r}"
+              )
+          if payload.get('alpha_calibration_method') != 'fixed_directional_margin_buckets_v1':
+              raise SystemExit(
+                  f"unexpected alpha calibration method: {payload.get('alpha_calibration_method')!r}"
+              )
+          alpha_buckets = payload.get('alpha_calibration_buckets') or []
+          if [str(item.get('label') or '') for item in alpha_buckets] != ['0-2pt', '2-5pt', '5-10pt', '10pt+']:
+              raise SystemExit(f"unexpected alpha calibration buckets: {alpha_buckets!r}")
+          if payload.get('regime_matrix_method') != 'global_alpha_non_overlap_then_asof_spy_regime_partition_v1':
+              raise SystemExit(
+                  f"unexpected regime matrix method: {payload.get('regime_matrix_method')!r}"
+              )
+          alpha_definition = payload.get('alpha_target_definition') or {}
+          if alpha_definition.get('benchmark') != 'SPY' or alpha_definition.get('neutral') != 'excluded':
+              raise SystemExit(f"unexpected alpha target definition: {alpha_definition!r}")
+
           results = payload.get('results')
           if not isinstance(results, list) or not results:
               raise SystemExit('weekly replay results must be a non-empty list')
@@ -334,6 +353,113 @@ jobs:
                           )
                   previous_raw_n = raw_n
                   previous_participation = float(participation)
+
+              alpha_target = item.get('alpha_target')
+              if not isinstance(alpha_target, dict):
+                  raise SystemExit(f"missing alpha target for champion {horizon}D")
+              alpha_raw = alpha_target.get('raw') or {}
+              alpha_independent = alpha_target.get('non_overlapping') or {}
+              alpha_raw_n = int(alpha_raw.get('samples') or 0)
+              alpha_independent_n = int(alpha_independent.get('samples') or 0)
+              if alpha_raw_n > int(raw.get('samples') or 0):
+                  raise SystemExit(f"alpha target samples exceed total for champion {horizon}D")
+              if alpha_independent_n > alpha_raw_n:
+                  raise SystemExit(f"alpha independent samples exceed raw for champion {horizon}D")
+              if alpha_independent_n > 0:
+                  if (
+                      alpha_independent.get('alpha_hit_ci95_low_pct') is None
+                      or alpha_independent.get('alpha_hit_ci95_high_pct') is None
+                  ):
+                      raise SystemExit(f"missing alpha Wilson CI for champion {horizon}D")
+                  if alpha_independent.get('avg_alpha_trade_return_pct') is None:
+                      raise SystemExit(f"missing alpha spread return for champion {horizon}D")
+
+              calibration = item.get('alpha_calibration')
+              if not isinstance(calibration, list):
+                  raise SystemExit(f"missing alpha calibration for champion {horizon}D")
+              labels = [str(bucket.get('label') or '') for bucket in calibration]
+              if labels != ['0-2pt', '2-5pt', '5-10pt', '10pt+']:
+                  raise SystemExit(f"invalid alpha calibration labels for champion {horizon}D: {labels!r}")
+              calibration_raw_samples = 0
+              for bucket in calibration:
+                  bucket_raw = bucket.get('raw') or {}
+                  bucket_independent = bucket.get('non_overlapping') or {}
+                  bucket_raw_n = int(bucket_raw.get('samples') or 0)
+                  bucket_independent_n = int(bucket_independent.get('samples') or 0)
+                  share = bucket.get('directional_share_pct')
+                  if share is None or not 0.0 <= float(share) <= 100.0:
+                      raise SystemExit(
+                          f"invalid alpha calibration share for champion {horizon}D bucket={bucket.get('label')}"
+                      )
+                  if bucket_independent_n > bucket_raw_n:
+                      raise SystemExit(
+                          f"alpha calibration independent samples exceed raw for champion {horizon}D bucket={bucket.get('label')}"
+                      )
+                  if bucket_independent_n > 0:
+                      if (
+                          bucket_independent.get('alpha_hit_ci95_low_pct') is None
+                          or bucket_independent.get('alpha_hit_ci95_high_pct') is None
+                      ):
+                          raise SystemExit(
+                              f"missing calibration Wilson CI for champion {horizon}D bucket={bucket.get('label')}"
+                          )
+                      if bucket_independent.get('avg_alpha_trade_return_pct') is None:
+                          raise SystemExit(
+                              f"missing calibration alpha return for champion {horizon}D bucket={bucket.get('label')}"
+                          )
+                  calibration_raw_samples += bucket_raw_n
+              if calibration_raw_samples > alpha_raw_n:
+                  raise SystemExit(
+                      f"alpha calibration samples exceed alpha target for champion {horizon}D: "
+                      f"calibration={calibration_raw_samples} alpha={alpha_raw_n}"
+                  )
+
+              regime_matrix = item.get('regime_matrix')
+              if not isinstance(regime_matrix, list):
+                  raise SystemExit(f"missing regime matrix for champion {horizon}D")
+              allowed_trends = {'up', 'down', 'mixed', 'unknown'}
+              allowed_vols = {'expanding', 'contracting', 'unknown'}
+              regime_raw_samples = 0
+              regime_independent_samples = 0
+              for regime in regime_matrix:
+                  trend = str(regime.get('spy_trend_regime') or '')
+                  vol = str(regime.get('spy_vol_regime') or '')
+                  if trend not in allowed_trends or vol not in allowed_vols:
+                      raise SystemExit(
+                          f"invalid SPY regime for champion {horizon}D: trend={trend!r} vol={vol!r}"
+                      )
+                  regime_raw = regime.get('raw') or {}
+                  regime_independent = regime.get('non_overlapping') or {}
+                  regime_raw_n = int(regime_raw.get('samples') or 0)
+                  regime_independent_n = int(regime_independent.get('samples') or 0)
+                  if regime_independent_n > regime_raw_n:
+                      raise SystemExit(
+                          f"regime independent samples exceed raw for champion {horizon}D trend={trend} vol={vol}"
+                      )
+                  if regime_independent_n > 0:
+                      if (
+                          regime_independent.get('alpha_hit_ci95_low_pct') is None
+                          or regime_independent.get('alpha_hit_ci95_high_pct') is None
+                      ):
+                          raise SystemExit(
+                              f"missing regime Wilson CI for champion {horizon}D trend={trend} vol={vol}"
+                          )
+                      if regime_independent.get('avg_alpha_trade_return_pct') is None:
+                          raise SystemExit(
+                              f"missing regime alpha return for champion {horizon}D trend={trend} vol={vol}"
+                          )
+                  regime_raw_samples += regime_raw_n
+                  regime_independent_samples += regime_independent_n
+              if regime_raw_samples != alpha_raw_n:
+                  raise SystemExit(
+                      f"regime raw partition mismatch for champion {horizon}D: "
+                      f"regime={regime_raw_samples} alpha={alpha_raw_n}"
+                  )
+              if regime_independent_samples != alpha_independent_n:
+                  raise SystemExit(
+                      f"regime independent partition mismatch for champion {horizon}D: "
+                      f"regime={regime_independent_samples} alpha={alpha_independent_n}"
+                  )
 
           print(
               'Weekly accuracy validation: PASS '

@@ -15,7 +15,7 @@ from src.v6_daily.lab_replay import replay_stock_db_accuracy_lab
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run strict no-lookahead V6.2 Champion/Challenger accuracy replay"
+        description="Run strict no-lookahead V6.3 Champion/Challenger accuracy and alpha replay"
     )
     parser.add_argument("--stock-db", default="data/stock_analysis.db")
     parser.add_argument(
