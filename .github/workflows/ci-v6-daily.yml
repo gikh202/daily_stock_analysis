@@ -8,6 +8,7 @@ on:
       - 'scripts/run_v6_replay.py'
       - 'scripts/run_v6_accuracy_replay.py'
       - 'scripts/run_v6_accuracy_weekly.py'
+      - 'scripts/backfill_v6_accuracy_history.py'
       - 'src/alpha_engine/models.py'
       - 'src/alpha_engine/engine.py'
       - 'src/alpha_engine/validation.py'
@@ -16,6 +17,7 @@ on:
       - 'tests/test_v6_runner_accuracy.py'
       - 'tests/test_v6_accuracy_lab.py'
       - 'tests/test_v6_lab_replay.py'
+      - 'tests/test_v6_research_backfill.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -25,12 +27,14 @@ on:
     branches:
       - 'agent/v6-accuracy-foundation'
       - 'feature/v6-2-accuracy-lab'
+      - 'feature/v6-2-accuracy-history-backfill'
     paths:
       - 'src/v6_daily/**'
       - 'scripts/run_v6_daily.py'
       - 'scripts/run_v6_replay.py'
       - 'scripts/run_v6_accuracy_replay.py'
       - 'scripts/run_v6_accuracy_weekly.py'
+      - 'scripts/backfill_v6_accuracy_history.py'
       - 'src/alpha_engine/models.py'
       - 'src/alpha_engine/engine.py'
       - 'src/alpha_engine/validation.py'
@@ -39,6 +43,7 @@ on:
       - 'tests/test_v6_runner_accuracy.py'
       - 'tests/test_v6_accuracy_lab.py'
       - 'tests/test_v6_lab_replay.py'
+      - 'tests/test_v6_research_backfill.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -79,6 +84,7 @@ jobs:
             src/v6_daily/accuracy.py \
             src/v6_daily/accuracy_lab.py \
             src/v6_daily/lab_replay.py \
+            src/v6_daily/research_backfill.py \
             src/v6_daily/accuracy_report.py \
             src/v6_daily/engine.py \
             src/v6_daily/store.py \
@@ -89,6 +95,7 @@ jobs:
             scripts/run_v6_replay.py \
             scripts/run_v6_accuracy_replay.py \
             scripts/run_v6_accuracy_weekly.py \
+            scripts/backfill_v6_accuracy_history.py \
             src/alpha_engine/models.py \
             src/alpha_engine/engine.py \
             src/alpha_engine/validation.py
@@ -103,5 +110,6 @@ jobs:
             tests/test_v6_runner_accuracy.py \
             tests/test_v6_accuracy_lab.py \
             tests/test_v6_lab_replay.py \
+            tests/test_v6_research_backfill.py \
             tests/test_alpha_engine.py \
             tests/test_alpha_validation.py
