@@ -140,6 +140,67 @@ def test_strategy_metrics_are_variant_specific_on_same_underlying_path() -> None
     assert challenger["raw"]["avg_excess_vs_spy_pct"] == -12.0
 
 
+def test_yearly_non_overlapping_uses_global_selection_across_year_boundary() -> None:
+    observations = [
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2024-12-31",
+            as_of_index=4,
+            horizon_days=5,
+            score=10.0,
+            direction="bullish",
+            future_return_pct=1.0,
+            directional_hit=1,
+            excess_vs_spy_pct=0.5,
+            strategy_return_pct=1.0,
+            strategy_excess_vs_spy_pct=0.5,
+        ),
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-02",
+            as_of_index=5,
+            horizon_days=5,
+            score=10.0,
+            direction="bullish",
+            future_return_pct=1.0,
+            directional_hit=1,
+            excess_vs_spy_pct=0.5,
+            strategy_return_pct=1.0,
+            strategy_excess_vs_spy_pct=0.5,
+        ),
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-09",
+            as_of_index=10,
+            horizon_days=5,
+            score=10.0,
+            direction="bullish",
+            future_return_pct=1.0,
+            directional_hit=1,
+            excess_vs_spy_pct=0.5,
+            strategy_return_pct=1.0,
+            strategy_excess_vs_spy_pct=0.5,
+        ),
+    ]
+
+    summary = summarize_accuracy_replay(observations, min_samples=3, promotion_min_samples=3)
+    result = summary["results"][0]
+    by_year = {item["year"]: item for item in result["yearly_walk_forward"]}
+
+    assert summary["yearly_walk_forward_method"] == "raw_and_global_non_overlapping_by_calendar_year_v2"
+    assert by_year["2024"]["raw"]["samples"] == 1
+    assert by_year["2024"]["non_overlapping"]["samples"] == 1
+    assert by_year["2025"]["raw"]["samples"] == 2
+    # The 2025-01-02 forecast overlaps the selected 2024-12-31 5D window,
+    # so the yearly independent view must not restart sampling at Jan 1.
+    assert by_year["2025"]["non_overlapping"]["samples"] == 1
+    assert sum(item["raw"]["samples"] for item in by_year.values()) == result["raw"]["samples"]
+    assert sum(item["non_overlapping"]["samples"] for item in by_year.values()) == result["non_overlapping"]["samples"]
+
+
 def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() -> None:
     observations = replay_accuracy_lab(
         _series_with_future(0.4),
@@ -154,6 +215,7 @@ def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() 
 
     assert summary["method"] == "strict no-lookahead rolling price-feature replay"
     assert summary["strategy_return_method"] == "gross_directional_position_v1"
+    assert summary["yearly_walk_forward_method"] == "raw_and_global_non_overlapping_by_calendar_year_v2"
     assert summary["auto_promotion"] is False
     assert summary["auto_weight_tuning"] is False
     assert summary["observations"] > 0
@@ -174,7 +236,14 @@ def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() 
     assert champion_20d["non_overlapping"]["avg_return_pct"] is not None
     assert champion_20d["non_overlapping"]["avg_excess_vs_spy_pct"] is not None
     assert champion_20d["non_overlapping"]["avg_underlying_return_pct"] is not None
-    assert champion_20d["yearly_walk_forward"]
+    yearly = champion_20d["yearly_walk_forward"]
+    assert yearly
+    assert all("raw" in item and "non_overlapping" in item for item in yearly)
+    assert sum(item["raw"]["samples"] for item in yearly) == champion_20d["raw"]["samples"]
+    assert (
+        sum(item["non_overlapping"]["samples"] for item in yearly)
+        == champion_20d["non_overlapping"]["samples"]
+    )
 
     challenger = next(item for item in results if item["variant"] != "champion")
     assert "promotion_candidate" in challenger
