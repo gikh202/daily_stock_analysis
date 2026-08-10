@@ -55,6 +55,14 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         == "若股价表现改善同时公司支付99元罚款则关注基本面"
     )
     assert (
+        _normalize_watch_price_yuan("若股价表现改善！公司支付99元罚款则关注基本面")
+        == "若股价表现改善！公司支付99元罚款则关注基本面"
+    )
+    assert (
+        _normalize_watch_price_yuan("若股价表现改善?公司支付99元罚款则关注基本面")
+        == "若股价表现改善?公司支付99元罚款则关注基本面"
+    )
+    assert (
         _normalize_watch_price_yuan("若股价表现改善同时关注中国售价99元的销量反馈")
         == "若股价表现改善同时关注中国售价99元的销量反馈"
     )
