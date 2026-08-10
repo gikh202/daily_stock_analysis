@@ -189,6 +189,14 @@ jobs:
               raise SystemExit(
                   f"unexpected yearly walk-forward method: {payload.get('yearly_walk_forward_method')!r}"
               )
+          if payload.get('selectivity_analysis_method') != 'directional_margin_filter_then_global_non_overlap_v1':
+              raise SystemExit(
+                  f"unexpected selectivity analysis method: {payload.get('selectivity_analysis_method')!r}"
+              )
+          if [float(value) for value in (payload.get('selectivity_margin_thresholds') or [])] != [0.0, 2.0, 5.0, 10.0]:
+              raise SystemExit(
+                  f"unexpected selectivity thresholds: {payload.get('selectivity_margin_thresholds')!r}"
+              )
           results = payload.get('results')
           if not isinstance(results, list) or not results:
               raise SystemExit('weekly replay results must be a non-empty list')
@@ -269,6 +277,63 @@ jobs:
                       f"yearly independent sample partition mismatch for champion {horizon}D: "
                       f"yearly={yearly_independent_samples} total={independent.get('samples')}"
                   )
+
+              selectivity = item.get('selectivity_analysis')
+              if not isinstance(selectivity, list) or not selectivity:
+                  raise SystemExit(f"missing selectivity analysis for champion {horizon}D")
+              margins = [float(slice_item.get('min_margin_points')) for slice_item in selectivity]
+              if margins != [0.0, 2.0, 5.0, 10.0]:
+                  raise SystemExit(
+                      f"invalid selectivity margins for champion {horizon}D: {margins!r}"
+                  )
+              previous_raw_n = None
+              previous_participation = None
+              for slice_item in selectivity:
+                  margin = slice_item.get('min_margin_points')
+                  slice_raw = slice_item.get('raw') or {}
+                  slice_independent = slice_item.get('non_overlapping') or {}
+                  raw_n = int(slice_raw.get('samples') or 0)
+                  independent_n = int(slice_independent.get('samples') or 0)
+                  participation = slice_item.get('participation_rate_pct')
+                  capture = slice_item.get('directional_capture_rate_pct')
+                  if raw_n > int(raw.get('samples') or 0):
+                      raise SystemExit(
+                          f"selectivity raw samples exceed total for champion {horizon}D margin={margin}"
+                      )
+                  if independent_n > raw_n:
+                      raise SystemExit(
+                          f"selectivity independent samples exceed raw for champion {horizon}D margin={margin}"
+                      )
+                  if participation is None or not 0.0 <= float(participation) <= 100.0:
+                      raise SystemExit(
+                          f"invalid selectivity participation for champion {horizon}D margin={margin}: {participation!r}"
+                      )
+                  if capture is None or not 0.0 <= float(capture) <= 100.0:
+                      raise SystemExit(
+                          f"invalid selectivity directional capture for champion {horizon}D margin={margin}: {capture!r}"
+                      )
+                  if previous_raw_n is not None and raw_n > previous_raw_n:
+                      raise SystemExit(
+                          f"selectivity samples increased with stricter margin for champion {horizon}D"
+                      )
+                  if previous_participation is not None and float(participation) > previous_participation + 1e-9:
+                      raise SystemExit(
+                          f"selectivity participation increased with stricter margin for champion {horizon}D"
+                      )
+                  if independent_n > 0:
+                      if (
+                          slice_independent.get('hit_rate_ci95_low_pct') is None
+                          or slice_independent.get('hit_rate_ci95_high_pct') is None
+                      ):
+                          raise SystemExit(
+                              f"missing selectivity Wilson CI for champion {horizon}D margin={margin}"
+                          )
+                      if slice_independent.get('avg_excess_vs_spy_pct') is None:
+                          raise SystemExit(
+                              f"missing selectivity SPY excess for champion {horizon}D margin={margin}"
+                          )
+                  previous_raw_n = raw_n
+                  previous_participation = float(participation)
 
           print(
               'Weekly accuracy validation: PASS '
