@@ -34,6 +34,8 @@ For every historical directional forecast whose future SPY return is available:
 underlying_alpha_pct = stock_future_return_pct - spy_future_return_pct
 ```
 
+The SPY benchmark window follows the **actual calendar endpoints of the stock observation**, not an independently advanced count of SPY sessions. For a stock observation from `start_date` to its real `end_date`, V6.3 uses the latest SPY close at or before each endpoint. This matters for A-share/HK/US holiday mismatches: the stock and benchmark are compared over the same calendar interval instead of silently ending on different dates.
+
 A bullish forecast is an Alpha Target hit when:
 
 ```text
@@ -100,7 +102,7 @@ The payload contract is:
 regime_matrix_method=global_alpha_non_overlap_then_asof_spy_regime_partition_v1
 ```
 
-Every regime label is computed from SPY data available **at or before the forecast as-of date**.
+Every regime label is computed from SPY data available **at or before the forecast as-of date**. If the exact forecast calendar date has no SPY bar because another market is open while the U.S. market is closed, the classifier uses the latest earlier SPY bar instead of assigning `unknown` solely because of the holiday mismatch.
 
 Trend uses trailing SPY 20D and 60D returns:
 
