@@ -38,6 +38,14 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         )
         == "关注中国售价99元的销量反馈，同时股价回踩$180-182"
     )
+    assert (
+        _normalize_watch_price_yuan("若股价跌破并收于110元下方")
+        == "若股价跌破并收于$110下方"
+    )
+    assert (
+        _normalize_watch_price_yuan("若股价表现改善同时关注中国售价99元的销量反馈")
+        == "若股价表现改善同时关注中国售价99元的销量反馈"
+    )
     assert _normalize_watch_price_yuan("跌破 110 元止损") == "跌破 $110止损"
     assert _normalize_watch_price_yuan("股价回踩120-121 元分批") == "股价回踩$120-121分批"
 
