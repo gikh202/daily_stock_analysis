@@ -215,10 +215,10 @@ def _selectivity_analysis(
             {
                 "min_margin_points": float(threshold),
                 "participation_rate_pct": (
-                    None if total <= 0 else round(100.0 * len(qualified) / total, 2)
+                    0.0 if total <= 0 else round(100.0 * len(qualified) / total, 2)
                 ),
                 "directional_capture_rate_pct": (
-                    None
+                    0.0
                     if directional_total <= 0
                     else round(100.0 * len(qualified) / directional_total, 2)
                 ),
