@@ -216,15 +216,17 @@ def _standardize_stock_card(section: str) -> str:
             line = line.replace("| 证据 **", "| 总体证据覆盖 **")
 
         # A deterministic V6 plan is the only executable price source. Legacy V4
-        # price/position references stay in the raw report but are hidden here.
+        # price/position/risk-control references stay in the raw report but are
+        # hidden from the investor inbox.
         if has_deterministic_plan and re.match(
-            r"^\s*-\s+\*\*(?:价格参考|仓位参考)\*\*[:：]", line
+            r"^\s*-\s+\*\*(?:价格参考|仓位参考|风险控制)\*\*[:：]", line
         ):
             continue
 
         if not has_deterministic_plan:
             line = line.replace("**价格参考**", "**辅助价格参考（非执行）**")
             line = line.replace("**仓位参考**", "**辅助仓位参考（非执行）**")
+            line = line.replace("**风险控制**", "**辅助风险控制（非执行）**")
             line = line.replace("**参考入场**", "**辅助入场参考（非执行）**")
 
         # Remove an obvious A-share turnover template that has no valid place in
@@ -232,17 +234,24 @@ def _standardize_stock_card(section: str) -> str:
         if "亿级别成交额" in line:
             continue
 
-        # If the card already says no chasing, an explanatory V4 line must not
-        # instruct the user to chase a breakout in the same card.
-        if no_chase_guard and re.search(r"(?:日内)?(?:可|可以)追(?:高|涨)?", line):
+        # If the card already says no chasing, an affirmative explanatory line
+        # must not override the guard. Existing negated chase instructions are
+        # preserved verbatim instead of being matched inside phrases like 不可追高.
+        chase_pattern = r"(?:日内)?(?:可|可以)追(?:高|涨)?"
+        negated_chase_pattern = r"(?:不可|不可以|禁止|不要|不宜|勿)\s*追(?:高|涨)?"
+        if (
+            no_chase_guard
+            and re.search(chase_pattern, line)
+            and not re.search(negated_chase_pattern, line)
+        ):
             replaced = re.sub(
-                r"([，,])\s*(?:日内)?(?:可|可以)追(?:高|涨)?[^。；;]*",
+                rf"([，,])\s*{chase_pattern}[^。；;]*",
                 r"\1仅视为强势确认，不追价",
                 line,
             )
             if replaced == line:
                 replaced = re.sub(
-                    r"(?:日内)?(?:可|可以)追(?:高|涨)?[^。；;]*",
+                    rf"{chase_pattern}[^。；;]*",
                     "仅视为强势确认，不追价",
                     line,
                 )
@@ -359,6 +368,7 @@ def build_investor_email_markdown(report: str) -> str:
         ("V4 仓位参考", "仓位参考"),
         ("V4 价格参考", "价格参考"),
         ("V6确定性方向", "量化方向"),
+        ("V4执行护栏", "执行护栏"),
         ("V4 ", ""),
         ("V6 ", ""),
     )
