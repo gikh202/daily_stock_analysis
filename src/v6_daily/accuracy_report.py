@@ -34,6 +34,9 @@ _WATCH_PRICE_CONTEXT_RE = re.compile(
     r"(?:价格|股价|现价|收盘价|开盘价|入场|买入|买点|卖点|止损|止盈|目标|"
     r"支撑|压力|突破|上破|下破|跌破|站上|守住|回踩|高开|低开|价位|点位|区间)"
 )
+_WATCH_PRICE_BARRIER_RE = re.compile(
+    r"(?:[，,。；;\n]|并且|同时|以及|然后|但|且|而|或|并|与)"
+)
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -229,6 +232,34 @@ def _normalize_execution_price_yuan(line: str) -> str:
     return _PRICE_YUAN_RE.sub(r"$\1", line)
 
 
+def _normalize_watch_price_yuan(line: str) -> str:
+    """Convert only yuan amounts locally bound to a stock-price watch phrase."""
+    matches = list(_PRICE_YUAN_RE.finditer(line))
+    if not matches:
+        return line
+
+    output: list[str] = []
+    cursor = 0
+    previous_amount_end = 0
+    for match in matches:
+        prefix = line[previous_amount_end : match.start()]
+        barrier_end = 0
+        for barrier in _WATCH_PRICE_BARRIER_RE.finditer(prefix):
+            barrier_end = barrier.end()
+        local_prefix = prefix[barrier_end:]
+
+        output.append(line[cursor : match.start()])
+        if _WATCH_PRICE_CONTEXT_RE.search(local_prefix):
+            output.append(f"${match.group(1)}")
+        else:
+            output.append(match.group(0))
+        cursor = match.end()
+        previous_amount_end = match.end()
+
+    output.append(line[cursor:])
+    return "".join(output)
+
+
 def _rewrite_affirmative_chase_clauses(line: str) -> str:
     """Rewrite only the affirmative chase token and preserve all trailing qualifiers."""
     protected: Dict[str, str] = {}
@@ -327,8 +358,8 @@ def _standardize_stock_card(section: str) -> str:
 
         if price_block == "交易计划" and _PLAN_PRICE_LABEL_RE.search(line):
             line = _normalize_execution_price_yuan(line)
-        elif price_block == "下一次确认条件" and _WATCH_PRICE_CONTEXT_RE.search(line):
-            line = _normalize_execution_price_yuan(line)
+        elif price_block == "下一次确认条件":
+            line = _normalize_watch_price_yuan(line)
 
         output.append(line)
 
