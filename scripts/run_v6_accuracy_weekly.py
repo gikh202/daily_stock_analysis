@@ -11,7 +11,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.v6_daily.lab_replay import replay_stock_db_accuracy_lab
+from src.v6_daily.lab_replay import replay_accuracy_lab, summarize_accuracy_replay
+from src.v6_daily.replay import load_sqlite_series
+from src.v6_daily.research_governance import (
+    enrich_accuracy_payload,
+    render_research_governance_markdown,
+)
 
 
 def _fmt(value: Any, *, suffix: str = "", digits: int = 1) -> str:
@@ -39,7 +44,7 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
     calibration_method = payload.get("alpha_calibration_method") or "-"
     regime_method = payload.get("regime_matrix_method") or "-"
     lines = [
-        "# V6.3 Accuracy / Alpha 研究周报",
+        "# V6.4 Accuracy / Alpha Governance 周报",
         "",
         "> 该周报来自严格 no-lookahead 的历史价格/成交量/基准回放，仅用于研究；不会自动调权、修改生产阈值或升级 Challenger。",
         "",
@@ -88,9 +93,7 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
     if candidates:
         lines.append("- 出现满足当前统计门槛的 Challenger 研究候选：")
         for item in candidates:
-            lines.append(
-                f"  - `{item.get('variant')}` · {item.get('horizon_days')}D"
-            )
+            lines.append(f"  - `{item.get('variant')}` · {item.get('horizon_days')}D")
         lines.append("- 这只是进入人工/PR 审核的资格，不代表自动修改生产权重。")
     else:
         lines.append("- 当前没有 Challenger 达到晋级研究门槛；继续积累独立样本。")
@@ -236,6 +239,10 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
             )
         lines.append("")
 
+    governance_markdown = render_research_governance_markdown(payload)
+    if governance_markdown:
+        lines.extend(["", governance_markdown, ""])
+
     lines.extend(
         [
             "## 安全约束",
@@ -255,7 +262,9 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate the weekly V6.3 accuracy/alpha research report")
+    parser = argparse.ArgumentParser(
+        description="Generate the weekly V6.4 accuracy/alpha governance report"
+    )
     parser.add_argument("--stock-db", default="data/stock_analysis.db")
     parser.add_argument("--codes", default="")
     parser.add_argument("--output-dir", default="v6_reports/accuracy_weekly")
@@ -264,12 +273,17 @@ def main() -> int:
     args = parser.parse_args()
 
     codes = [value.strip().upper() for value in args.codes.split(",") if value.strip()]
-    payload = replay_stock_db_accuracy_lab(
-        args.stock_db,
-        codes=codes or None,
+    source_codes = list(dict.fromkeys(codes + ["SPY", "QQQ"])) if codes else None
+    series = load_sqlite_series(args.stock_db, source_codes)
+    observations = replay_accuracy_lab(series, codes=codes or None)
+    payload = summarize_accuracy_replay(
+        observations,
         min_samples=max(3, int(args.min_samples)),
-        promotion_min_samples=max(int(args.promotion_min_samples), int(args.min_samples)),
+        promotion_min_samples=max(
+            int(args.promotion_min_samples), int(args.min_samples)
+        ),
     )
+    payload = enrich_accuracy_payload(payload, observations)
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -280,7 +294,17 @@ def main() -> int:
         encoding="utf-8",
     )
     md_path.write_text(render_weekly_markdown(payload), encoding="utf-8")
-    print(json.dumps({"json": str(json_path), "markdown": str(md_path), "observations": payload.get("observations", 0)}, ensure_ascii=False, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "json": str(json_path),
+                "markdown": str(md_path),
+                "observations": payload.get("observations", 0),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
