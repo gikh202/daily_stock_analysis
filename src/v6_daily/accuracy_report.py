@@ -78,6 +78,10 @@ _PRICE_CONTINUATION_PREFIX_RE = re.compile(
     r"^\s*(?:收于|站上|守住|回踩|触及|跌至|涨至|达到|到达|逼近|接近|"
     r"突破|上破|下破|跌破|高于|低于|位于)"
 )
+_POST_PRICE_CONTINUATION_RE = re.compile(
+    r"^\s*后?\s*(?:收于|站上|守住|回踩|触及|跌至|涨至|达到|到达|逼近|接近|"
+    r"突破|上破|下破|跌破|高于|低于|位于)\s*$"
+)
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -273,6 +277,24 @@ def _normalize_execution_price_yuan(line: str) -> str:
     return _PRICE_YUAN_RE.sub(r"$\1", line)
 
 
+def _price_context_positions(text: str) -> tuple[int, int]:
+    """Return the latest explicit stock-price and CNY-fact markers in one local phrase."""
+    boundary_end = 0
+    for boundary in _WATCH_PRICE_BARRIER_RE.finditer(text):
+        token = boundary.group(0)
+        suffix = text[boundary.end() :]
+        if token not in {"，", ",", "。", "；", ";", "！", "？", "!", "?", "\n", "但", "然而", "不过", "可是", "却"}:
+            if _PRICE_CONTINUATION_PREFIX_RE.match(suffix):
+                continue
+        boundary_end = max(boundary_end, boundary.end())
+    local_text = text[boundary_end:]
+    price_contexts = list(_WATCH_PRICE_CONTEXT_RE.finditer(local_text))
+    cny_contexts = list(_CNY_FACT_CONTEXT_RE.finditer(local_text))
+    latest_price_context = price_contexts[-1].start() if price_contexts else -1
+    latest_cny_context = cny_contexts[-1].start() if cny_contexts else -1
+    return latest_price_context, latest_cny_context
+
+
 def _normalize_watch_price_yuan(line: str) -> str:
     """Convert only yuan amounts locally bound to a stock-price watch phrase."""
     matches = list(_PRICE_YUAN_RE.finditer(line))
@@ -293,7 +315,17 @@ def _normalize_watch_price_yuan(line: str) -> str:
                     continue
             boundary_end = max(boundary_end, boundary.end())
         for amount in _NON_YUAN_PRICE_AMOUNT_RE.finditer(prefix):
-            boundary_end = max(boundary_end, amount.end())
+            prior_price_context, prior_cny_context = _price_context_positions(
+                prefix[: amount.start()]
+            )
+            post_price_text = prefix[amount.end() :]
+            continues_stock_price = bool(
+                prior_price_context >= 0
+                and prior_price_context > prior_cny_context
+                and _POST_PRICE_CONTINUATION_RE.fullmatch(post_price_text)
+            )
+            if not continues_stock_price:
+                boundary_end = max(boundary_end, amount.end())
         local_prefix = prefix[boundary_end:]
         price_contexts = list(_WATCH_PRICE_CONTEXT_RE.finditer(local_prefix))
         movement_contexts = list(_GENERIC_PRICE_MOVEMENT_RE.finditer(local_prefix))
