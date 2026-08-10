@@ -38,10 +38,10 @@ def test_spy_regime_uses_latest_bar_at_or_before_cross_market_date() -> None:
     rows = _spy_rows()
     series = {"SPY": rows}
 
-    # 2025-03-07 is a skipped SPY date, but more than 60 prior SPY observations
-    # exist. The as-of contract should classify from the latest prior SPY bar,
-    # not fall into unknown merely because the exact calendar date is absent.
-    trend, volatility = _spy_market_regime(series, as_of="2025-03-07")
+    # 2025-04-07 is beyond the last synthetic SPY row, but more than 60 prior SPY
+    # observations exist. The as-of contract should classify from the latest prior
+    # SPY bar instead of falling into unknown merely because the exact date is absent.
+    trend, volatility = _spy_market_regime(series, as_of="2025-04-07")
 
     assert trend == "up"
     assert volatility in {"expanding", "contracting"}
