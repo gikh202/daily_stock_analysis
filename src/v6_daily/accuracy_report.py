@@ -63,10 +63,16 @@ _POST_AMOUNT_EXECUTION_RE = re.compile(
 _CNY_FACT_CONTEXT_RE = re.compile(
     r"(?:售价|定价|人民币|成本|费用|营收|收入|销售额|订单金额|补贴|产品价格|服务价格)"
 )
-# Coordinating conjunctions such as “并” can sit inside one stock-price phrase
-# (e.g. “股价跌破并收于110元”), so only punctuation and explicit contrast
-# connectors delimit the inherited price context here.
-_WATCH_PRICE_BARRIER_RE = re.compile(r"(?:[，,。；;\n]|但|然而|不过|可是|却)")
+# Treat punctuation and clause-level conjunctions as context boundaries, but
+# preserve a conjunction when it directly continues the same price phrase
+# (for example, “股价跌破并收于110元”).
+_WATCH_PRICE_BARRIER_RE = re.compile(
+    r"(?:[，,。；;\n]|但|然而|不过|可是|却|并且|同时|以及|然后|而且|或者|并|且|或)"
+)
+_PRICE_CONTINUATION_PREFIX_RE = re.compile(
+    r"^\s*(?:收于|站上|守住|回踩|触及|跌至|涨至|达到|到达|逼近|接近|"
+    r"突破|上破|下破|跌破|高于|低于|位于)"
+)
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -275,6 +281,11 @@ def _normalize_watch_price_yuan(line: str) -> str:
         prefix = line[previous_amount_end : match.start()]
         boundary_end = 0
         for boundary in _WATCH_PRICE_BARRIER_RE.finditer(prefix):
+            token = boundary.group(0)
+            suffix = prefix[boundary.end() :]
+            if token not in {"，", ",", "。", "；", ";", "\n", "但", "然而", "不过", "可是", "却"}:
+                if _PRICE_CONTINUATION_PREFIX_RE.match(suffix):
+                    continue
             boundary_end = max(boundary_end, boundary.end())
         for amount in _NON_YUAN_PRICE_AMOUNT_RE.finditer(prefix):
             boundary_end = max(boundary_end, amount.end())
