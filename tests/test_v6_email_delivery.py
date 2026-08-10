@@ -219,6 +219,18 @@ def test_investor_email_marks_fallback_plan_as_non_execution() -> None:
     assert "价格能否守住$354.01" in email
 
 
+def test_investor_email_recognizes_descriptive_no_chase_guard() -> None:
+    report = _full_report().replace(
+        "暂不追高，接近压力时不得追买。",
+        "不宜仅因短线反弹追买。",
+    )
+    email = build_investor_email_markdown(report)
+
+    assert "执行护栏：不宜仅因短线反弹追买" in email
+    assert "若站上365可以追涨" not in email
+    assert "若站上365仅视为强势确认，不追价" in email
+
+
 def test_investor_email_subject_uses_top_stock_actions(monkeypatch) -> None:
     email = build_investor_email_markdown(_full_report())
     assert extract_investor_email_subject(email) == "美股决策日报｜MSFT 观察 · QQQM 观察｜08-09"
