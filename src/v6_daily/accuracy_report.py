@@ -355,8 +355,8 @@ def build_investor_email_markdown(report: str) -> str:
 
     The full Markdown/JSON artifacts keep diagnostics, source health and validation
     details. The investor email keeps one execution hierarchy: daily action and a
-    deterministic V6 trade plan are authoritative, while V4 narrative remains
-    explanatory and cannot introduce a conflicting executable price instruction.
+    deterministic V6 trade plan are authoritative only when a positive position
+    allowance makes the plan active; V4 narrative remains explanatory.
     """
     text = str(report or "").replace("\r\n", "\n").strip()
     if not text:
@@ -414,8 +414,9 @@ def build_investor_email_markdown(report: str) -> str:
     text = text.replace("## 3. 标的融合分析", "## 标的详解")
     text = text.replace(
         "## 标的详解",
-        "## 标的详解\n\n> 执行优先级：今日动作与确定性交易计划优先；投研摘要用于解释。"
-        "若价格或追价口径冲突，以确定性风控计划为准。",
+        "## 标的详解\n\n> 执行优先级：今日动作优先；仅当确定性交易计划具有正数最大仓位上限时，"
+        "其价格口径才可执行并优先。组合风控将最大仓位压至 0 时，保留价位不可执行，"
+        "不能覆盖其他上下文；投研摘要仅用于解释。",
         1,
     )
     replacements = (
