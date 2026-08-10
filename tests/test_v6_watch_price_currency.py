@@ -98,6 +98,19 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         _normalize_watch_price_yuan("关注服务价格99元的客户反馈")
         == "关注服务价格99元的客户反馈"
     )
+    assert (
+        _normalize_watch_price_yuan("关注商品价格99元的销量反馈")
+        == "关注商品价格99元的销量反馈"
+    )
+    assert (
+        _normalize_watch_price_yuan("关注零售价格99元的销量反馈")
+        == "关注零售价格99元的销量反馈"
+    )
+    assert (
+        _normalize_watch_price_yuan("关注订阅价格99元的续费反馈")
+        == "关注订阅价格99元的续费反馈"
+    )
+    assert _normalize_watch_price_yuan("若价格跌破110元则止损") == "若价格跌破$110则止损"
     assert _normalize_watch_price_yuan("若股价接近99元则止损") == "若股价接近$99则止损"
     assert _normalize_watch_price_yuan("若跌至110元则止损") == "若跌至$110则止损"
     assert _normalize_watch_price_yuan("若触及110元则减仓") == "若触及$110则减仓"
@@ -119,9 +132,40 @@ def test_negated_chase_span_stops_at_clause_connectors() -> None:
         == "不宜现在买入?突破后仅视为强势确认，不追价"
     )
     assert (
+        _rewrite_affirmative_chase_clauses("突破后可以追！")
+        == "突破后仅视为强势确认，不追价！"
+    )
+    assert (
+        _rewrite_affirmative_chase_clauses("突破后可以追?")
+        == "突破后仅视为强势确认，不追价?"
+    )
+    assert (
         _rewrite_affirmative_chase_clauses("不宜仅因短线反弹追买")
         == "不宜仅因短线反弹追买"
     )
+
+
+def test_no_chase_guard_uses_current_execution_or_risk_fields_only() -> None:
+    revoked = """### 1. TEST · Example · 最终：观察
+
+- **投研摘要**：此前禁止追高限制已解除
+- **下一次确认条件**：
+  - 突破后可以追涨
+"""
+    revoked_card = _standardize_stock_card(revoked)
+    assert "突破后可以追涨" in revoked_card
+    assert "突破后仅视为强势确认，不追价" not in revoked_card
+
+    active = """### 1. TEST · Example · 最终：观察
+
+- **主要风险**：
+  - 不宜仅因短线反弹追买
+- **下一次确认条件**：
+  - 突破后可以追！
+"""
+    active_card = _standardize_stock_card(active)
+    assert "突破后仅视为强势确认，不追价！" in active_card
+    assert "突破后可以追！" not in active_card
 
 
 def test_auxiliary_risk_control_price_uses_usd_without_touching_cny_facts() -> None:
