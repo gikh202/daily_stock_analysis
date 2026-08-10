@@ -198,7 +198,6 @@ def _compact_validation(section: str) -> str:
         lines.append(f"| {horizon} | {sample} | {hit} |")
     return "\n".join(lines)
 
-
 def _normalize_us_investor_terms(text: str) -> str:
     """Normalize table coverage and U.S. timezone labels without touching prose."""
     normalized: list[str] = []
@@ -232,7 +231,7 @@ def _rewrite_affirmative_chase_clauses(line: str) -> str:
 
     masked = re.sub(_NEGATED_CHASE_PATTERN, protect, line)
     masked = re.sub(
-        rf"{_CHASE_PATTERN}[^，,。；;]*",
+        rf"{_CHASE_PATTERN}(?:(?!(?:但|且|并且|同时)?__DSA_NO_CHASE_)[^，,。；;])*",
         "仅视为强势确认，不追价",
         masked,
     )
