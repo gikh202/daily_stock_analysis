@@ -11,6 +11,13 @@ _TYPE = {"STOCK": "个股", "ETF": "ETF"}
 
 
 _EMAIL_SUBJECT_META_RE = re.compile(r"^\[dsa-email-subject\]:\s+#\s+\(([^)\n]+)\)\s*$", re.MULTILINE)
+_CHASE_PATTERN = r"(?:日内)?(?:可|可以)追(?:高|涨|价)?"
+_NEGATED_CHASE_PATTERN = (
+    r"(?:不可|不可以|不应|禁止|严禁|不要|不宜|勿|切勿)\s*追(?:高|涨|价)?"
+)
+_PRICE_YUAN_RE = re.compile(
+    r"(?<![\d.,])\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)元"
+)
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -185,46 +192,64 @@ def _compact_validation(section: str) -> str:
 
 
 def _normalize_us_investor_terms(text: str) -> str:
-    """Normalize investor-facing U.S. price, timezone and evidence labels."""
-    text = re.sub(r"（证据([^）]+)）", r"（因子覆盖\1）", text)
-    text = re.sub(
-        r"(?<![\d.,])\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)元",
-        r"$\1",
-        text,
-    )
-    text = re.sub(r"\((?:EDT|EST|美东时间)\)", "ET（美东）", text)
-    text = re.sub(r"（(?:EDT|EST|美东时间)）", "ET（美东）", text)
-    text = re.sub(r"\b(?:EDT|EST)\b|美东时间", "ET（美东）", text)
-    return text
+    """Normalize table coverage and U.S. timezone labels without touching prose."""
+    normalized: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("|"):
+            line = re.sub(
+                r"（证据(\d+(?:\.\d+)?%|N/A)）",
+                r"（因子覆盖\1）",
+                line,
+            )
+        line = re.sub(r"\((?:EDT|EST|美东时间)\)", "ET（美东）", line)
+        line = re.sub(r"（(?:EDT|EST|美东时间)）", "ET（美东）", line)
+        line = re.sub(r"\b(?:EDT|EST)\b|美东时间", "ET（美东）", line)
+        normalized.append(line)
+    return "\n".join(normalized)
+
+
+def _normalize_execution_price_yuan(line: str) -> str:
+    """Convert legacy yuan suffixes only inside execution/watch price blocks."""
+    return _PRICE_YUAN_RE.sub(r"$\1", line)
 
 
 def _rewrite_affirmative_chase_clauses(line: str) -> str:
-    """Rewrite affirmative chase clauses while preserving negated clauses."""
-    chase_pattern = r"(?:日内)?(?:可|可以)追(?:高|涨)?"
-    negated_chase_pattern = (
-        r"(?:不可|不可以|不应|禁止|严禁|不要|不宜|勿|切勿)\s*追(?:高|涨)?"
+    """Rewrite affirmative chase text while preserving explicit no-chase text."""
+    protected: Dict[str, str] = {}
+
+    def protect(match: re.Match[str]) -> str:
+        key = f"__DSA_NO_CHASE_{len(protected)}__"
+        protected[key] = match.group(0)
+        return key
+
+    masked = re.sub(_NEGATED_CHASE_PATTERN, protect, line)
+    masked = re.sub(
+        rf"{_CHASE_PATTERN}[^，,。；;]*",
+        "仅视为强势确认，不追价",
+        masked,
     )
-    parts = re.split(r"([，,。；;])", line)
-    for index in range(0, len(parts), 2):
-        clause = parts[index]
-        if re.search(negated_chase_pattern, clause):
-            continue
-        parts[index] = re.sub(
-            rf"{chase_pattern}[^，,。；;]*",
-            "仅视为强势确认，不追价",
-            clause,
-        )
-    return "".join(parts)
+    for key, value in protected.items():
+        masked = masked.replace(key, value)
+    return masked
 
 
 def _standardize_stock_card(section: str) -> str:
     """Make one investor card use one execution-price hierarchy."""
     has_deterministic_plan = "**融合入场区间**" in section
-    no_chase_guard = "禁止追高" in section or "禁止追价" in section
+    no_chase_guard = bool(re.search(_NEGATED_CHASE_PATTERN, section))
     output: list[str] = []
     execution_note_added = False
+    price_block: Optional[str] = None
 
     for line in section.splitlines():
+        top_label = re.match(r"^-\s+\*\*([^*]+)\*\*[:：]", line)
+        if top_label:
+            label = top_label.group(1)
+            if label in {"交易计划", "下一次确认条件"}:
+                price_block = label
+            else:
+                price_block = None
+
         # Uncalibrated model probability is useful in raw research artifacts but
         # must not look like a live win probability in the investor inbox.
         line = re.sub(
@@ -255,9 +280,6 @@ def _standardize_stock_card(section: str) -> str:
         if "亿级别成交额" in line:
             continue
 
-        # If the card already says no chasing, rewrite only affirmative chase
-        # clauses. Negated clauses remain intact even when the same line also has
-        # a later affirmative clause.
         if no_chase_guard:
             line = _rewrite_affirmative_chase_clauses(line)
 
@@ -270,6 +292,9 @@ def _standardize_stock_card(section: str) -> str:
             r"^\s*-\s+\*\*交易计划\*\*[:：]\s*$", line
         ):
             line = line.replace("**交易计划**", "**辅助交易计划（未触发）**")
+
+        if price_block in {"交易计划", "下一次确认条件"}:
+            line = _normalize_execution_price_yuan(line)
 
         output.append(line)
 
