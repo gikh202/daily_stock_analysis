@@ -187,18 +187,39 @@ def _compact_validation(section: str) -> str:
 def _normalize_us_investor_terms(text: str) -> str:
     """Normalize investor-facing U.S. price, timezone and evidence labels."""
     text = re.sub(r"（证据([^）]+)）", r"（因子覆盖\1）", text)
-    text = re.sub(r"(?<![\d.])(\d+(?:\.\d+)?)元", r"$\1", text)
+    text = re.sub(
+        r"(?<![\d.,])\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)元",
+        r"$\1",
+        text,
+    )
     text = re.sub(r"\((?:EDT|EST|美东时间)\)", "ET（美东）", text)
     text = re.sub(r"（(?:EDT|EST|美东时间)）", "ET（美东）", text)
     text = re.sub(r"\b(?:EDT|EST)\b|美东时间", "ET（美东）", text)
     return text
 
 
+def _rewrite_affirmative_chase_clauses(line: str) -> str:
+    """Rewrite affirmative chase clauses while preserving negated clauses."""
+    chase_pattern = r"(?:日内)?(?:可|可以)追(?:高|涨)?"
+    negated_chase_pattern = (
+        r"(?:不可|不可以|不应|禁止|严禁|不要|不宜|勿|切勿)\s*追(?:高|涨)?"
+    )
+    parts = re.split(r"([，,。；;])", line)
+    for index in range(0, len(parts), 2):
+        clause = parts[index]
+        if re.search(negated_chase_pattern, clause):
+            continue
+        parts[index] = re.sub(
+            rf"{chase_pattern}[^，,。；;]*",
+            "仅视为强势确认，不追价",
+            clause,
+        )
+    return "".join(parts)
+
+
 def _standardize_stock_card(section: str) -> str:
     """Make one investor card use one execution-price hierarchy."""
-    has_deterministic_plan = (
-        "**融合入场区间**" in section or "确定性风控计划" in section
-    )
+    has_deterministic_plan = "**融合入场区间**" in section
     no_chase_guard = "禁止追高" in section or "禁止追价" in section
     output: list[str] = []
     execution_note_added = False
@@ -234,28 +255,11 @@ def _standardize_stock_card(section: str) -> str:
         if "亿级别成交额" in line:
             continue
 
-        # If the card already says no chasing, an affirmative explanatory line
-        # must not override the guard. Existing negated chase instructions are
-        # preserved verbatim instead of being matched inside phrases like 不可追高.
-        chase_pattern = r"(?:日内)?(?:可|可以)追(?:高|涨)?"
-        negated_chase_pattern = r"(?:不可|不可以|禁止|不要|不宜|勿)\s*追(?:高|涨)?"
-        if (
-            no_chase_guard
-            and re.search(chase_pattern, line)
-            and not re.search(negated_chase_pattern, line)
-        ):
-            replaced = re.sub(
-                rf"([，,])\s*{chase_pattern}[^。；;]*",
-                r"\1仅视为强势确认，不追价",
-                line,
-            )
-            if replaced == line:
-                replaced = re.sub(
-                    rf"{chase_pattern}[^。；;]*",
-                    "仅视为强势确认，不追价",
-                    line,
-                )
-            line = replaced
+        # If the card already says no chasing, rewrite only affirmative chase
+        # clauses. Negated clauses remain intact even when the same line also has
+        # a later affirmative clause.
+        if no_chase_guard:
+            line = _rewrite_affirmative_chase_clauses(line)
 
         line = line.replace(
             "（优先采用 确定性风控计划）",
