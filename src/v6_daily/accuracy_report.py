@@ -28,7 +28,7 @@ _PRICE_NUMBER_PATTERN = (
     r"(?:\s*[-–—~～至]\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)?"
 )
 _PRICE_YUAN_RE = re.compile(
-    rf"(?<![\d.,])\$?({_PRICE_NUMBER_PATTERN})元"
+    rf"(?<![\d.,])\$?({_PRICE_NUMBER_PATTERN})\s*元"
 )
 _NON_YUAN_PRICE_AMOUNT_RE = re.compile(
     rf"(?:\$\s*{_PRICE_NUMBER_PATTERN}|"
@@ -41,7 +41,10 @@ _MAX_POSITION_RE = re.compile(
 )
 _PLAN_PRICE_LABEL_RE = re.compile(
     r"\*\*(?:融合入场区间|保留入场区间（当前不可执行）|参考入场|辅助入场参考（非执行）|"
-    r"止损/失效位|目标位|价格参考|辅助价格参考（非执行）|风险控制|辅助风险控制（非执行）)\*\*"
+    r"止损/失效位|目标位|价格参考|辅助价格参考（非执行）)\*\*"
+)
+_RISK_CONTROL_LABEL_RE = re.compile(
+    r"\*\*(?:风险控制|辅助风险控制（非执行）)\*\*"
 )
 _WATCH_PRICE_CONTEXT_RE = re.compile(
     r"(?:价格|股价|现价|收盘价|开盘价|入场|买入|买点|卖点|止损|止盈|目标|"
@@ -371,8 +374,11 @@ def _standardize_stock_card(section: str) -> str:
             elif not has_deterministic_levels:
                 line = line.replace("**交易计划**", "**辅助交易计划（未触发）**")
 
-        if price_block == "交易计划" and _PLAN_PRICE_LABEL_RE.search(line):
-            line = _normalize_execution_price_yuan(line)
+        if price_block == "交易计划":
+            if _RISK_CONTROL_LABEL_RE.search(line):
+                line = _normalize_watch_price_yuan(line)
+            elif _PLAN_PRICE_LABEL_RE.search(line):
+                line = _normalize_execution_price_yuan(line)
         elif price_block == "下一次确认条件":
             line = _normalize_watch_price_yuan(line)
 
