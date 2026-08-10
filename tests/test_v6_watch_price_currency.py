@@ -90,6 +90,15 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         _normalize_watch_price_yuan("若公司罚款达到99元则止损")
         == "若公司罚款达到99元则止损"
     )
+    assert (
+        _normalize_watch_price_yuan("关注产品价格99元的销量反馈")
+        == "关注产品价格99元的销量反馈"
+    )
+    assert (
+        _normalize_watch_price_yuan("关注服务价格99元的客户反馈")
+        == "关注服务价格99元的客户反馈"
+    )
+    assert _normalize_watch_price_yuan("若股价接近99元则止损") == "若股价接近$99则止损"
     assert _normalize_watch_price_yuan("若跌至110元则止损") == "若跌至$110则止损"
     assert _normalize_watch_price_yuan("若触及110元则减仓") == "若触及$110则减仓"
     assert _normalize_watch_price_yuan("跌破 110 元止损") == "跌破 $110止损"
@@ -100,6 +109,14 @@ def test_negated_chase_span_stops_at_clause_connectors() -> None:
     assert (
         _rewrite_affirmative_chase_clauses("不宜现在买入但突破后可以追涨")
         == "不宜现在买入但突破后仅视为强势确认，不追价"
+    )
+    assert (
+        _rewrite_affirmative_chase_clauses("不宜现在买入！突破后可以追涨")
+        == "不宜现在买入！突破后仅视为强势确认，不追价"
+    )
+    assert (
+        _rewrite_affirmative_chase_clauses("不宜现在买入?突破后可以追涨")
+        == "不宜现在买入?突破后仅视为强势确认，不追价"
     )
     assert (
         _rewrite_affirmative_chase_clauses("不宜仅因短线反弹追买")
