@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.v6_daily.accuracy_report import (
     _normalize_watch_price_yuan,
     _rewrite_affirmative_chase_clauses,
+    _standardize_stock_card,
 )
 
 
@@ -48,3 +49,15 @@ def test_negated_chase_span_stops_at_clause_connectors() -> None:
         _rewrite_affirmative_chase_clauses("不宜仅因短线反弹追买")
         == "不宜仅因短线反弹追买"
     )
+
+
+def test_auxiliary_risk_control_price_uses_usd() -> None:
+    section = """### 1. TEST · Example · 最终：等待
+
+- **交易计划**：
+  - **风险控制**: 止损参考466.00元；仓位不超过3%
+"""
+    email_card = _standardize_stock_card(section)
+
+    assert "**辅助风险控制（非执行）**: 止损参考$466.00；仓位不超过3%" in email_card
+    assert "466.00元" not in email_card
