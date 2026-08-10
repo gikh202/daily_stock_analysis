@@ -12,6 +12,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.v6_daily.lab_replay import replay_stock_db_accuracy_lab
+from src.v6_daily.research_governance import (
+    enrich_accuracy_payload_from_stock_db,
+    render_research_governance_markdown,
+)
 
 
 def _fmt(value: Any, *, suffix: str = "", digits: int = 1) -> str:
@@ -39,7 +43,7 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
     calibration_method = payload.get("alpha_calibration_method") or "-"
     regime_method = payload.get("regime_matrix_method") or "-"
     lines = [
-        "# V6.3 Accuracy / Alpha 研究周报",
+        "# V6.4 Accuracy / Alpha Governance 周报",
         "",
         "> 该周报来自严格 no-lookahead 的历史价格/成交量/基准回放，仅用于研究；不会自动调权、修改生产阈值或升级 Challenger。",
         "",
@@ -236,6 +240,10 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
             )
         lines.append("")
 
+    governance_markdown = render_research_governance_markdown(payload)
+    if governance_markdown:
+        lines.extend(["", governance_markdown, ""])
+
     lines.extend(
         [
             "## 安全约束",
@@ -255,7 +263,7 @@ def render_weekly_markdown(payload: Mapping[str, Any]) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate the weekly V6.3 accuracy/alpha research report")
+    parser = argparse.ArgumentParser(description="Generate the weekly V6.4 accuracy/alpha governance report")
     parser.add_argument("--stock-db", default="data/stock_analysis.db")
     parser.add_argument("--codes", default="")
     parser.add_argument("--output-dir", default="v6_reports/accuracy_weekly")
@@ -269,6 +277,11 @@ def main() -> int:
         codes=codes or None,
         min_samples=max(3, int(args.min_samples)),
         promotion_min_samples=max(int(args.promotion_min_samples), int(args.min_samples)),
+    )
+    payload = enrich_accuracy_payload_from_stock_db(
+        payload,
+        args.stock_db,
+        codes=codes or None,
     )
 
     output = Path(args.output_dir)
