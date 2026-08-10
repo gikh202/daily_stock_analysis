@@ -47,7 +47,7 @@ _RISK_CONTROL_LABEL_RE = re.compile(
     r"\*\*(?:风险控制|辅助风险控制（非执行）)\*\*"
 )
 _WATCH_PRICE_CONTEXT_RE = re.compile(
-    r"(?:股价|现价|收盘价|开盘价|入场|买入|买点|卖点|止损|止盈|目标|"
+    r"(?:股价|现价|收盘价|开盘价|入场|买点|卖点|止损|止盈|目标|"
     r"支撑|压力|突破|上破|下破|跌破|站上|守住|回踩|高开|低开|价位|点位|区间)"
 )
 _GENERIC_PRICE_MOVEMENT_RE = re.compile(
