@@ -16,7 +16,7 @@ _CHASE_TARGET = rf"追{_CHASE_SUFFIX_OR_BOUNDARY}"
 _CHASE_PATTERN = rf"(?:日内)?(?:可|可以){_CHASE_TARGET}"
 _NEGATED_CHASE_GAP = (
     r"(?:(?!(?:但|并且|同时|以及|然后|然而|不过|可是|却|而且|且|而|或者|或))"
-    r"[^，,。；;\n]){0,20}?"
+    r"[^，,。；;！？!?\n]){0,20}?"
 )
 _NEGATED_CHASE_PATTERN = (
     rf"(?:不可以|不可|不应|不得|禁止|严禁|不要|不宜|切勿|勿|别)"
@@ -293,6 +293,15 @@ def _normalize_watch_price_yuan(line: str) -> str:
         price_contexts = list(_WATCH_PRICE_CONTEXT_RE.finditer(local_prefix))
         movement_contexts = list(_GENERIC_PRICE_MOVEMENT_RE.finditer(local_prefix))
         cny_contexts = list(_CNY_FACT_CONTEXT_RE.finditer(local_prefix))
+        price_contexts = [
+            price_context
+            for price_context in price_contexts
+            if not any(
+                cny_context.start() <= price_context.start()
+                and price_context.end() <= cny_context.end()
+                for cny_context in cny_contexts
+            )
+        ]
         latest_price_context = price_contexts[-1].start() if price_contexts else -1
         latest_cny_context = cny_contexts[-1].start() if cny_contexts else -1
 
