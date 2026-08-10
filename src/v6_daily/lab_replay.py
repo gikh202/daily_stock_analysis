@@ -4,13 +4,21 @@ import statistics
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from .accuracy import HORIZONS, build_horizon_forecasts, classify_instrument
+from .accuracy import (
+    HORIZONS,
+    HORIZON_BEARISH_THRESHOLD,
+    HORIZON_BULLISH_THRESHOLD,
+    build_horizon_forecasts,
+    classify_instrument,
+)
 from .accuracy_lab import build_shadow_forecasts, wilson_interval
 from .replay import _features_at, _finite, load_sqlite_series
 
 
 STRATEGY_RETURN_METHOD = "gross_directional_position_v1"
 YEARLY_WALK_FORWARD_METHOD = "raw_and_global_non_overlapping_by_calendar_year_v2"
+SELECTIVITY_ANALYSIS_METHOD = "directional_margin_filter_then_global_non_overlap_v1"
+SELECTIVITY_MARGIN_THRESHOLDS = (0.0, 2.0, 5.0, 10.0)
 
 
 @dataclass(frozen=True)
@@ -173,6 +181,54 @@ def _non_overlapping(rows: Sequence[AccuracyReplayObservation], horizon: int) ->
     return selected
 
 
+def _signal_margin_points(item: AccuracyReplayObservation) -> Optional[float]:
+    score = _finite(item.score)
+    horizon = int(item.horizon_days)
+    direction = str(item.direction or "").strip().lower()
+    if score is None:
+        return None
+    if direction == "bullish":
+        threshold = HORIZON_BULLISH_THRESHOLD.get(horizon)
+        return None if threshold is None else max(0.0, float(score) - float(threshold))
+    if direction == "bearish":
+        threshold = HORIZON_BEARISH_THRESHOLD.get(horizon)
+        return None if threshold is None else max(0.0, float(threshold) - float(score))
+    return None
+
+
+def _selectivity_analysis(
+    rows: Sequence[AccuracyReplayObservation],
+    horizon: int,
+) -> list[Dict[str, Any]]:
+    total = len(rows)
+    directional = [item for item in rows if _signal_margin_points(item) is not None]
+    directional_total = len(directional)
+    result: list[Dict[str, Any]] = []
+    for threshold in SELECTIVITY_MARGIN_THRESHOLDS:
+        qualified = [
+            item
+            for item in directional
+            if (_signal_margin_points(item) or 0.0) >= float(threshold)
+        ]
+        independent = _non_overlapping(qualified, int(horizon))
+        result.append(
+            {
+                "min_margin_points": float(threshold),
+                "participation_rate_pct": (
+                    None if total <= 0 else round(100.0 * len(qualified) / total, 2)
+                ),
+                "directional_capture_rate_pct": (
+                    None
+                    if directional_total <= 0
+                    else round(100.0 * len(qualified) / directional_total, 2)
+                ),
+                "raw": _metric(qualified),
+                "non_overlapping": _metric(independent),
+            }
+        )
+    return result
+
+
 def summarize_accuracy_replay(
     observations: Sequence[AccuracyReplayObservation],
     *,
@@ -216,6 +272,7 @@ def summarize_accuracy_replay(
                     "raw": _metric(bucket),
                     "non_overlapping": _metric(independent),
                     "yearly_walk_forward": yearly,
+                    "selectivity_analysis": _selectivity_analysis(bucket, horizon),
                 }
             )
 
@@ -268,6 +325,8 @@ def summarize_accuracy_replay(
         "scope": "price/volume/benchmark features only; current SEC/FRED snapshots are excluded from historical replay",
         "strategy_return_method": STRATEGY_RETURN_METHOD,
         "yearly_walk_forward_method": YEARLY_WALK_FORWARD_METHOD,
+        "selectivity_analysis_method": SELECTIVITY_ANALYSIS_METHOD,
+        "selectivity_margin_thresholds": list(SELECTIVITY_MARGIN_THRESHOLDS),
         "strategy_return_definition": {
             "bullish_position": 1.0,
             "bearish_position": -1.0,
