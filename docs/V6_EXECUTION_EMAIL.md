@@ -6,7 +6,7 @@ Its purpose is to let a reader answer four questions quickly:
 
 1. What should I watch today?
 2. Are 5D / 10D / 20D directions aligned?
-3. If a deterministic trade plan exists, what are the entry, invalidation/stop, targets and maximum position?
+3. If an active deterministic trade plan exists, what are the entry, invalidation/stop, targets and maximum position?
 4. What conditions would invalidate or confirm the setup?
 
 ## Execution hierarchy
@@ -18,12 +18,19 @@ Today action
     ↓
 5D / 10D / 20D deterministic forecasts
     ↓
-Deterministic V6 risk-control trade plan
+Active deterministic V6 risk-control trade plan
     ↓
 V4 research narrative and explanatory context
 ```
 
-When a stock card contains a deterministic V6 entry range, that deterministic plan is the **only executable price source** shown in the investor email. Legacy V4 price, position and risk-control references remain available in the full raw report for audit, but they are hidden from the inbox so the same card cannot show conflicting entry/stop/target/position instructions.
+A deterministic V6 plan is treated as **active/executable** only when the stock card has both:
+
+- a real `融合入场区间`; and
+- a positive V6 `最大仓位上限`.
+
+When both are present, that deterministic plan is the **only executable price source** shown in the investor email. Legacy V4 price, position and risk-control references remain available in the full raw report for audit, but they are hidden from the inbox so the same card cannot show conflicting entry/stop/target/position instructions.
+
+Portfolio/exposure/drawdown gates can deliberately preserve previously calculated entry, stop and target levels while reducing the allowed new position to zero. In that case the inbox must **not** describe those preserved levels as executable. They are shown under `交易计划（当前不可执行）`, with the entry labelled `保留入场区间（当前不可执行）` and an explicit note that portfolio risk control currently prohibits a new position.
 
 If no deterministic V6 entry range exists, the V4-derived plan is kept only as an explicitly labelled **auxiliary / non-execution** reference. A neutral/waiting setup therefore cannot accidentally look like an active trade instruction.
 
@@ -40,13 +47,14 @@ Two coverage concepts are made explicit:
 - horizon cells use `因子覆盖`;
 - the stock detail line uses `总体证据覆盖`.
 
-Neither is a win rate or probability. The multi-horizon introduction states this directly.
+Neither is a win rate or probability. The multi-horizon introduction states this directly. Free-form research prose that uses the ordinary word `证据` is not relabelled.
 
 ## U.S. market presentation
 
 The U.S. investor email normalizes presentation-only terms:
 
-- numeric price references written as `123.45元` become `$123.45`;
+- execution/watch stock-price references written as `123.45元`, `1,234.56元` or `180-182元` become `$123.45`, `$1,234.56` or `$180-182`;
+- unrelated research prose containing genuine CNY amounts remains unchanged;
 - `EST`, `EDT` and `美东时间` are normalized to `ET（美东）` without changing the supplied clock time;
 - obvious A-share turnover template text such as `...亿级别成交额` is removed from the inbox.
 
@@ -54,9 +62,9 @@ The raw report is not rewritten by these presentation rules.
 
 ## No-chase guard
 
-If the final execution guard says `禁止追高` / `禁止追价`, affirmative explanatory confirmation lines in the same stock card cannot simultaneously say `可追`.
+If the final execution/risk wording contains a no-chase instruction, affirmative chase advice in the same stock card cannot remain executable. Supported wording includes direct guards such as `禁止/严禁/不可/不得/暂不追高/追涨/追价/追买` and descriptive forms such as `不宜仅因短线反弹追买`.
 
-An affirmative breakout-chase instruction is instead rendered as a **strong confirmation only, not a chase instruction**. Existing negative instructions such as `不可追高` or `不可以追涨` are preserved as written and are not accidentally rewritten through an inner `可追` substring.
+An affirmative chase instruction is instead rendered as a **strong confirmation only, not a chase instruction**. Existing negative instructions are preserved as written. Non-trading research language such as `新闻证据可追溯` is not treated as a chase instruction.
 
 ## Audit and safety boundary
 
