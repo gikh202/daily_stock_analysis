@@ -236,6 +236,19 @@ def test_investor_email_recognizes_descriptive_no_chase_guard() -> None:
     assert "若站上365仅视为强势确认，不追价" in email
 
 
+def test_investor_email_treats_rounded_positive_position_marker_as_active() -> None:
+    report = _full_report().replace(
+        "  - **V6 最大仓位上限**: `10%`\n",
+        "  - **V6 最大仓位上限**: `0.0%`\n",
+    )
+    email = build_investor_email_markdown(report)
+
+    assert "**融合入场区间**: `[495.0, 500.0]`（唯一执行价格口径）" in email
+    assert "确定性风控计划为唯一执行价格口径" in email
+    assert "**交易计划（当前不可执行）**" not in email
+    assert "组合风控当前禁止新仓" not in email
+
+
 def test_investor_email_marks_preserved_zero_position_plan_inactive() -> None:
     report = _full_report().replace(
         "  - **V6 最大仓位上限**: `10%`\n",
