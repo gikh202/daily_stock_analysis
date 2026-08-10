@@ -82,7 +82,7 @@ def _full_report() -> str:
   - **V4 风险控制**: 止损参考466.00元；仓位不超过3%
 - **下一次确认条件**：
   - 若放量上涨突破515，日内可追但仅限小仓位
-  - 若高开超过3%，突破后不可追高
+  - 若高开超过3%，突破后不可追高，回踩企稳后可以追涨
   - 若价格跌破498.50元则继续观望
   - 下次检查：**2026-08-10 09:30 EDT**
 - **数据限制**：催化因子尚未进入数值评分
@@ -90,7 +90,7 @@ def _full_report() -> str:
 ### 2. GOOGL · Alphabet Inc. · 最终：等待 · 部分一致
 
 - **最终结论**：**等待**。10d预测看多，但V6确定性方向中性，尚未形成完全共振。
-- **V4 投研摘要**：中长期趋势仍在，等待短中期重新确认。
+- **V4 投研摘要**：中长期趋势仍在，等待确定性风控计划确认后再判断短中期机会。
 - **V6 确定性视角**：方向 **中性** | 预测分 **56.0** | 机会/质量/风险 **59.0/70.0/45.0** | 证据 **77%**
 - **融合交易计划**：
   - **参考入场**: 理想买入点：361.29元（回踩MA5）
@@ -99,6 +99,7 @@ def _full_report() -> str:
   - **V4 仓位参考**: 小仓/低仓位
 - **下一次确认条件**：
   - 价格能否守住354.01元
+  - 高价股展示样例1,234.56元必须保持完整数字
   - 下次检查：**2026-08-10 10:00 EST**
 
 ## 4. 大模型与数据健康度
@@ -153,6 +154,7 @@ def test_investor_email_keeps_one_canonical_execution_view() -> None:
     assert "关键因子" in email
     assert "交易计划" in email
     assert "确定性风控计划为唯一执行价格口径" in email
+    assert email.count("确定性风控计划为唯一执行价格口径") == 1
     assert "**融合入场区间**: `[495.0, 500.0]`（唯一执行价格口径）" in email
     assert "最大仓位上限" in email
 
@@ -168,10 +170,14 @@ def test_investor_email_keeps_one_canonical_execution_view() -> None:
     assert "日内可追" not in email
     assert "仅视为强势确认，不追价" in email
     assert "突破后不可追高" in email
+    assert "回踩企稳后可以追涨" not in email
+    assert "回踩企稳后仅视为强势确认，不追价" in email
     assert "突破后不仅视为强势确认" not in email
     assert "V4执行护栏" not in email
     assert "执行护栏：等待盘中确认，禁止追高" in email
     assert "$498.50" in email
+    assert "$1,234.56" in email
+    assert "1,$234.56" not in email
     assert "ET（美东）" in email
     assert " EDT" not in email
     assert " EST" not in email
@@ -191,6 +197,7 @@ def test_investor_email_keeps_one_canonical_execution_view() -> None:
 def test_investor_email_marks_fallback_plan_as_non_execution() -> None:
     email = build_investor_email_markdown(_full_report())
 
+    assert "等待确定性风控计划确认后再判断短中期机会" in email
     assert "**辅助交易计划（未触发）**" in email
     assert "**辅助入场参考（非执行）**: 理想买入点：$361.29" in email
     assert "**辅助仓位参考（非执行）**: 小仓/低仓位" in email
