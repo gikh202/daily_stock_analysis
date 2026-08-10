@@ -23,7 +23,7 @@ Deterministic V6 risk-control trade plan
 V4 research narrative and explanatory context
 ```
 
-When a stock card contains a deterministic V6 entry range, that deterministic plan is the **only executable price source** shown in the investor email. Legacy V4 price and position references remain available in the full raw report for audit, but they are hidden from the inbox so the same card cannot show conflicting entry/stop/target instructions.
+When a stock card contains a deterministic V6 entry range, that deterministic plan is the **only executable price source** shown in the investor email. Legacy V4 price, position and risk-control references remain available in the full raw report for audit, but they are hidden from the inbox so the same card cannot show conflicting entry/stop/target/position instructions.
 
 If no deterministic V6 entry range exists, the V4-derived plan is kept only as an explicitly labelled **auxiliary / non-execution** reference. A neutral/waiting setup therefore cannot accidentally look like an active trade instruction.
 
@@ -54,9 +54,9 @@ The raw report is not rewritten by these presentation rules.
 
 ## No-chase guard
 
-If the final execution guard says `禁止追高` / `禁止追价`, explanatory confirmation lines in the same stock card cannot simultaneously say `可追`.
+If the final execution guard says `禁止追高` / `禁止追价`, affirmative explanatory confirmation lines in the same stock card cannot simultaneously say `可追`.
 
-A breakout condition is instead rendered as a **strong confirmation only, not a chase instruction**. This keeps one execution policy inside a card while preserving the information that a breakout would be technically meaningful.
+An affirmative breakout-chase instruction is instead rendered as a **strong confirmation only, not a chase instruction**. Existing negative instructions such as `不可追高` or `不可以追涨` are preserved as written and are not accidentally rewritten through an inner `可追` substring.
 
 ## Audit and safety boundary
 
