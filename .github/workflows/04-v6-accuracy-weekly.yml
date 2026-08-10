@@ -57,7 +57,7 @@ jobs:
           restore-keys: |
             stock-analysis-data-${{ runner.os }}-
 
-      - name: 校验研究数据源
+      - name: 校验生产研究数据源
         shell: bash
         run: |
           python - <<'PY'
@@ -87,7 +87,67 @@ jobs:
               raise SystemExit('stock_daily table missing')
           if bars <= 0:
               raise SystemExit('stock_daily is empty')
-          print(f'Accuracy research source: PASS stock_daily={bars}')
+          print(f'Accuracy production source: PASS stock_daily={bars}')
+          PY
+
+      - name: 克隆并补齐隔离研究历史
+        env:
+          INPUT_CODES: ${{ inputs.codes || '' }}
+        shell: bash
+        run: |
+          python scripts/backfill_v6_accuracy_history.py \
+            --source-db data/stock_analysis.db \
+            --research-db v6_research/stock_analysis_research.db \
+            --codes "$INPUT_CODES" \
+            --history-years 3 \
+            --minimum-bars 81 \
+            --summary v6_reports/accuracy_weekly/v6_accuracy_history_backfill.json
+
+      - name: 校验隔离研究历史
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sqlite3
+
+          summary_path = 'v6_reports/accuracy_weekly/v6_accuracy_history_backfill.json'
+          research_db = 'v6_research/stock_analysis_research.db'
+          if not os.path.isfile(summary_path):
+              raise SystemExit('accuracy history backfill summary missing')
+          if not os.path.isfile(research_db) or os.path.getsize(research_db) < 4096:
+              raise SystemExit('isolated accuracy research database missing or unexpectedly small')
+
+          with open(summary_path, encoding='utf-8') as f:
+              payload = json.load(f)
+          if payload.get('source_read_only') is not True:
+              raise SystemExit('accuracy backfill did not confirm source_read_only=true')
+          if payload.get('source_unchanged') is not True:
+              raise SystemExit('production stock database changed during research backfill')
+          if payload.get('source_database') == payload.get('research_database'):
+              raise SystemExit('research backfill attempted to reuse the production database path')
+          if int(payload.get('eligible_target_count') or 0) <= 0:
+              raise SystemExit('accuracy backfill produced zero replay-eligible targets')
+          benchmark_ready = payload.get('benchmark_ready') or {}
+          if benchmark_ready.get('SPY') is not True or benchmark_ready.get('QQQ') is not True:
+              raise SystemExit(f'accuracy benchmark history incomplete: {benchmark_ready!r}')
+
+          conn = sqlite3.connect(f'file:{research_db}?mode=ro', uri=True, timeout=10)
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              bars = int(conn.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])
+          finally:
+              conn.close()
+          if quick != 'ok':
+              raise SystemExit(f'isolated research database quick_check failed: {quick!r}')
+          if bars <= 0:
+              raise SystemExit('isolated research stock_daily is empty')
+          print(
+              'Accuracy history backfill: PASS '
+              f"status={payload.get('status')} bars={bars} "
+              f"eligible_targets={payload.get('eligible_target_count')} "
+              f"errors={len(payload.get('errors') or [])}"
+          )
           PY
 
       - name: 运行严格 no-lookahead Champion/Challenger 回放
@@ -98,7 +158,7 @@ jobs:
         shell: bash
         run: |
           python scripts/run_v6_accuracy_weekly.py \
-            --stock-db data/stock_analysis.db \
+            --stock-db v6_research/stock_analysis_research.db \
             --codes "$INPUT_CODES" \
             --min-samples "$MIN_SAMPLES" \
             --promotion-min-samples "$PROMOTION_MIN_SAMPLES" \
@@ -125,11 +185,42 @@ jobs:
               raise SystemExit('unsafe weekly replay: auto_weight_tuning must be false')
           if payload.get('method') != 'strict no-lookahead rolling price-feature replay':
               raise SystemExit(f"unexpected replay method: {payload.get('method')!r}")
-          if not isinstance(payload.get('results'), list):
-              raise SystemExit('weekly replay results must be a list')
+          results = payload.get('results')
+          if not isinstance(results, list) or not results:
+              raise SystemExit('weekly replay results must be a non-empty list')
+          observations = int(payload.get('observations') or 0)
+          if observations <= 0:
+              raise SystemExit('weekly replay produced zero observations')
+
+          expected_variants = {
+              'champion',
+              'trend_guard',
+              'momentum_focus',
+              'relative_strength_focus',
+          }
+          variants = {str(item.get('variant') or '') for item in results}
+          missing_variants = expected_variants - variants
+          if missing_variants:
+              raise SystemExit(f'weekly replay missing variants: {sorted(missing_variants)}')
+
+          champion = [item for item in results if item.get('variant') == 'champion']
+          horizons = {int(item.get('horizon_days') or 0) for item in champion}
+          if horizons != {5, 10, 20}:
+              raise SystemExit(f'weekly champion horizons invalid: {sorted(horizons)}')
+          for item in champion:
+              independent = item.get('non_overlapping') or {}
+              if int(independent.get('samples') or 0) <= 0:
+                  raise SystemExit(f"zero independent samples for champion {item.get('horizon_days')}D")
+              if independent.get('hit_rate_ci95_low_pct') is None or independent.get('hit_rate_ci95_high_pct') is None:
+                  raise SystemExit(f"missing Wilson CI for champion {item.get('horizon_days')}D")
+              if independent.get('avg_excess_vs_spy_pct') is None:
+                  raise SystemExit(f"missing SPY excess for champion {item.get('horizon_days')}D")
+              if not item.get('yearly_walk_forward'):
+                  raise SystemExit(f"missing yearly walk-forward for champion {item.get('horizon_days')}D")
+
           print(
               'Weekly accuracy validation: PASS '
-              f"observations={payload.get('observations', 0)} "
+              f"observations={observations} "
               f"candidates={len(payload.get('promotion_candidates') or [])}"
           )
           PY
