@@ -26,6 +26,14 @@ _PRICE_YUAN_RE = re.compile(
 _MAX_POSITION_RE = re.compile(
     r"\*\*最大仓位上限\*\*[:：]\s*`?\s*(\d+(?:\.\d+)?)\s*%"
 )
+_PLAN_PRICE_LABEL_RE = re.compile(
+    r"\*\*(?:融合入场区间|保留入场区间（当前不可执行）|参考入场|辅助入场参考（非执行）|"
+    r"止损/失效位|目标位|价格参考|辅助价格参考（非执行）)\*\*"
+)
+_WATCH_PRICE_CONTEXT_RE = re.compile(
+    r"(?:价格|股价|现价|收盘价|开盘价|入场|买入|买点|卖点|止损|止盈|目标|"
+    r"支撑|压力|突破|上破|下破|跌破|站上|守住|回踩|高开|低开|价位|点位|区间)"
+)
 
 
 def _num(value: Any, digits: int = 1) -> str:
@@ -217,12 +225,12 @@ def _normalize_us_investor_terms(text: str) -> str:
 
 
 def _normalize_execution_price_yuan(line: str) -> str:
-    """Convert legacy yuan suffixes only inside execution/watch price blocks."""
+    """Convert a legacy yuan suffix when its line is known to describe stock price."""
     return _PRICE_YUAN_RE.sub(r"$\1", line)
 
 
 def _rewrite_affirmative_chase_clauses(line: str) -> str:
-    """Rewrite affirmative chase text while preserving explicit no-chase text."""
+    """Rewrite only the affirmative chase token and preserve all trailing qualifiers."""
     protected: Dict[str, str] = {}
 
     def protect(match: re.Match[str]) -> str:
@@ -231,11 +239,7 @@ def _rewrite_affirmative_chase_clauses(line: str) -> str:
         return key
 
     masked = re.sub(_NEGATED_CHASE_PATTERN, protect, line)
-    masked = re.sub(
-        rf"{_CHASE_PATTERN}(?:(?!(?:但|且|并且|同时)?__DSA_NO_CHASE_)[^，,。；;])*",
-        "仅视为强势确认，不追价",
-        masked,
-    )
+    masked = re.sub(_CHASE_PATTERN, "仅视为强势确认，不追价", masked)
     for key, value in protected.items():
         masked = masked.replace(key, value)
     return masked
@@ -321,7 +325,9 @@ def _standardize_stock_card(section: str) -> str:
             elif not has_deterministic_levels:
                 line = line.replace("**交易计划**", "**辅助交易计划（未触发）**")
 
-        if price_block in {"交易计划", "下一次确认条件"}:
+        if price_block == "交易计划" and _PLAN_PRICE_LABEL_RE.search(line):
+            line = _normalize_execution_price_yuan(line)
+        elif price_block == "下一次确认条件" and _WATCH_PRICE_CONTEXT_RE.search(line):
             line = _normalize_execution_price_yuan(line)
 
         output.append(line)
