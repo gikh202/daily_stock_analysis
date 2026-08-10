@@ -102,7 +102,7 @@ A challenger is only marked as a **research promotion candidate** when all of th
 - challenger hit rate is at least 2 percentage points higher;
 - challenger 95% CI lower bound is above 50%;
 - challenger CI lower bound is not worse than the champion lower bound;
-- SPY excess return is not worse when benchmark data is available.
+- direction-aware strategy SPY excess return is not worse when benchmark data is available.
 
 This flag never changes production weights automatically.
 
@@ -123,7 +123,11 @@ python scripts/run_v6_accuracy_replay.py \
   --output v6_reports/v6_accuracy_replay.json
 ```
 
-For every historical as-of date, this replay builds features only from observations available at or before that date, creates the Champion and all Challenger forecasts, then evaluates future 5/10/20 trading-bar returns. It also reports non-overlapping samples, Wilson intervals, yearly walk-forward results, and SPY excess return when benchmark history exists.
+For every historical as-of date, this replay builds features only from observations available at or before that date, creates the Champion and all Challenger forecasts, then evaluates future 5/10/20 trading-bar returns. It also reports non-overlapping samples, Wilson intervals, yearly walk-forward results, and direction-aware strategy/SPY excess returns when benchmark history exists.
+
+Historical replay maps each forecast to a simple gross research position: `bullish=+1x`, `bearish=-1x`, and `neutral=0x` (cash). `avg_return_pct` is the average return of that direction-aware position, while `avg_excess_vs_spy_pct` is that strategy return minus the contemporaneous long-only SPY return. This makes Champion/Challenger return and Alpha metrics variant-specific instead of reusing the same underlying stock return for every model.
+
+For auditability, the JSON also preserves `avg_underlying_return_pct` and `avg_underlying_excess_vs_spy_pct`, which describe the underlying symbol path independent of forecast direction. Historical direction-strategy returns are gross of trading costs and are not a substitute for the separate cost-aware BUY_SETUP execution replay.
 
 Historical replay intentionally excludes **current** SEC/FRED snapshots. Without a true point-in-time historical SEC/FRED dataset, injecting today's official/macro values into old dates would be look-ahead leakage. The replay therefore measures the historically reconstructible price/volume/benchmark layer and labels that scope explicitly.
 
@@ -227,7 +231,7 @@ The intended process is:
 
 1. collect champion and challenger live shadow outcomes;
 2. inspect non-overlapping accuracy and confidence intervals;
-3. compare SPY/QQQ excess return and trade-plan economics;
+3. compare direction-aware SPY excess return and trade-plan economics;
 4. verify stability by market regime and instrument type where sufficient samples exist;
 5. run strict no-lookahead historical replay separately;
 6. only after out-of-sample evidence is stable, create a reviewed code change to promote a challenger.

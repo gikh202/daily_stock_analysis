@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] V6.2 周度 Accuracy Replay 改为按各 Champion/Challenger 的预测方向计算无杠杆研究收益与 SPY 超额（bullish=+1x、bearish=-1x、neutral=现金），避免不同模型共享同一底层股票收益导致 Alpha 恒等；同时保留底层收益字段用于审计。
 - [新功能] V6.2 Accuracy Lab 新增 95% Wilson 置信区间、5D/10D/20D 非重叠样本验证、BUY_SETUP 保守执行回测、Champion/Challenger Shadow、严格 no-lookahead 周度回放与研究型晋级门禁；正式 Champion 权重、自动调权和自动晋级保持关闭。
 - [新功能] Agent Chat 按会话持久化 Skill 选择，支持刷新和会话切换恢复，并区分省略 `skills`、显式空列表与非空选择；无持久化状态的历史会话继续使用运行时默认且不会被静默转为显式选择，复用分析 `context` 中残留的 legacy `skills` / `strategies` 也不会覆盖顶层三态或会话状态，非空但全部无效的 Skill 请求不会被当成显式空列表并清空既有选择
 - [改进] 后端 CI 在不跳过离线测试的前提下按完整测试文件分成三个独立 runner 并行执行，由单一 `backend-gate` 汇总门禁结果；实测文件耗时和首分片静态检查成本共同参与负载平衡，新测试文件自动纳入，现有 pip 安装和测试参数保持不变，避免 xdist 进程内并发的全局状态竞态。
