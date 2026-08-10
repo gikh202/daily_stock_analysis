@@ -53,6 +53,13 @@ _WATCH_PRICE_CONTEXT_RE = re.compile(
 _GENERIC_PRICE_MOVEMENT_RE = re.compile(
     r"(?:跌至|涨至|触及|达到|到达|逼近|接近)"
 )
+_GENERIC_MOVEMENT_PREFIX_RE = re.compile(
+    r"^(?:若|如果|一旦|当)?\s*"
+    r"(?:(?:开盘后|盘中|盘前|日内|尾盘|收盘前|回踩后|突破后|再次|继续|直接)\s*)*$"
+)
+_POST_AMOUNT_EXECUTION_RE = re.compile(
+    r"^[^，,。；;\n]{0,16}(?:止损|止盈|减仓|加仓|买入|卖出|开仓|平仓|入场|出场|分批)"
+)
 _CNY_FACT_CONTEXT_RE = re.compile(
     r"(?:售价|定价|人民币|成本|费用|营收|收入|销售额|订单金额|补贴|产品价格|服务价格)"
 )
@@ -276,13 +283,24 @@ def _normalize_watch_price_yuan(line: str) -> str:
         movement_contexts = list(_GENERIC_PRICE_MOVEMENT_RE.finditer(local_prefix))
         cny_contexts = list(_CNY_FACT_CONTEXT_RE.finditer(local_prefix))
         latest_price_context = price_contexts[-1].start() if price_contexts else -1
-        latest_movement_context = movement_contexts[-1].start() if movement_contexts else -1
         latest_cny_context = cny_contexts[-1].start() if cny_contexts else -1
+
+        generic_execution_context = False
+        if movement_contexts:
+            movement = movement_contexts[-1]
+            movement_prefix = local_prefix[: movement.start()]
+            movement_prefix = re.sub(r"^\s*[-*]\s*", "", movement_prefix).strip()
+            post_amount = line[match.end() :]
+            generic_execution_context = bool(
+                latest_cny_context < 0
+                and _GENERIC_MOVEMENT_PREFIX_RE.fullmatch(movement_prefix)
+                and _POST_AMOUNT_EXECUTION_RE.search(post_amount)
+            )
 
         output.append(line[cursor : match.start()])
         if latest_price_context >= 0 and latest_price_context > latest_cny_context:
             output.append(f"${match.group(1)}")
-        elif latest_cny_context < 0 and latest_movement_context >= 0:
+        elif generic_execution_context:
             output.append(f"${match.group(1)}")
         else:
             output.append(match.group(0))
