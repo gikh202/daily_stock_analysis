@@ -162,3 +162,11 @@ Useful evidence should combine several properties rather than optimizing one num
 - consistency across more than one market regime, or a separately validated regime hypothesis.
 
 The purpose of V6.3 is to determine whether the existing directional score contains repeatable **relative-value information**, not to manufacture a better backtest by selecting the historically best threshold or regime.
+
+## V6.4 research-governance continuation
+
+V6.3 remains the definition of the SPY-relative target, score-margin calibration and regime features. V6.4 adds the governance layer around those metrics rather than changing their meaning.
+
+The weekly pipeline now additionally evaluates Alpha yearly walk-forward stability, a common global non-overlapping timeline for fair bucket-to-bucket comparison, Holm-Bonferroni correction across the model × horizon Alpha family, bullish/bearish exposure diagnostics, fixed friction-cost sensitivity and a frozen forward-only watch list. See [`V6_RESEARCH_GOVERNANCE.md`](V6_RESEARCH_GOVERNANCE.md) for the complete contract.
+
+These additions do not change the production Champion, production thresholds or existing V6.3 Alpha Target semantics. Historical evidence can nominate a research hypothesis, but promotion remains manual and requires forward/out-of-sample confirmation.
