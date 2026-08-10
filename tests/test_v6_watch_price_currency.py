@@ -95,6 +95,18 @@ def test_watch_price_yuan_normalization_is_amount_scoped() -> None:
         == "若客户买入99元套餐则关注订阅转化"
     )
     assert (
+        _normalize_watch_price_yuan("若产品成本跌破99元则关注毛利")
+        == "若产品成本跌破99元则关注毛利"
+    )
+    assert (
+        _normalize_watch_price_yuan("若营收突破99元则关注基本面")
+        == "若营收突破99元则关注基本面"
+    )
+    assert (
+        _normalize_watch_price_yuan("若产品成本恶化后股价跌破99元则止损")
+        == "若产品成本恶化后股价跌破$99则止损"
+    )
+    assert (
         _normalize_watch_price_yuan("关注产品价格99元的销量反馈")
         == "关注产品价格99元的销量反馈"
     )
