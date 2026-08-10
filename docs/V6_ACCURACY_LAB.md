@@ -11,6 +11,7 @@ V6.2 adds a research-only accuracy improvement layer on top of the existing V6.1
 - run multiple deterministic challenger weight profiles in shadow mode;
 - compare challengers against the production champion on the same future bars;
 - run a strict no-lookahead Champion/Challenger historical replay using only historical price/volume/benchmark features;
+- report yearly stability using both raw and globally non-overlapping samples;
 - prevent overfitting by requiring a separate promotion research gate;
 - keep all results auditable in SQLite + JSON + Markdown artifacts.
 
@@ -129,6 +130,23 @@ Historical replay maps each forecast to a simple gross research position: `bulli
 
 For auditability, the JSON also preserves `avg_underlying_return_pct` and `avg_underlying_excess_vs_spy_pct`, which describe the underlying symbol path independent of forecast direction. Historical direction-strategy returns are gross of trading costs and are not a substitute for the separate cost-aware BUY_SETUP execution replay.
 
+### Yearly walk-forward stability views
+
+Each `yearly_walk_forward` row now exposes two explicit metric blocks:
+
+- `raw`: all replay observations whose as-of date falls in that calendar year;
+- `non_overlapping`: the subset from the **same globally selected non-overlapping series** used by the main horizon statistics, partitioned by calendar year.
+
+The non-overlapping selector runs across the complete symbol/horizon timeline **before** the results are split into years. It does not restart on January 1. This prevents a late-December forecast and an early-January forecast with overlapping 5D/10D/20D outcome windows from both being counted as independent merely because they fall in different calendar years.
+
+For compatibility with older JSON readers, the pre-v2 flattened yearly metric fields remain present and continue to represent the raw yearly view. New research/report code should use the explicit `raw` and `non_overlapping` blocks. The payload identifies this contract with:
+
+```text
+yearly_walk_forward_method=raw_and_global_non_overlapping_by_calendar_year_v2
+```
+
+The Markdown weekly report displays both raw and non-overlapping yearly N, hit rate, strategy return and SPY excess; Wilson 95% CI is emphasized on the non-overlapping view.
+
 Historical replay intentionally excludes **current** SEC/FRED snapshots. Without a true point-in-time historical SEC/FRED dataset, injecting today's official/macro values into old dates would be look-ahead leakage. The replay therefore measures the historically reconstructible price/volume/benchmark layer and labels that scope explicitly.
 
 ## Weekly isolated history backfill
@@ -156,7 +174,7 @@ Safety and provenance rules:
 - `SPY` and `QQQ` are backfilled as benchmark histories; both must meet the minimum history requirement;
 - an individual target with insufficient history can be reported as partial, but at least one target plus both benchmarks must be replay-eligible;
 - the workflow records source row counts before and after backfill and fails if the production source changed;
-- the weekly validation now fails when `observations=0`, when Champion 5D/10D/20D results are missing, or when independent samples, Wilson CI, SPY excess, or yearly walk-forward evidence is absent;
+- the weekly validation now fails when `observations=0`, when Champion 5D/10D/20D results are missing, when independent samples/Wilson CI/SPY excess are absent, or when yearly raw/non-overlapping partitions do not reconcile to the horizon totals;
 - the temporary research SQLite file is not uploaded as an artifact and does not replace the normal production cache.
 
 The backfill audit sidecar is included in the weekly report artifact:
@@ -232,7 +250,7 @@ The intended process is:
 1. collect champion and challenger live shadow outcomes;
 2. inspect non-overlapping accuracy and confidence intervals;
 3. compare direction-aware SPY excess return and trade-plan economics;
-4. verify stability by market regime and instrument type where sufficient samples exist;
+4. verify stability by market regime, instrument type, and yearly raw/non-overlapping evidence where sufficient samples exist;
 5. run strict no-lookahead historical replay separately;
 6. only after out-of-sample evidence is stable, create a reviewed code change to promote a challenger.
 
