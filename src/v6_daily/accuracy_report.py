@@ -198,6 +198,7 @@ def _compact_validation(section: str) -> str:
         lines.append(f"| {horizon} | {sample} | {hit} |")
     return "\n".join(lines)
 
+
 def _normalize_us_investor_terms(text: str) -> str:
     """Normalize table coverage and U.S. timezone labels without touching prose."""
     normalized: list[str] = []
@@ -241,13 +242,10 @@ def _rewrite_affirmative_chase_clauses(line: str) -> str:
 
 
 def _has_positive_max_position(section: str) -> bool:
-    match = _MAX_POSITION_RE.search(section)
-    if not match:
-        return False
-    try:
-        return float(match.group(1)) > 0.0
-    except (TypeError, ValueError):
-        return False
+    # The upstream plan renderer emits this marker only when the raw position
+    # allowance is strictly positive. A tiny positive cap can display as 0.0%
+    # after one-decimal rounding, so marker presence is the source of truth.
+    return bool(_MAX_POSITION_RE.search(section))
 
 
 def _standardize_stock_card(section: str) -> str:
