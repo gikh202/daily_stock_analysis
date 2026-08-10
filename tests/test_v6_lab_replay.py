@@ -140,6 +140,99 @@ def test_strategy_metrics_are_variant_specific_on_same_underlying_path() -> None
     assert challenger["raw"]["avg_excess_vs_spy_pct"] == -12.0
 
 
+def test_selectivity_filters_before_non_overlap_and_excludes_neutral() -> None:
+    observations = [
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-02",
+            as_of_index=0,
+            horizon_days=5,
+            score=61.0,
+            direction="bullish",
+            future_return_pct=-2.0,
+            directional_hit=0,
+            excess_vs_spy_pct=-2.5,
+            strategy_return_pct=-2.0,
+            strategy_excess_vs_spy_pct=-2.5,
+        ),
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-03",
+            as_of_index=1,
+            horizon_days=5,
+            score=70.0,
+            direction="bullish",
+            future_return_pct=4.0,
+            directional_hit=1,
+            excess_vs_spy_pct=3.0,
+            strategy_return_pct=4.0,
+            strategy_excess_vs_spy_pct=3.0,
+        ),
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-10",
+            as_of_index=6,
+            horizon_days=5,
+            score=55.0,
+            direction="neutral",
+            future_return_pct=0.5,
+            directional_hit=1,
+            excess_vs_spy_pct=0.0,
+            strategy_return_pct=0.0,
+            strategy_excess_vs_spy_pct=-0.5,
+        ),
+    ]
+
+    summary = summarize_accuracy_replay(observations, min_samples=3, promotion_min_samples=3)
+    result = summary["results"][0]
+    slices = {item["min_margin_points"]: item for item in result["selectivity_analysis"]}
+
+    assert summary["selectivity_analysis_method"] == "directional_margin_filter_then_global_non_overlap_v1"
+    assert summary["selectivity_margin_thresholds"] == [0.0, 2.0, 5.0, 10.0]
+    assert slices[0.0]["raw"]["samples"] == 2
+    assert slices[0.0]["non_overlapping"]["samples"] == 1
+    assert slices[0.0]["participation_rate_pct"] == 66.67
+    assert slices[0.0]["directional_capture_rate_pct"] == 100.0
+    # Filter first: the weak Jan-02 signal is removed, so the stronger overlapping
+    # Jan-03 signal is allowed to become the selected independent observation.
+    assert slices[5.0]["raw"]["samples"] == 1
+    assert slices[5.0]["non_overlapping"]["samples"] == 1
+    assert slices[5.0]["non_overlapping"]["avg_return_pct"] == 4.0
+    assert slices[5.0]["non_overlapping"]["avg_excess_vs_spy_pct"] == 3.0
+    assert slices[10.0]["non_overlapping"]["samples"] == 1
+
+
+def test_selectivity_neutral_only_bucket_reports_zero_capture() -> None:
+    observations = [
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-02",
+            as_of_index=0,
+            horizon_days=5,
+            score=55.0,
+            direction="neutral",
+            future_return_pct=0.5,
+            directional_hit=1,
+            excess_vs_spy_pct=0.0,
+            strategy_return_pct=0.0,
+            strategy_excess_vs_spy_pct=-0.5,
+        )
+    ]
+
+    summary = summarize_accuracy_replay(observations, min_samples=3, promotion_min_samples=3)
+    slices = summary["results"][0]["selectivity_analysis"]
+
+    assert slices
+    assert all(item["raw"]["samples"] == 0 for item in slices)
+    assert all(item["non_overlapping"]["samples"] == 0 for item in slices)
+    assert all(item["participation_rate_pct"] == 0.0 for item in slices)
+    assert all(item["directional_capture_rate_pct"] == 0.0 for item in slices)
+
+
 def test_yearly_non_overlapping_uses_global_selection_across_year_boundary() -> None:
     observations = [
         AccuracyReplayObservation(
@@ -216,6 +309,8 @@ def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() 
     assert summary["method"] == "strict no-lookahead rolling price-feature replay"
     assert summary["strategy_return_method"] == "gross_directional_position_v1"
     assert summary["yearly_walk_forward_method"] == "raw_and_global_non_overlapping_by_calendar_year_v2"
+    assert summary["selectivity_analysis_method"] == "directional_margin_filter_then_global_non_overlap_v1"
+    assert summary["selectivity_margin_thresholds"] == [0.0, 2.0, 5.0, 10.0]
     assert summary["auto_promotion"] is False
     assert summary["auto_weight_tuning"] is False
     assert summary["observations"] > 0
@@ -244,6 +339,9 @@ def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() 
         sum(item["non_overlapping"]["samples"] for item in yearly)
         == champion_20d["non_overlapping"]["samples"]
     )
+    selectivity = champion_20d["selectivity_analysis"]
+    assert [item["min_margin_points"] for item in selectivity] == [0.0, 2.0, 5.0, 10.0]
+    assert all("raw" in item and "non_overlapping" in item for item in selectivity)
 
     challenger = next(item for item in results if item["variant"] != "champion")
     assert "promotion_candidate" in challenger

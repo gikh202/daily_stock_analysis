@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] V6.2 周度 Accuracy Replay 新增研究型置信度/选择性切片：按现有 5D/10D/20D bullish/bearish 触发阈值计算 0/2/5/10pt 分数余量，先过滤方向信号再做全时间轴 non-overlap，报告参与率、Wilson 95% CI、方向策略收益与 SPY 超额；仅用于研究，不自动修改生产阈值、Champion 权重或晋级门禁。
 - [修复] V6.2 周度 Accuracy Replay 改为按各 Champion/Challenger 的预测方向计算无杠杆研究收益与 SPY 超额（bullish=+1x、bearish=-1x、neutral=现金），避免不同模型共享同一底层股票收益导致 Alpha 恒等；同时保留底层收益字段用于审计。
 - [新功能] V6.2 Accuracy Lab 新增 95% Wilson 置信区间、5D/10D/20D 非重叠样本验证、BUY_SETUP 保守执行回测、Champion/Challenger Shadow、严格 no-lookahead 周度回放与研究型晋级门禁；正式 Champion 权重、自动调权和自动晋级保持关闭。
 - [新功能] Agent Chat 按会话持久化 Skill 选择，支持刷新和会话切换恢复，并区分省略 `skills`、显式空列表与非空选择；无持久化状态的历史会话继续使用运行时默认且不会被静默转为显式选择，复用分析 `context` 中残留的 legacy `skills` / `strategies` 也不会覆盖顶层三态或会话状态，非空但全部无效的 Skill 请求不会被当成显式空列表并清空既有选择
@@ -1804,7 +1805,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - 删除基于 `http.server.ThreadingHTTPServer` 的旧版 WebUI（`web/` 包）
   - 旧版 WebUI 的功能已完全被 FastAPI（`api/`）+ React 前端替代
   - `--webui` / `--webui-only` 命令行参数标记为弃用，自动重定向到 `--serve` / `--serve-only`
-  - `WEBUI_ENABLED` / `WEBUI_HOST` / `WEBUI_PORT` 环境变量保持兼容，自动转发到 FastAPI 服务
+  - `WEBUI_ENABLED` / `WEBUI_HOST` / `WEBUI_PORT` 环境变量保持兼容，自动转发到 FastAPI 后端
   - `webui.py` 保留为兼容入口，启动时直接调用 FastAPI 后端
   - Docker Compose 中移除 `webui` 服务定义，统一使用 `server` 服务
 
