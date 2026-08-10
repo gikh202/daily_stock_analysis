@@ -67,6 +67,8 @@ def test_champion_and_challenger_replay_do_not_leak_future_prices() -> None:
         )
         assert left.score == right.score
         assert left.direction == right.direction
+        assert left.spy_trend_regime == right.spy_trend_regime
+        assert left.spy_vol_regime == right.spy_vol_regime
         # The outcome is allowed to differ because only the future path changed.
         assert left.future_return_pct != right.future_return_pct
 
@@ -138,6 +140,62 @@ def test_strategy_metrics_are_variant_specific_on_same_underlying_path() -> None
     assert challenger["raw"]["avg_return_pct"] == -10.0
     assert champion["raw"]["avg_excess_vs_spy_pct"] == 8.0
     assert challenger["raw"]["avg_excess_vs_spy_pct"] == -12.0
+
+
+def test_alpha_target_distinguishes_absolute_direction_from_spy_relative_value() -> None:
+    observations = [
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-02",
+            as_of_index=0,
+            horizon_days=5,
+            score=65.0,
+            direction="bullish",
+            future_return_pct=2.0,
+            directional_hit=1,
+            excess_vs_spy_pct=-3.0,
+            strategy_return_pct=2.0,
+            strategy_excess_vs_spy_pct=-3.0,
+            alpha_target_hit=0,
+            alpha_trade_return_pct=-3.0,
+            spy_trend_regime="up",
+            spy_vol_regime="expanding",
+        ),
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-09",
+            as_of_index=5,
+            horizon_days=5,
+            score=35.0,
+            direction="bearish",
+            future_return_pct=-1.0,
+            directional_hit=1,
+            excess_vs_spy_pct=-2.0,
+            strategy_return_pct=1.0,
+            strategy_excess_vs_spy_pct=0.0,
+            alpha_target_hit=1,
+            alpha_trade_return_pct=2.0,
+            spy_trend_regime="up",
+            spy_vol_regime="contracting",
+        ),
+    ]
+
+    summary = summarize_accuracy_replay(observations, min_samples=3, promotion_min_samples=3)
+    result = summary["results"][0]
+    alpha = result["alpha_target"]
+
+    assert result["raw"]["directional_hit_rate_pct"] == 100.0
+    assert alpha["raw"]["samples"] == 2
+    assert alpha["raw"]["alpha_hit_rate_pct"] == 50.0
+    assert alpha["raw"]["avg_alpha_trade_return_pct"] == -0.5
+    assert alpha["non_overlapping"]["samples"] == 2
+    calibration = {item["label"]: item for item in result["alpha_calibration"]}
+    assert calibration["5-10pt"]["raw"]["samples"] == 2
+    assert calibration["5-10pt"]["non_overlapping"]["samples"] == 2
+    assert sum(item["raw"]["samples"] for item in result["regime_matrix"]) == 2
+    assert sum(item["non_overlapping"]["samples"] for item in result["regime_matrix"]) == 2
 
 
 def test_selectivity_filters_before_non_overlap_and_excludes_neutral() -> None:
@@ -311,6 +369,15 @@ def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() 
     assert summary["yearly_walk_forward_method"] == "raw_and_global_non_overlapping_by_calendar_year_v2"
     assert summary["selectivity_analysis_method"] == "directional_margin_filter_then_global_non_overlap_v1"
     assert summary["selectivity_margin_thresholds"] == [0.0, 2.0, 5.0, 10.0]
+    assert summary["alpha_target_method"] == "spy_relative_directional_filter_then_global_non_overlap_v1"
+    assert summary["alpha_calibration_method"] == "fixed_directional_margin_buckets_v1"
+    assert summary["regime_matrix_method"] == "global_alpha_non_overlap_then_asof_spy_regime_partition_v1"
+    assert [item["label"] for item in summary["alpha_calibration_buckets"]] == [
+        "0-2pt",
+        "2-5pt",
+        "5-10pt",
+        "10pt+",
+    ]
     assert summary["auto_promotion"] is False
     assert summary["auto_weight_tuning"] is False
     assert summary["observations"] > 0
@@ -342,6 +409,20 @@ def test_accuracy_replay_reports_non_overlapping_walk_forward_and_safe_policy() 
     selectivity = champion_20d["selectivity_analysis"]
     assert [item["min_margin_points"] for item in selectivity] == [0.0, 2.0, 5.0, 10.0]
     assert all("raw" in item and "non_overlapping" in item for item in selectivity)
+
+    alpha = champion_20d["alpha_target"]
+    assert "raw" in alpha and "non_overlapping" in alpha
+    assert alpha["non_overlapping"]["samples"] <= alpha["raw"]["samples"]
+    calibration = champion_20d["alpha_calibration"]
+    assert [item["label"] for item in calibration] == ["0-2pt", "2-5pt", "5-10pt", "10pt+"]
+    assert all("raw" in item and "non_overlapping" in item for item in calibration)
+    regime = champion_20d["regime_matrix"]
+    assert regime
+    assert sum(item["raw"]["samples"] for item in regime) == alpha["raw"]["samples"]
+    assert (
+        sum(item["non_overlapping"]["samples"] for item in regime)
+        == alpha["non_overlapping"]["samples"]
+    )
 
     challenger = next(item for item in results if item["variant"] != "champion")
     assert "promotion_candidate" in challenger
