@@ -205,6 +205,34 @@ def test_selectivity_filters_before_non_overlap_and_excludes_neutral() -> None:
     assert slices[10.0]["non_overlapping"]["samples"] == 1
 
 
+def test_selectivity_neutral_only_bucket_reports_zero_capture() -> None:
+    observations = [
+        AccuracyReplayObservation(
+            variant="champion",
+            code="MSFT",
+            as_of="2025-01-02",
+            as_of_index=0,
+            horizon_days=5,
+            score=55.0,
+            direction="neutral",
+            future_return_pct=0.5,
+            directional_hit=1,
+            excess_vs_spy_pct=0.0,
+            strategy_return_pct=0.0,
+            strategy_excess_vs_spy_pct=-0.5,
+        )
+    ]
+
+    summary = summarize_accuracy_replay(observations, min_samples=3, promotion_min_samples=3)
+    slices = summary["results"][0]["selectivity_analysis"]
+
+    assert slices
+    assert all(item["raw"]["samples"] == 0 for item in slices)
+    assert all(item["non_overlapping"]["samples"] == 0 for item in slices)
+    assert all(item["participation_rate_pct"] == 0.0 for item in slices)
+    assert all(item["directional_capture_rate_pct"] == 0.0 for item in slices)
+
+
 def test_yearly_non_overlapping_uses_global_selection_across_year_boundary() -> None:
     observations = [
         AccuracyReplayObservation(
