@@ -7,7 +7,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional
 
 from .decision_contracts import (
     DECISION_PACKET_SCHEMA_VERSION,
@@ -94,9 +94,16 @@ def _horizon_days(key: Any) -> Optional[int]:
 
 
 def _packet_from_signal_row(row: Mapping[str, Any]) -> DecisionPacket:
+    # sqlite3.Row provides key lookup but not Mapping.get(); normalize at the
+    # anti-corruption boundary so the rest of the domain adapter stays mapping-based.
+    row = dict(row)
     trade_plan = _json_object(row.get("trade_plan_json"))
-    catalysts = tuple(str(item) for item in _json_list(row.get("catalysts_json")) if str(item).strip())
-    risks = tuple(str(item) for item in _json_list(row.get("risks_json")) if str(item).strip())
+    catalysts = tuple(
+        str(item) for item in _json_list(row.get("catalysts_json")) if str(item).strip()
+    )
+    risks = tuple(
+        str(item) for item in _json_list(row.get("risks_json")) if str(item).strip()
+    )
     limitations = tuple(
         str(item) for item in _json_list(row.get("limitations_json")) if str(item).strip()
     )
@@ -125,7 +132,9 @@ def _packet_from_signal_row(row: Mapping[str, Any]) -> DecisionPacket:
         catalysts=catalysts,
         risks=risks,
         limitations=limitations,
-        engine_version=str(row.get("engine_version") or diagnostics.get("engine_version") or "unknown"),
+        engine_version=str(
+            row.get("engine_version") or diagnostics.get("engine_version") or "unknown"
+        ),
         feature_adapter_version=(
             str(diagnostics.get("feature_adapter_version"))
             if diagnostics.get("feature_adapter_version") is not None
@@ -378,7 +387,12 @@ class NormalizedV6Persistence:
                         for row in signals
                     ],
                     "outcomes": [
-                        [int(row["id"]), int(row["signal_id"]), int(row["horizon_days"]), row["return_pct"]]
+                        [
+                            int(row["id"]),
+                            int(row["signal_id"]),
+                            int(row["horizon_days"]),
+                            row["return_pct"],
+                        ]
                         for row in outcomes
                     ],
                 }
@@ -481,7 +495,9 @@ class NormalizedV6Persistence:
                     (source_signal_id,),
                 ).fetchone()
                 if forecast_row is None:
-                    raise RuntimeError(f"forecast run missing for source signal {source_signal_id}")
+                    raise RuntimeError(
+                        f"forecast run missing for source signal {source_signal_id}"
+                    )
                 forecast_run_id = int(forecast_row["id"])
 
                 for horizon_key, block_value in packet.horizon_forecasts.items():
@@ -500,7 +516,10 @@ class NormalizedV6Persistence:
                             _horizon_days(horizon_key),
                             str(block.get("direction") or ""),
                             _finite(block.get("score")),
-                            _finite(block.get("expected_return_pct") or block.get("target_return_pct")),
+                            _finite(
+                                block.get("expected_return_pct")
+                                or block.get("target_return_pct")
+                            ),
                             _json(block),
                         ),
                     )
@@ -541,7 +560,9 @@ class NormalizedV6Persistence:
                     (source_signal_id,),
                 ).fetchone()
                 if decision_row is None:
-                    raise RuntimeError(f"decision run missing for source signal {source_signal_id}")
+                    raise RuntimeError(
+                        f"decision run missing for source signal {source_signal_id}"
+                    )
                 decision_run_id = int(decision_row["id"])
                 execution_dict = packet.execution.to_dict()
                 entry_zone = packet.execution.entry_zone
@@ -580,7 +601,8 @@ class NormalizedV6Persistence:
                 ).fetchone()
                 if forecast_row is None:
                     raise RuntimeError(
-                        f"cannot normalize outcome without forecast run for source signal {source_signal_id}"
+                        "cannot normalize outcome without forecast run for source signal "
+                        f"{source_signal_id}"
                     )
                 conn.execute(
                     """
@@ -669,11 +691,17 @@ class NormalizedV6Persistence:
 
             mismatches = []
             if normalized_forecasts != len(signals):
-                mismatches.append(f"forecast_runs={normalized_forecasts} source_signals={len(signals)}")
+                mismatches.append(
+                    f"forecast_runs={normalized_forecasts} source_signals={len(signals)}"
+                )
             if normalized_decisions != len(signals):
-                mismatches.append(f"decision_runs={normalized_decisions} source_signals={len(signals)}")
+                mismatches.append(
+                    f"decision_runs={normalized_decisions} source_signals={len(signals)}"
+                )
             if normalized_plans != len(signals):
-                mismatches.append(f"execution_plans={normalized_plans} source_signals={len(signals)}")
+                mismatches.append(
+                    f"execution_plans={normalized_plans} source_signals={len(signals)}"
+                )
             if normalized_horizons != expected_horizons:
                 mismatches.append(
                     f"horizon_forecasts={normalized_horizons} expected_horizons={expected_horizons}"
@@ -683,12 +711,15 @@ class NormalizedV6Persistence:
                     f"forecast_outcomes={normalized_outcomes} source_outcomes={len(outcomes)}"
                 )
             if mismatches:
-                raise RuntimeError("normalized persistence parity failed: " + "; ".join(mismatches))
+                raise RuntimeError(
+                    "normalized persistence parity failed: " + "; ".join(mismatches)
+                )
 
             foreign_key_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
             if foreign_key_errors:
                 raise RuntimeError(
-                    f"normalized persistence foreign_key_check failed: {foreign_key_errors[:3]}"
+                    "normalized persistence foreign_key_check failed: "
+                    f"{foreign_key_errors[:3]}"
                 )
 
         quick = self.quick_check()
