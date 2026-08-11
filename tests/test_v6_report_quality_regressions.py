@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from src.formatters import markdown_to_html_document
 from src.llm.litellm_backend import LiteLLMGenerationBackend
@@ -71,7 +72,7 @@ def test_final_email_tables_keep_separate_header_cells() -> None:
 
     assert 'style="display:table !important;' in html
     for heading in ("标的", "动作", "主预测", "量化方向", "机会", "风险"):
-        assert f"<th>{heading}</th>" in html
+        assert re.search(rf"<th(?:\s[^>]*)?>{re.escape(heading)}</th>", html)
 
 
 def test_structured_backend_repairs_json_locally_before_extra_model_call() -> None:
