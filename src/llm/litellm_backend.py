@@ -91,19 +91,68 @@ Repair rules:
     )
 
 
+def _has_complete_json_container(value: str) -> bool:
+    """Return whether the response already contains a structurally closed JSON root.
+
+    ``json_repair`` can legitimately fix commas, quoting and wrapper noise, but it
+    can also close an object that was truncated by the model/token budget. Local
+    repair must never turn that kind of incomplete analysis into an apparent
+    success, even when a caller supplies a permissive/minimal validator.
+    """
+    text = str(value or "")
+    object_pos = text.find("{")
+    array_pos = text.find("[")
+    starts = [pos for pos in (object_pos, array_pos) if pos >= 0]
+    if not starts:
+        return False
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+
+    for char in text[min(starts):]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char in "{[":
+            stack.append(char)
+            continue
+        if char not in "}]":
+            continue
+        if not stack:
+            return False
+        expected = "{" if char == "}" else "["
+        if stack[-1] != expected:
+            return False
+        stack.pop()
+        if not stack:
+            return True
+
+    return False
+
+
 def _try_local_json_repair(
     previous_response: str,
     response_validator: Callable[[str], None],
 ) -> Optional[str]:
-    """Repair syntax/format drift locally, then re-run the same strict validator.
+    """Repair non-truncation syntax drift locally, then run the strict validator.
 
-    This path cannot weaken evidence or forecast validation: repaired text is
-    accepted only when the caller's original validator passes unchanged. It is
-    primarily useful for malformed/ambiguous JSON wrappers and avoids an extra
-    paid model request when the semantic payload was already valid.
+    A candidate is eligible only when the original response already contains a
+    structurally closed JSON root. This prevents ``json_repair`` from silently
+    completing truncated model output. Evidence/forecast validation is also never
+    weakened: the caller's original validator must pass unchanged.
     """
     previous = str(previous_response or "").strip()
-    if not previous:
+    if not previous or not _has_complete_json_container(previous):
         return None
     try:
         repaired = repair_json(previous, return_objects=False)
