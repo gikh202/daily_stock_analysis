@@ -16,8 +16,8 @@ from src.v6_daily.legacy_physical_retirement import retire_legacy_tables
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Retire V6 legacy fact tables after verified archive + isolated restore. "
-            "Dry-run is the default; --apply is required for DROP."
+            "Retire V6 legacy fact tables after exact normalized coverage, verified archive, "
+            "and isolated restore. Dry-run is the default; --apply is required for DROP."
         )
     )
     parser.add_argument("--v6-db", required=True)
@@ -26,10 +26,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument("--source-commit")
     parser.add_argument("--engine-version")
+    parser.add_argument("--report-date")
+    parser.add_argument(
+        "--migrate-missing-coverage",
+        action="store_true",
+        help=(
+            "On explicit --apply, migrate uncovered legacy identities into normalized tables "
+            "before archive/restore/DROP. Legacy source facts must remain unchanged."
+        ),
+    )
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Apply the transactional DROP after Gate v6 passes.",
+        help="Apply the transactional DROP after all retirement gates pass.",
     )
     return parser
 
@@ -43,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=args.repo_root,
         source_commit=args.source_commit,
         engine_version=args.engine_version,
+        report_date=args.report_date,
+        migrate_missing_coverage=bool(args.migrate_missing_coverage),
         apply=bool(args.apply),
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
