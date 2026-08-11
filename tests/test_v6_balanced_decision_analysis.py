@@ -176,3 +176,35 @@ def test_avoid_does_not_erase_existing_bullish_evidence() -> None:
     assert "多头排列且相对强弱领先" in report
     assert "RSI超买且上涨缩量" in report
     assert "即使存在局部看多证据" in report
+
+
+def test_watch_with_direction_conflict_stays_observation() -> None:
+    report = render_integrated_chinese_report(
+        _payload(decision="WATCH", direction="bearish", active_plan=True),
+        v4_records=[_v4_record(operation="观望")],
+        report_date="2026-08-11",
+    )
+
+    assert "方向分歧" in report
+    assert "**是否值得买**：**继续观察**" in report
+    assert "多空方向存在直接分歧" in report
+    assert "**是否值得买**：**条件式可买**" not in report
+    assert "多头排列且相对强弱领先" in report
+    assert "RSI超买且上涨缩量" in report
+
+
+def test_watch_with_high_risk_stays_observation() -> None:
+    payload = _payload(decision="WATCH", direction="bullish", active_plan=True)
+    payload["board"][0]["risk_score"] = 82.0
+
+    report = render_integrated_chinese_report(
+        payload,
+        v4_records=[_v4_record(operation="观望")],
+        report_date="2026-08-11",
+    )
+
+    assert "**是否值得买**：**继续观察**" in report
+    assert "当前风险分偏高或已不低于机会分" in report
+    assert "**是否值得买**：**条件式可买**" not in report
+    assert "多头排列且相对强弱领先" in report
+    assert "RSI超买且上涨缩量" in report
