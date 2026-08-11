@@ -279,7 +279,7 @@ def _typed_fusion_summary(
     elif agreement == "部分一致":
         alignment = "方向尚未形成完全共振。"
     elif agreement == "方向分歧":
-        alignment = "两层方向存在直接分歧，最终执行状态以 typed 风控合同为准。"
+        alignment = "两层方向存在直接分歧，按风险优先原则不升级仓位；最终执行状态以 typed 风控合同为准。"
     elif agreement == "共同偏中性":
         alignment = "两层共同偏中性，等待新的方向性证据。"
     else:
