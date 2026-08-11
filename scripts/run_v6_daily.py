@@ -195,8 +195,9 @@ def _finalize_report(
     dated_path.write_text(unified, encoding="utf-8")
     return {
         "language": "zh",
-        "fusion_mode": "final_decision_packet_v1",
+        "fusion_mode": "structured_v4_v6",
         "decision_source": "FinalDecisionPacket",
+        "decision_contract": "final-decision-packet-v1",
         "accuracy_layer": "v6.2",
         "v4_merged": structured_count > 0,
         "v4_structured_records": structured_count,
