@@ -117,7 +117,8 @@ def test_buy_setup_requires_active_plan_before_it_is_executable() -> None:
     assert executable_packet.assessment.verdict == AssessmentVerdict.BUY_BY_PLAN
     assert blocked_packet.execution.status == ExecutionStatus.BLOCKED_PLAN
     assert blocked_packet.execution.actionable is False
-    assert blocked_packet.assessment.verdict == AssessmentVerdict.UNKNOWN or blocked_packet.assessment.verdict == AssessmentVerdict.UNKNOWN
+    assert blocked_packet.assessment.verdict == AssessmentVerdict.WATCH
+    assert blocked_packet.assessment.worth_buying is None
 
 
 def test_wait_and_avoid_never_become_actionable_from_stale_price_levels() -> None:
