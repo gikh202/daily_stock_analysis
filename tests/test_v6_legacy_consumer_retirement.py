@@ -5,6 +5,7 @@ import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
+from scripts.run_v6_daily_stage9 import run as run_stage9
 from src.v6_daily.legacy_retirement import evaluate_legacy_retirement
 from src.v6_daily.normalized_accuracy_lab import (
     SHADOW_FORECAST_TABLE,
@@ -17,7 +18,9 @@ from src.v6_daily.normalized_cutover import cutover_daily_payload
 from src.v6_daily.normalized_manifest_store import NormalizedV6ManifestStore
 from src.v6_daily.normalized_persistence import NormalizedV6Persistence
 from src.v6_daily.normalized_read_store import NormalizedV6ReadStore
+from src.v6_daily.production_gate import assert_production_read_gate
 from src.v6_daily.report import build_daily_payload
+from tests.test_v6_daily import _create_stock_db
 
 
 ENGINE = "engine-a"
@@ -424,3 +427,64 @@ def test_stage9_active_modules_do_not_query_legacy_v6_fact_tables() -> None:
         text = path.read_text(encoding="utf-8")
         for token in banned:
             assert token not in text, (path, token)
+
+
+def test_stage9_entrypoint_runs_end_to_end_with_normalized_consumers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("V6_FREE_SOURCE_ENRICHMENT", "false")
+    monkeypatch.setenv("V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES", "3")
+    monkeypatch.setenv("V6_ACCURACY_LAB_MAX_HOLDING_BARS", "20")
+    stock_db = tmp_path / "stock.db"
+    _create_stock_db(stock_db)
+    report_dir = tmp_path / "reports"
+    v6_db = tmp_path / "v6_data" / "v6_daily.db"
+    v4_report = tmp_path / "report_20260101.md"
+    v4_report.write_text(
+        "# V4 测试日报\n\n## MSFT 深度分析\n\n- Stage 9 integration fixture.\n",
+        encoding="utf-8",
+    )
+
+    result = run_stage9(
+        stock_db_path=str(stock_db),
+        v6_db_path=str(v6_db),
+        report_dir=str(report_dir),
+        limit=100,
+        min_samples=3,
+        primary_model="deepseek/deepseek-v4-flash",
+        notify=False,
+        v4_report_path=str(v4_report),
+    )
+
+    assert result["run"]["new_signals"] == 1
+    assert result["run"]["new_outcomes"] == 3
+    assert result["legacy_retirement"]["projection_retirement_ready"] is True
+    assert result["legacy_retirement"]["legacy_consumer_count"] == 0
+
+    run_payload = json.loads(
+        (report_dir / "v6_run.json").read_text(encoding="utf-8")
+    )
+    payload = json.loads(
+        (report_dir / "v6_daily_latest.json").read_text(encoding="utf-8")
+    )
+    lab_payload = json.loads(
+        (report_dir / "v6_accuracy_lab.json").read_text(encoding="utf-8")
+    )
+
+    assert run_payload["stage9_entrypoint"] == "v6-stage9-normalized-consumers-v1"
+    assert run_payload["read_cutover"]["selected_source"] == "normalized_v6_tables"
+    assert run_payload["read_cutover"]["mode"] == "normalized_primary_self_consistency_guard"
+    assert run_payload["read_cutover"]["legacy_reference_used"] is False
+    assert run_payload["normalized_storage"]["source_mode"] == "normalized_only"
+    assert run_payload["normalized_storage"]["legacy_reference_used"] is False
+    assert run_payload["legacy_retirement"]["legacy_consumer_count"] == 0
+    assert payload["legacy_retirement"]["projection_retirement_ready"] is True
+    assert lab_payload["source"]["mode"] == "normalized_only"
+    assert lab_payload["source"]["legacy_signal_reads"] == 0
+    assert lab_payload["source"]["legacy_outcome_reads"] == 0
+
+    gate = assert_production_read_gate(run_payload)
+    assert gate["production_ready"] is True
+    assert gate["legacy_consumer_count"] == 0
+    assert gate["projection_retirement_ready"] is True
