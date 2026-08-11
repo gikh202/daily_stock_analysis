@@ -4,6 +4,7 @@ from src.v6_daily.decision_contracts import (
     AssessmentVerdict,
     DECISION_PACKET_SCHEMA_VERSION,
     ExecutionStatus,
+    PRE_FUSION_ASSESSMENT_SCOPE,
 )
 from src.v6_daily.models import V6Signal
 
@@ -59,7 +60,7 @@ def _active_plan(*, action: str = "WATCH") -> dict:
     }
 
 
-def test_watch_with_active_plan_is_conditional_and_actionable() -> None:
+def test_watch_with_active_plan_is_execution_ready_but_not_final_buy_verdict() -> None:
     signal = _signal(decision="WATCH", trade_plan=_active_plan())
 
     packet = signal.to_decision_packet()
@@ -69,8 +70,10 @@ def test_watch_with_active_plan_is_conditional_and_actionable() -> None:
     assert packet.execution.has_active_plan is True
     assert packet.execution.actionable is True
     assert signal.actionable is True
-    assert packet.assessment.verdict == AssessmentVerdict.CONDITIONAL_BUY
-    assert packet.assessment.worth_buying is True
+    assert packet.assessment.scope == PRE_FUSION_ASSESSMENT_SCOPE
+    assert packet.assessment.is_final is False
+    assert packet.assessment.verdict == AssessmentVerdict.WATCH
+    assert packet.assessment.worth_buying is None
     assert packet.assessment.bullish_evidence
     assert packet.assessment.bearish_evidence
 
@@ -115,6 +118,7 @@ def test_buy_setup_requires_active_plan_before_it_is_executable() -> None:
     assert executable_packet.execution.status == ExecutionStatus.EXECUTABLE
     assert executable_packet.execution.actionable is True
     assert executable_packet.assessment.verdict == AssessmentVerdict.BUY_BY_PLAN
+    assert executable_packet.assessment.is_final is False
     assert blocked_packet.execution.status == ExecutionStatus.BLOCKED_PLAN
     assert blocked_packet.execution.actionable is False
     assert blocked_packet.assessment.verdict == AssessmentVerdict.WATCH
@@ -142,8 +146,10 @@ def test_packet_serialization_separates_assessment_from_execution() -> None:
 
     assert packet["schema_version"] == DECISION_PACKET_SCHEMA_VERSION
     assert packet["identity"]["symbol"] == "MSFT"
-    assert packet["assessment"]["verdict"] == "conditional_buy"
-    assert packet["assessment"]["worth_buying"] is True
+    assert packet["assessment"]["scope"] == PRE_FUSION_ASSESSMENT_SCOPE
+    assert packet["assessment"]["is_final"] is False
+    assert packet["assessment"]["verdict"] == "watch"
+    assert packet["assessment"]["worth_buying"] is None
     assert packet["execution"]["status"] == "waiting_confirmation"
     assert packet["execution"]["actionable"] is True
     assert packet["execution"]["entry_zone"] == [502.0, 506.0]
