@@ -53,6 +53,21 @@ def _env_truthy(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _stabilize_html_tables(html_content: str) -> str:
+    """Keep Markdown tables as real tables in email clients such as Gmail.
+
+    The shared HTML formatter intentionally uses ``display:block`` so tables can
+    scroll in browser/image contexts. Some mail clients flatten header cells when
+    that rule is preserved. Final email HTML therefore overrides the table box
+    model inline, which survives email CSS sanitization more reliably.
+    """
+    return str(html_content or "").replace(
+        "<table>",
+        '<table style="display:table !important;border-collapse:collapse;'
+        'width:100%;table-layout:auto;">',
+    )
+
+
 def _default_report_subject(content: str = "") -> str:
     date_str = datetime.now().strftime('%Y-%m-%d')
     if _env_truthy("V6_UNIFIED_EMAIL_FINAL", "false"):
@@ -218,6 +233,8 @@ class EmailSender:
             
             # 将 Markdown 转换为 HTML；正文已在上一步收敛为适合邮件阅读的结构。
             html_content = markdown_to_html_document(sanitized_content)
+            if _env_truthy("V6_UNIFIED_EMAIL_FINAL", "false"):
+                html_content = _stabilize_html_tables(html_content)
             
             # 构建邮件
             msg = MIMEMultipart('alternative')

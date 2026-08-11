@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] V6 最终统一日报过滤 `MARKET` 大盘复盘伪标的和“暂无已验证的近期证据”中性占位，稳定邮件 HTML 表格的独立表头/列布局；只调整融合输入与展示，不改变 `FinalDecisionPacket` 决策口径、机会/风险评分或执行授权。
+- [改进] 结构化 LiteLLM 恢复仅对原始响应已包含闭合 JSON 根对象的语法漂移执行本地 `json_repair`，并继续要求原 validator 通过；缺括号、未闭合字符串等疑似截断输出禁止本地自动补全，改走一次 evidence-aware 模型修复，避免不完整分析被误判成功。
 - [改进] V6 最终美股决策邮件统一执行口径：存在确定性风控计划时只展示其入场、止损、目标与最大仓位，并将无确定性计划的回退交易方案显式标记为非执行参考；隐藏未校准上行概率，统一美元/美东时区/证据覆盖标签，消除禁止追高与“可追”冲突及明显 A 股模板污染；完整原始 Markdown/JSON 继续保留用于审计。
 - [新功能] V6.4 Research Governance 在周度 Accuracy / Alpha Lab 中新增 Alpha 年度 Walk-forward、统一全局 non-overlap 时间轴校准、Holm-Bonferroni 多重检验、方向暴露诊断、0/10/20/40bps 成本敏感度与冻结候选 forward-only 观察；冻结候选同时锁定 Shadow variant revision/profile identity，定义漂移时 forward evidence 自动失效；保持 Champion、生产阈值、自动调权/晋级、自动交易与通知链路不变。
 - [新功能] V6.3 Alpha Target Lab 在周度严格 no-lookahead 回放中新增相对 SPY 的方向目标、0–2/2–5/5–10/10pt+ 固定分数余量校准桶与按 as-of SPY 趋势/波动划分的 Regime Matrix；统一报告 Wilson 95% CI 和方向化 Alpha Spread，保持 Champion、生产阈值、自动调权/晋级与既有 Promotion Gate 不变。

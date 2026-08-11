@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Regression tests for validator-aware LiteLLM structured-output recovery."""
 
+import json
+
 import pytest
 
 from src.llm.generation_backend import GenerationError, GenerationErrorCode
@@ -70,8 +72,13 @@ def test_validator_failure_with_previous_response_gets_one_evidence_aware_repair
             {"provider": "deepseek", "total_tokens": 42},
         )
 
+    def validator(text: str) -> None:
+        payload = json.loads(text)
+        horizons = payload.get("forecast", {}).get("horizons", {})
+        if set(horizons) != {"5d", "10d", "20d"}:
+            raise ValueError("news_evidence_contract_failed")
+
     backend = LiteLLMGenerationBackend(completion)
-    validator = lambda _text: None
     result = backend.generate(
         "ORIGINAL REQUEST WITH [E01] date=2026-08-07",
         {"temperature": 0.7, "max_tokens": 8192},
@@ -97,6 +104,34 @@ def test_validator_failure_with_previous_response_gets_one_evidence_aware_repair
     assert result.diagnostics == {"validator_repair_used": True}
 
 
+def test_truncated_previous_response_never_uses_local_json_repair() -> None:
+    calls = []
+    previous = '{"forecast":{"horizons":{"5d":{},"10d":{},"20d":{}}'
+    original = _AllModelsValidationFailed(previous)
+
+    def completion(prompt, generation_config, **kwargs):
+        calls.append((prompt, dict(generation_config), kwargs))
+        if len(calls) == 1:
+            raise original
+        return (
+            '{"complete":true}',
+            "deepseek/deepseek-v4-pro",
+            {"provider": "deepseek"},
+        )
+
+    result = LiteLLMGenerationBackend(completion).generate(
+        "structured",
+        {"temperature": 0.7},
+        response_validator=lambda _text: None,
+    )
+
+    assert len(calls) == 2
+    assert "Structured-output validation repair" in calls[1][0]
+    assert result.text == '{"complete":true}'
+    assert result.model == "deepseek/deepseek-v4-pro"
+    assert result.diagnostics == {"validator_repair_used": True}
+
+
 def test_failed_repair_re_raises_original_validation_failure() -> None:
     previous = '{"sentiment_score": 66, "trend_prediction": "看多"}'
     original = _AllModelsValidationFailed(previous)
@@ -109,13 +144,16 @@ def test_failed_repair_re_raises_original_validation_failure() -> None:
             raise original
         raise RuntimeError("repair transport failed")
 
+    def validator(_text: str) -> None:
+        raise ValueError("semantic validation still failed")
+
     backend = LiteLLMGenerationBackend(completion)
 
     with pytest.raises(_AllModelsValidationFailed) as exc_info:
         backend.generate(
             "structured",
             {"temperature": 0.7},
-            response_validator=lambda _text: None,
+            response_validator=validator,
         )
 
     assert calls == 2
