@@ -10,6 +10,8 @@ on:
       - 'scripts/run_v6_daily_stage11.py'
       - 'scripts/archive_v6_legacy.py'
       - 'scripts/migrate_v6_legacy.py'
+      - 'scripts/restore_v6_legacy_archive.py'
+      - 'scripts/rehearse_v6_legacy_archive.py'
       - 'scripts/run_v6_replay.py'
       - 'scripts/run_v6_accuracy_replay.py'
       - 'scripts/run_v6_accuracy_weekly.py'
@@ -39,11 +41,13 @@ on:
       - 'tests/test_v6_stage10_projection_shutdown.py'
       - 'tests/test_v6_stage11_schema_archival.py'
       - 'tests/test_v6_stage11_production_runner.py'
+      - 'tests/test_v6_stage12_archive_restore.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
       - '.github/workflows/03-v6-daily.yml'
       - '.github/workflows/04-v6-accuracy-weekly.yml'
+      - '.github/workflows/05-v6-legacy-archive-rehearsal.yml'
   push:
     branches:
       - 'agent/v6-accuracy-foundation'
@@ -57,6 +61,8 @@ on:
       - 'scripts/run_v6_daily_stage11.py'
       - 'scripts/archive_v6_legacy.py'
       - 'scripts/migrate_v6_legacy.py'
+      - 'scripts/restore_v6_legacy_archive.py'
+      - 'scripts/rehearse_v6_legacy_archive.py'
       - 'scripts/run_v6_replay.py'
       - 'scripts/run_v6_accuracy_replay.py'
       - 'scripts/run_v6_accuracy_weekly.py'
@@ -86,11 +92,13 @@ on:
       - 'tests/test_v6_stage10_projection_shutdown.py'
       - 'tests/test_v6_stage11_schema_archival.py'
       - 'tests/test_v6_stage11_production_runner.py'
+      - 'tests/test_v6_stage12_archive_restore.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
       - '.github/workflows/03-v6-daily.yml'
       - '.github/workflows/04-v6-accuracy-weekly.yml'
+      - '.github/workflows/05-v6-legacy-archive-rehearsal.yml'
 
 permissions:
   contents: read
@@ -152,6 +160,7 @@ jobs:
             src/v6_daily/production_gate_v5.py \
             src/v6_daily/production_runner.py \
             src/v6_daily/legacy_archive.py \
+            src/v6_daily/legacy_retirement_gate_v6.py \
             src/v6_daily/unified_report.py \
             src/v6_daily/accuracy.py \
             src/v6_daily/accuracy_lab.py \
@@ -169,6 +178,8 @@ jobs:
             scripts/run_v6_daily_stage11.py \
             scripts/archive_v6_legacy.py \
             scripts/migrate_v6_legacy.py \
+            scripts/restore_v6_legacy_archive.py \
+            scripts/rehearse_v6_legacy_archive.py \
             scripts/run_v6_replay.py \
             scripts/run_v6_accuracy_replay.py \
             scripts/run_v6_accuracy_weekly.py \
@@ -204,5 +215,6 @@ jobs:
             tests/test_v6_stage10_projection_shutdown.py \
             tests/test_v6_stage11_schema_archival.py \
             tests/test_v6_stage11_production_runner.py \
+            tests/test_v6_stage12_archive_restore.py \
             tests/test_alpha_engine.py \
             tests/test_alpha_validation.py

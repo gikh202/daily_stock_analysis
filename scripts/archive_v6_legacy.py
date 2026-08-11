@@ -12,12 +12,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.v6_daily.legacy_archive import export_legacy_archive, inspect_legacy_facts
+from src.v6_daily.legacy_archive import (
+    export_verified_legacy_archive,
+    inspect_legacy_facts,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Explicitly inspect or export historical legacy V6 fact tables"
+        description="Explicitly inspect or export a verified historical legacy V6 archive"
     )
     parser.add_argument(
         "--v6-db",
@@ -26,7 +29,22 @@ def main() -> int:
     parser.add_argument(
         "--output",
         default=None,
-        help="Archive JSON path. Omit with --dry-run to inspect only.",
+        help="Archive JSON path. A sidecar .manifest.json is created automatically.",
+    )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help="Optional explicit manifest path.",
+    )
+    parser.add_argument(
+        "--source-commit",
+        default=os.getenv("GITHUB_SHA"),
+        help="Source commit identity recorded in the archive manifest.",
+    )
+    parser.add_argument(
+        "--engine-version",
+        default=None,
+        help="Optional expected legacy engine version; export fails if absent.",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -39,8 +57,14 @@ def main() -> int:
         output = args.output or (
             f"v6_reports/legacy_archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         )
-        result = export_legacy_archive(args.v6_db, output)
-        result["mode"] = "export"
+        result = export_verified_legacy_archive(
+            args.v6_db,
+            output,
+            manifest_path=args.manifest,
+            source_commit=args.source_commit,
+            engine_version=args.engine_version,
+        )
+        result["mode"] = "verified_export"
         result["source_mutated"] = False
 
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

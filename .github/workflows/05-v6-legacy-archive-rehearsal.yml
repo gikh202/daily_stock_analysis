@@ -1,0 +1,152 @@
+name: V6 Legacy Archive Rehearsal
+
+on:
+  pull_request:
+    paths:
+      - 'src/v6_daily/legacy_archive.py'
+      - 'src/v6_daily/legacy_retirement_gate_v6.py'
+      - 'src/v6_daily/normalized_schema.py'
+      - 'src/v6_daily/production_import_guard.py'
+      - 'scripts/archive_v6_legacy.py'
+      - 'scripts/restore_v6_legacy_archive.py'
+      - 'scripts/rehearse_v6_legacy_archive.py'
+      - 'tests/test_v6_stage12_archive_restore.py'
+      - '.github/workflows/05-v6-legacy-archive-rehearsal.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  archive-restore-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade pytest
+
+      - name: Run Stage 12 archive and restore tests
+        env:
+          V6_FREE_SOURCE_ENRICHMENT: 'false'
+        run: |
+          python -m pytest -q tests/test_v6_stage12_archive_restore.py
+
+      - name: Restore latest V6 historical cache when available
+        uses: actions/cache/restore@v5
+        with:
+          path: v6_data/
+          key: v6-stage12-rehearsal-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            v6-daily-data-${{ runner.os }}-
+
+      - name: Select read-only rehearsal source
+        id: source
+        shell: bash
+        run: |
+          mkdir -p rehearsal
+          python - <<'PY'
+          import os
+          import sqlite3
+          from pathlib import Path
+
+          cached = Path('v6_data/v6_daily.db')
+          source = None
+          origin = None
+          if cached.is_file():
+              conn = sqlite3.connect(f'file:{cached}?mode=ro', uri=True, timeout=10)
+              try:
+                  tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                  signals = int(conn.execute('SELECT COUNT(*) FROM v6_signals').fetchone()[0]) if 'v6_signals' in tables else 0
+                  outcomes = int(conn.execute('SELECT COUNT(*) FROM v6_outcomes').fetchone()[0]) if 'v6_outcomes' in tables else 0
+                  quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              finally:
+                  conn.close()
+              if quick == 'ok' and {'v6_signals', 'v6_outcomes'}.issubset(tables):
+                  source = cached
+                  origin = f'cached_production_history(signals={signals},outcomes={outcomes})'
+
+          if source is None:
+              from tests.test_v6_stage11_schema_archival import _create_legacy_history
+              source = Path('rehearsal/legacy_fixture.db')
+              _create_legacy_history(source)
+              origin = 'deterministic_test_fixture'
+
+          output = Path(os.environ['GITHUB_OUTPUT'])
+          with output.open('a', encoding='utf-8') as handle:
+              handle.write(f'source_db={source}\n')
+              handle.write(f'source_origin={origin}\n')
+          print(f'Stage 12 source: {source} ({origin})')
+          PY
+
+      - name: Run verified archive plus isolated restore rehearsal
+        shell: bash
+        run: |
+          python scripts/rehearse_v6_legacy_archive.py \
+            --v6-db '${{ steps.source.outputs.source_db }}' \
+            --archive rehearsal/legacy_archive.json \
+            --restore-db rehearsal/legacy_restore.db \
+            --schema-db rehearsal/schema_rehearsal.db \
+            --evidence-output rehearsal/rehearsal_evidence.json \
+            --source-commit '${{ github.event.pull_request.head.sha || github.sha }}' \
+            --overwrite
+
+      - name: Validate Stage 13 eligibility certificate
+        env:
+          SOURCE_ORIGIN: ${{ steps.source.outputs.source_origin }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path('rehearsal/rehearsal_evidence.json')
+          payload = json.loads(path.read_text(encoding='utf-8'))
+          gate = payload.get('retirement_gate_v6') or {}
+          restore = payload.get('restore') or {}
+          archive = payload.get('archive') or {}
+          registry = payload.get('schema_registry_rehearsal') or {}
+
+          if payload.get('status') != 'pass':
+              raise SystemExit(f'Stage 12 evidence did not pass: {payload}')
+          if gate.get('stage13_eligible') is not True:
+              raise SystemExit(f'Stage 13 eligibility gate blocked: {gate}')
+          if gate.get('physical_drop_allowed_now') is not False:
+              raise SystemExit('Stage 12 must never authorize an immediate physical DROP')
+          if restore.get('verified') is not True or restore.get('isolated_restore') is not True:
+              raise SystemExit(f'restore rehearsal not verified/isolated: {restore}')
+          if archive.get('source_mutated') is not False or payload.get('source_unchanged') is not True:
+              raise SystemExit('archive rehearsal changed source legacy facts')
+          if registry.get('status') != 'current' or registry.get('pending_migrations') != []:
+              raise SystemExit(f'normalized schema registry rehearsal is not current: {registry}')
+          print(
+              'Stage 12 verified archive restore: PASS '
+              f"source={os.getenv('SOURCE_ORIGIN')} "
+              f"signals={archive.get('legacy_signal_rows')} "
+              f"outcomes={archive.get('legacy_outcome_rows')}"
+          )
+          PY
+
+      - name: Upload rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v6-legacy-archive-rehearsal-${{ github.run_id }}
+          path: rehearsal/
+          if-no-files-found: warn
+          retention-days: 14
