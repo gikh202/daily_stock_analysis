@@ -18,10 +18,12 @@ on:
       - 'tests/test_v6_accuracy_lab.py'
       - 'tests/test_v6_lab_replay.py'
       - 'tests/test_v6_research_backfill.py'
+      - 'tests/test_v6_balanced_decision_analysis.py'
       - 'tests/test_v6_decision_packet.py'
       - 'tests/test_v6_final_decision_packet.py'
       - 'tests/test_v6_final_decision_shadow_parity.py'
       - 'tests/test_v6_final_decision_renderer.py'
+      - 'tests/test_v6_final_decision_single_source.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -48,10 +50,12 @@ on:
       - 'tests/test_v6_accuracy_lab.py'
       - 'tests/test_v6_lab_replay.py'
       - 'tests/test_v6_research_backfill.py'
+      - 'tests/test_v6_balanced_decision_analysis.py'
       - 'tests/test_v6_decision_packet.py'
       - 'tests/test_v6_final_decision_packet.py'
       - 'tests/test_v6_final_decision_shadow_parity.py'
       - 'tests/test_v6_final_decision_renderer.py'
+      - 'tests/test_v6_final_decision_single_source.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -94,6 +98,7 @@ jobs:
             src/v6_daily/v4_research_adapter.py \
             src/v6_daily/final_decision_service.py \
             src/v6_daily/final_decision_renderer.py \
+            src/v6_daily/unified_report.py \
             src/v6_daily/accuracy.py \
             src/v6_daily/accuracy_lab.py \
             src/v6_daily/lab_replay.py \
@@ -124,9 +129,11 @@ jobs:
             tests/test_v6_accuracy_lab.py \
             tests/test_v6_lab_replay.py \
             tests/test_v6_research_backfill.py \
+            tests/test_v6_balanced_decision_analysis.py \
             tests/test_v6_decision_packet.py \
             tests/test_v6_final_decision_packet.py \
             tests/test_v6_final_decision_shadow_parity.py \
             tests/test_v6_final_decision_renderer.py \
+            tests/test_v6_final_decision_single_source.py \
             tests/test_alpha_engine.py \
             tests/test_alpha_validation.py
