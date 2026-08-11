@@ -323,8 +323,9 @@ def export_legacy_archive(
     v6_db_path: str | Path,
     output_path: str | Path,
 ) -> Dict[str, Any]:
-    """Backward-compatible wrapper for the Stage 11 explicit archive CLI."""
-    return export_verified_legacy_archive(v6_db_path, output_path)
+    """Stage 11 compatibility wrapper; preserve the historical status value."""
+    result = export_verified_legacy_archive(v6_db_path, output_path)
+    return {**result, "status": "exported"}
 
 
 def _load_archive(
