@@ -36,6 +36,8 @@ concurrency:
 env:
   PYTHONPATH: ${{ github.workspace }}
   V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
+  # 生产工作流固定使用 normalized facts。legacy 只保留诊断/人工迁移用途，不能通过仓库变量静默切回。
+  V6_DAILY_READ_SOURCE: normalized
 
 jobs:
   v6-daily:
@@ -171,7 +173,7 @@ jobs:
             echo "⚠️ 手动 V6 未提供上游 V4 报告，将仅使用生产数据库中的 V4 结构化记录"
           fi
 
-          # 这里只生成并持久化结果，不发送通知。最终邮件必须在完整校验通过后再发送。
+          # 这里只生成并持久化候选结果，不发送通知。最终邮件必须在 production gate 完整校验通过后再发送。
           V6_DAILY_NOTIFY=false python scripts/run_v6_daily.py \
             --stock-db data/stock_analysis.db \
             --v6-db v6_data/v6_daily.db \
@@ -180,7 +182,7 @@ jobs:
             --min-samples "${V6_DAILY_MIN_SAMPLES}" \
             "${EXTRA_ARGS[@]}"
 
-      - name: 校验 V6 数据库、Accuracy Lab 与综合日报
+      - name: 校验 V6 数据库、Accuracy Lab、Normalized Read Gate 与综合日报
         id: validate_v6
         shell: bash
         env:
@@ -191,6 +193,9 @@ jobs:
           import os
           import re
           import sqlite3
+          from pathlib import Path
+
+          from src.v6_daily.production_gate import assert_production_read_gate
 
           db = 'v6_data/v6_daily.db'
           report = 'v6_reports/v6_daily_latest.md'
@@ -233,6 +238,29 @@ jobs:
               lab_payload = json.load(f)
           with open(report, encoding='utf-8') as f:
               report_text = f.read()
+
+          # Stage 7 production gate: only normalized + exact parity + healthy DB/FK
+          # may become persisted production state or send the final notification.
+          production_gate = assert_production_read_gate(run_payload)
+          if production_gate.get('production_ready') is not True:
+              raise SystemExit(f'V6 production gate unexpectedly not ready: {production_gate}')
+          if production_gate.get('selected_source') != 'normalized_v6_tables':
+              raise SystemExit(f"unexpected production read source: {production_gate.get('selected_source')!r}")
+          if production_gate.get('read_parity') != 'exact':
+              raise SystemExit(f"unexpected production read parity: {production_gate.get('read_parity')!r}")
+
+          # Persist gate evidence into both machine-readable artifacts so every
+          # production notification can be audited back to the exact gate result.
+          run_payload['production_gate'] = production_gate
+          payload['production_gate'] = production_gate
+          Path(run).write_text(
+              json.dumps(run_payload, ensure_ascii=False, indent=2, sort_keys=True),
+              encoding='utf-8',
+          )
+          Path(payload_path).write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+              encoding='utf-8',
+          )
 
           unified = run_payload.get('unified_report') or {}
           if unified.get('language') != 'zh':
@@ -293,24 +321,27 @@ jobs:
 
           with open(output, 'a', encoding='utf-8') as f:
               f.write('valid=true\n')
+              f.write('production_ready=true\n')
           print(
-              'V6.2 validation: PASS '
+              'V6.2 production validation: PASS '
               f'signals={signals} outcomes={outcomes} board={len(board)} '
+              f"source={production_gate.get('selected_source')} "
+              f"parity={production_gate.get('read_parity')} "
               f"scoreboard={run_payload.get('scoreboard_status')} "
               f"accuracy_lab={lab_payload.get('status')} "
               f"v4_merged={unified.get('v4_merged')} chinese_chars={chinese_chars}"
           )
           PY
 
-      - name: 保存 V6 研究历史
-        if: ${{ !cancelled() && steps.validate_v6.outputs.valid == 'true' }}
+      - name: 保存 V6 生产研究历史
+        if: ${{ !cancelled() && steps.validate_v6.outputs.valid == 'true' && steps.validate_v6.outputs.production_ready == 'true' }}
         uses: actions/cache/save@v5
         with:
           path: v6_data/
           key: v6-daily-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: 校验通过后发送最终综合日报
-        if: ${{ success() && steps.validate_v6.outputs.valid == 'true' }}
+      - name: Production Gate 通过后发送最终综合日报
+        if: ${{ success() && steps.validate_v6.outputs.valid == 'true' && steps.validate_v6.outputs.production_ready == 'true' }}
         env:
           V6_UNIFIED_EMAIL_FINAL: 'true'
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
@@ -348,6 +379,8 @@ jobs:
           from datetime import datetime
           from pathlib import Path
 
+          from src.v6_daily.production_gate import assert_production_read_gate
+
           logging.basicConfig(
               level=os.getenv('LOG_LEVEL', 'INFO').upper(),
               format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
@@ -363,8 +396,14 @@ jobs:
           with run_path.open(encoding='utf-8') as f:
               run_payload = json.load(f)
 
+          # Defense in depth: notification independently re-runs the production
+          # gate instead of trusting only the previous step condition.
+          gate = assert_production_read_gate(run_payload)
+          if gate.get('notification_allowed') is not True:
+              raise SystemExit(f'production gate forbids notification: {gate}')
+
           if not truthy(os.getenv('V6_DAILY_NOTIFY')):
-              print('V6 通知已禁用；报告和研究历史仍已正常生成并保存。')
+              print('V6 通知已禁用；报告和 production-ready 研究历史仍已正常生成并保存。')
               raise SystemExit(0)
 
           with payload_path.open(encoding='utf-8') as f:
