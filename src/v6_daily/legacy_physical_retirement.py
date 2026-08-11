@@ -13,6 +13,7 @@ from .legacy_archive import (
     restore_verified_legacy_archive,
 )
 from .legacy_retirement_gate_v6 import assert_legacy_retirement_gate_v6
+from .normalized_persistence import NormalizedV6Persistence
 from .normalized_schema import ensure_normalized_schema, normalized_schema_status
 from .production_import_guard import assert_production_import_graph_clean
 
@@ -65,7 +66,7 @@ def _database_state(path: str | Path) -> Dict[str, Any]:
 
 
 def normalized_legacy_coverage(path: str | Path) -> Dict[str, Any]:
-    """Prove that every legacy identity is represented in normalized facts."""
+    """Prove legacy identities and key business identity fields exist normalized."""
     target = Path(path)
     if not target.is_file():
         return {
@@ -77,6 +78,8 @@ def normalized_legacy_coverage(path: str | Path) -> Dict[str, Any]:
             "normalized_outcome_ids": 0,
             "missing_signal_ids": [],
             "missing_outcome_ids": [],
+            "mismatched_signal_ids": [],
+            "mismatched_outcome_ids": [],
         }
     with _connect(target) as conn:
         tables = {
@@ -116,9 +119,45 @@ def normalized_legacy_coverage(path: str | Path) -> Dict[str, Any]:
             else set()
         )
 
+        mismatched_signal_ids: list[int] = []
+        if {"v6_signals", "v6_forecast_runs"}.issubset(tables):
+            rows = conn.execute(
+                """
+                SELECT s.id
+                FROM v6_signals s
+                JOIN v6_forecast_runs f ON f.source_signal_id=s.id
+                WHERE COALESCE(f.engine_version,'') <> COALESCE(s.engine_version,'')
+                   OR COALESCE(f.analysis_history_id,-1) <> COALESCE(s.analysis_history_id,-1)
+                   OR UPPER(COALESCE(f.symbol,'')) <> UPPER(COALESCE(s.code,''))
+                   OR COALESCE(f.direction,'') <> COALESCE(s.direction,'')
+                ORDER BY s.id
+                """
+            ).fetchall()
+            mismatched_signal_ids = [int(row[0]) for row in rows]
+
+        mismatched_outcome_ids: list[int] = []
+        if {"v6_outcomes", "v6_forecast_outcomes"}.issubset(tables):
+            rows = conn.execute(
+                """
+                SELECT o.id
+                FROM v6_outcomes o
+                JOIN v6_forecast_outcomes n ON n.source_outcome_id=o.id
+                WHERE COALESCE(n.source_signal_id,-1) <> COALESCE(o.signal_id,-1)
+                   OR COALESCE(n.horizon_days,-1) <> COALESCE(o.horizon_days,-1)
+                   OR ABS(COALESCE(n.return_pct,0.0) - COALESCE(o.return_pct,0.0)) > 0.000000001
+                ORDER BY o.id
+                """
+            ).fetchall()
+            mismatched_outcome_ids = [int(row[0]) for row in rows]
+
     missing_signal_ids = sorted(legacy_signal_ids - normalized_signal_ids)
     missing_outcome_ids = sorted(legacy_outcome_ids - normalized_outcome_ids)
-    ready = not missing_signal_ids and not missing_outcome_ids
+    ready = (
+        not missing_signal_ids
+        and not missing_outcome_ids
+        and not mismatched_signal_ids
+        and not mismatched_outcome_ids
+    )
     return {
         "status": "covered" if ready else "incomplete",
         "coverage_ready": ready,
@@ -128,6 +167,113 @@ def normalized_legacy_coverage(path: str | Path) -> Dict[str, Any]:
         "normalized_outcome_ids": len(normalized_outcome_ids),
         "missing_signal_ids": missing_signal_ids,
         "missing_outcome_ids": missing_outcome_ids,
+        "mismatched_signal_ids": mismatched_signal_ids,
+        "mismatched_outcome_ids": mismatched_outcome_ids,
+    }
+
+
+def migrate_missing_legacy_coverage(
+    path: str | Path,
+    *,
+    report_date: str | None = None,
+) -> Dict[str, Any]:
+    """One-time Stage 13 bridge: normalize all legacy engines before retirement.
+
+    This intentionally mutates only normalized tables. Legacy facts are
+    fingerprinted before/after and must remain byte-for-byte equivalent at the
+    logical table level. Existing normalized identities with conflicting core
+    fields are never overwritten; the final coverage check will fail closed.
+    """
+    target = Path(path)
+    before_facts = inspect_legacy_facts(target)
+    before = normalized_legacy_coverage(target)
+    if before.get("coverage_ready") is True:
+        return {
+            "status": "already_covered",
+            "applied": False,
+            "before": before,
+            "after": before,
+            "engines": [],
+            "legacy_source_unchanged": True,
+        }
+
+    with _connect(target) as conn:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "v6_signals" not in tables:
+            return {
+                "status": "not_required",
+                "applied": False,
+                "before": before,
+                "after": before,
+                "engines": [],
+                "legacy_source_unchanged": True,
+            }
+        engines = [
+            str(row[0]).strip()
+            for row in conn.execute(
+                "SELECT DISTINCT engine_version FROM v6_signals ORDER BY engine_version"
+            ).fetchall()
+            if str(row[0] or "").strip()
+        ]
+        board_by_engine = {
+            engine: [
+                {
+                    "id": int(row[0]),
+                    "code": str(row[1] or "").strip().upper(),
+                }
+                for row in conn.execute(
+                    "SELECT id, code FROM v6_signals WHERE engine_version=? ORDER BY id",
+                    (engine,),
+                ).fetchall()
+            ]
+            for engine in engines
+        }
+
+    day = (report_date or datetime.now(timezone.utc).strftime("%Y-%m-%d"))[:10]
+    persistence = NormalizedV6Persistence(str(target))
+    summaries: list[Dict[str, Any]] = []
+    for engine in engines:
+        summary = persistence.persist_snapshot(
+            {
+                "version": engine,
+                "generated_at": _utc_now(),
+                "board": board_by_engine[engine],
+            },
+            source_engine_version=engine,
+            report_date=day,
+            run_mode="SHADOW",
+            metadata={
+                "migration_phase": "stage13_pre_retirement_coverage",
+                "migration_only": True,
+                "requested_by": "stage13_explicit_apply",
+                "legacy_role": "retiring_after_verified_archive_restore",
+            },
+        )
+        summaries.append(summary)
+
+    after = normalized_legacy_coverage(target)
+    after_facts = inspect_legacy_facts(target)
+    source_unchanged = before_facts.get("tables") == after_facts.get("tables")
+    if not source_unchanged:
+        raise RuntimeError("Stage 13 coverage migration mutated legacy source facts")
+    if after.get("coverage_ready") is not True:
+        raise RuntimeError(
+            "Stage 13 coverage migration did not reach exact normalized coverage: "
+            + repr(after)
+        )
+    return {
+        "status": "covered",
+        "applied": True,
+        "before": before,
+        "after": after,
+        "engines": engines,
+        "migration_summaries": summaries,
+        "legacy_source_unchanged": source_unchanged,
     }
 
 
@@ -160,6 +306,7 @@ def _base_receipt(
         "before": dict(before),
         "policy": {
             "normalized_coverage_required": True,
+            "coverage_migration_requires_explicit_flag": True,
             "archive_before_drop": True,
             "verified_restore_before_drop": True,
             "transactional_drop": True,
@@ -201,9 +348,9 @@ def build_physical_retirement_evidence(
     archive_path = output_dir / "legacy_archive.json"
     manifest_path = output_dir / "legacy_archive.manifest.json"
     restore_path = output_dir / "legacy_restore_rehearsal.db"
-    for path in (archive_path, manifest_path, restore_path):
-        if path.exists():
-            path.unlink()
+    for artifact in (archive_path, manifest_path, restore_path):
+        if artifact.exists():
+            artifact.unlink()
 
     archive = export_verified_legacy_archive(
         target,
@@ -249,14 +396,17 @@ def retire_legacy_tables(
     receipt_path: str | Path | None = None,
     source_commit: str | None = None,
     engine_version: str | None = None,
+    report_date: str | None = None,
+    migrate_missing_coverage: bool = False,
     apply: bool = False,
 ) -> Dict[str, Any]:
-    """Retire legacy fact tables only after verified normalized coverage and restore.
+    """Retire legacy facts after exact normalized coverage + verified restore.
 
-    Dry-run is the API default. ``apply=True`` is intentionally required to
-    perform the transactional DROP. The operation is idempotent: databases that
-    already lack both legacy tables return ``already_retired`` without creating
-    or mutating legacy facts.
+    Dry-run is the API default. ``apply=True`` is required to DROP. If an old
+    production cache predates complete normalized coverage, the caller must also
+    explicitly opt into ``migrate_missing_coverage=True``; that bridge writes
+    normalized tables only, verifies legacy source immutability, and then repeats
+    the exact coverage check before archival or DROP.
     """
     target = Path(v6_db_path)
     before = _database_state(target)
@@ -274,6 +424,7 @@ def retire_legacy_tables(
                 "action": "no_database_before_run",
                 "legacy_tables_absent": True,
                 "archive_required": False,
+                "coverage_migration": {"status": "not_required", "applied": False},
                 "normalized_coverage": normalized_legacy_coverage(target),
                 "dropped_tables": [],
                 "after": before,
@@ -286,7 +437,7 @@ def retire_legacy_tables(
     before = _database_state(target)
     coverage = normalized_legacy_coverage(target)
     receipt["before"] = before
-    receipt["normalized_coverage"] = coverage
+    receipt["normalized_coverage_before"] = coverage
     receipt["schema_registry_before"] = schema_registry
 
     if before["legacy_tables_absent"]:
@@ -296,6 +447,8 @@ def retire_legacy_tables(
                 "action": "none",
                 "legacy_tables_absent": True,
                 "archive_required": False,
+                "coverage_migration": {"status": "not_required", "applied": False},
+                "normalized_coverage": coverage,
                 "dropped_tables": [],
                 "after": before,
                 "schema_registry_after": normalized_schema_status(target),
@@ -304,9 +457,31 @@ def retire_legacy_tables(
         _write_receipt(receipt_path, receipt)
         return receipt
 
+    coverage_migration: Dict[str, Any] = {
+        "status": "not_required" if coverage.get("coverage_ready") else "not_requested",
+        "applied": False,
+    }
+    if coverage.get("coverage_ready") is not True:
+        if not migrate_missing_coverage:
+            raise RuntimeError(
+                "Stage 13 normalized coverage incomplete; refusing legacy DROP: "
+                + repr(coverage)
+            )
+        if not apply:
+            raise RuntimeError(
+                "Stage 13 coverage migration is only allowed together with explicit apply=True"
+            )
+        coverage_migration = globals()["migrate_missing_legacy_coverage"](
+            target,
+            report_date=report_date,
+        )
+        coverage = normalized_legacy_coverage(target)
+
+    receipt["coverage_migration"] = coverage_migration
+    receipt["normalized_coverage"] = coverage
     if coverage.get("coverage_ready") is not True:
         raise RuntimeError(
-            "Stage 13 normalized coverage incomplete; refusing legacy DROP: "
+            "Stage 13 normalized coverage incomplete after migration; refusing legacy DROP: "
             + repr(coverage)
         )
 
