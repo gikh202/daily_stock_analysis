@@ -34,7 +34,8 @@ from src.v6_daily.final_decision_service import (
 )
 from src.v6_daily.free_sources import fetch_free_context
 from src.v6_daily.normalized_persistence import NormalizedV6Persistence
-from src.v6_daily.report import write_daily_report
+from src.v6_daily.read_cutover import cutover_daily_payload
+from src.v6_daily.report import render_daily_markdown, write_daily_report
 from src.v6_daily.store import mature_outcomes
 from src.v6_daily.unified_report import count_v4_structured_records
 from src.v6_daily.versioned_store import VersionedV6DailyStore
@@ -332,12 +333,6 @@ def run(
     if quick.strip().lower() != "ok":
         raise RuntimeError(f"V6 database quick_check failed: {quick}")
 
-    board_before_report = store.latest_board()
-    codes = [
-        str(item.get("code") or "").strip().upper()
-        for item in board_before_report
-        if str(item.get("code") or "").strip()
-    ]
     lab_run = accuracy_lab.get("run") or {}
     run_stats: Dict[str, Any] = {
         "analysis_records_seen": len(records),
@@ -362,7 +357,10 @@ def run(
         "external_backfill_policy": "current snapshot scores only newest recently-created canonical signals",
     }
     report_date = datetime.now().strftime("%Y-%m-%d")
-    payload = write_daily_report(
+
+    # The legacy store now produces only the comparison snapshot. It is not the
+    # outward production read source when normalized cutover is enabled.
+    legacy_payload = write_daily_report(
         store,
         report_dir,
         run_stats=run_stats,
@@ -370,7 +368,37 @@ def run(
         report_date=report_date,
         public_context=public_context,
     )
+
+    normalized_storage = NormalizedV6Persistence(v6_db_path).persist_snapshot(
+        legacy_payload,
+        source_engine_version=engine.version,
+        report_date=report_date,
+        run_mode="LIVE",
+        metadata={
+            "accuracy_layer": "v6.2",
+            "migration_phase": "normalized_read_cutover",
+            "legacy_role": "parity_and_manual_fallback_only",
+        },
+    )
+
+    requested_read_source = os.getenv("V6_DAILY_READ_SOURCE", "normalized")
+    payload, read_cutover = cutover_daily_payload(
+        legacy_payload,
+        db_path=v6_db_path,
+        active_engine_version=engine.version,
+        run_stats=run_stats,
+        min_samples=max(3, int(min_samples)),
+        public_context=public_context,
+        requested_source=requested_read_source,
+    )
+    run_stats["read_source"] = read_cutover.get("selected_source")
+    run_stats["read_parity"] = read_cutover.get("parity")
+    payload["run"] = run_stats
     payload["accuracy_lab"] = accuracy_lab
+    payload["normalized_storage"] = normalized_storage
+
+    # FinalDecisionPacket is now built only after the normalized read parity
+    # guard has selected the outward production payload.
     final_packets = build_final_decision_packets(payload, v4_records=records)
     payload["final_decisions"] = build_final_decision_payload(payload, v4_records=records)
 
@@ -382,26 +410,21 @@ def run(
     )
     payload["decision_audit"] = decision_audit
 
-    normalized_storage = NormalizedV6Persistence(v6_db_path).persist_snapshot(
-        payload,
-        source_engine_version=engine.version,
-        report_date=report_date,
-        run_mode="LIVE",
-        metadata={
-            "accuracy_layer": "v6.2",
-            "decision_source": "FinalDecisionPacket",
-            "decision_contract": "final-decision-packet-v1",
-            "final_decision_packets": len(final_packets),
-            "decision_audit_schema_version": decision_audit.get("schema_version"),
-        },
-    )
-    payload["normalized_storage"] = normalized_storage
-
-    (Path(report_dir) / "v6_daily_latest.json").write_text(
+    output = Path(report_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "v6_daily_latest.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    normalized_markdown = render_daily_markdown(payload, report_date=report_date)
+    (output / "v6_daily_latest.md").write_text(normalized_markdown, encoding="utf-8")
+    (output / f"v6_daily_{report_date}.md").write_text(normalized_markdown, encoding="utf-8")
 
+    codes = [
+        str(item.get("code") or "").strip().upper()
+        for item in (payload.get("board") or [])
+        if isinstance(item, dict) and str(item.get("code") or "").strip()
+    ]
     unified_report = _finalize_report(
         report_dir=report_dir,
         report_date=report_date,
@@ -409,7 +432,7 @@ def run(
         v6_payload=payload,
         analysis_records=records,
     )
-    report_path = Path(report_dir) / "v6_daily_latest.md"
+    report_path = output / "v6_daily_latest.md"
     notification = _notify(report_path, codes) if notify else {
         "attempted": False,
         "success": False,
@@ -427,6 +450,7 @@ def run(
         "final_decisions": (payload.get("final_decisions") or {}).get("summary") or {},
         "decision_audit": decision_audit,
         "normalized_storage": normalized_storage,
+        "read_cutover": read_cutover,
         "accuracy_lab": {
             "version": accuracy_lab.get("version"),
             "status": accuracy_lab.get("status"),
@@ -437,7 +461,7 @@ def run(
         "free_sources": public_context.get("status") or {},
         "notification": notification,
     }
-    (Path(report_dir) / "v6_run.json").write_text(
+    (output / "v6_run.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
