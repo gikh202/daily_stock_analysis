@@ -61,11 +61,11 @@ def build_decision_signal_payload_from_report(
     """Build a DecisionSignal payload from a completed stock analysis report.
 
     The automatic write path applies the same core data-quality safety
-    principle used by decision-profile reassessment: a fresh actionable signal
-    must not be persisted when the analysis context is explicitly poor (or when
-    a fresh auto-generated report has no quality evidence at all). Legacy and
-    backfill records remain readable even when historical snapshots predate the
-    quality contract.
+    principle used by decision-profile reassessment. Explicitly poor evidence
+    must not produce a fresh actionable signal. When the current pipeline
+    supplies a context snapshot, a missing quality contract is also treated as
+    unsafe. Standalone helper calls without a snapshot remain backward
+    compatible, while legacy/backfill records remain reproducible.
     """
 
     if result is None or not getattr(result, "success", True):
@@ -92,6 +92,7 @@ def build_decision_signal_payload_from_report(
         return None
 
     data_quality_summary = _extract_data_quality(context_snapshot, result)
+    guardrail_data_quality = _extract_snapshot_data_quality(context_snapshot)
     (
         action,
         action_label,
@@ -100,9 +101,12 @@ def build_decision_signal_payload_from_report(
     ) = _apply_auto_data_quality_guardrail(
         action=canonical_action,
         action_label=action_fields.get("action_label"),
-        data_quality_summary=data_quality_summary,
+        data_quality_summary=guardrail_data_quality,
         report_language=getattr(result, "report_language", None),
         profile_source=profile_source,
+        quality_contract_required=(
+            profile_source == "auto_default" and context_snapshot is not None
+        ),
     )
 
     raw_code = str(getattr(result, "code", "") or "").strip()
@@ -284,18 +288,19 @@ def _apply_auto_data_quality_guardrail(
     data_quality_summary: Any,
     report_language: Optional[str],
     profile_source: ProfileSource,
+    quality_contract_required: bool,
 ) -> tuple[str, Optional[str], str, Optional[str]]:
     """Downgrade unsafe fresh buy/add signals when evidence quality is insufficient.
 
-    ``legacy_unknown`` and ``backfill_defaulted`` tolerate unknown quality so
-    old reports remain reproducible. Explicit ``poor`` quality is unsafe for all
-    paths. Fresh ``auto_default`` reports also treat an absent quality contract
-    as unsafe because the current pipeline is expected to provide one.
+    Explicit ``poor`` quality is unsafe for every path. The current automatic
+    persistence path also fails closed when it supplies a context snapshot but
+    the snapshot is missing its quality contract. Standalone helper calls and
+    legacy/backfill paths do not invent a quality failure from missing context.
     """
 
     quality_level = normalize_decision_signal_data_quality(data_quality_summary)
     quality_blocks_action = quality_level == "poor" or (
-        quality_level == "unknown" and profile_source == "auto_default"
+        quality_level == "unknown" and quality_contract_required
     )
     if action not in _ACTIONABLE_ACTIONS or not quality_blocks_action:
         return action, action_label, quality_level, None
@@ -512,13 +517,19 @@ def _extract_market_structure_summary(
     return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
 
 
+def _extract_snapshot_data_quality(
+    context_snapshot: Optional[Mapping[str, Any]],
+) -> Optional[Any]:
+    return _as_mapping(
+        _as_mapping(context_snapshot).get("analysis_context_pack_overview")
+    ).get("data_quality")
+
+
 def _extract_data_quality(
     context_snapshot: Optional[Mapping[str, Any]],
     result: AnalysisResult,
 ) -> Optional[Any]:
-    snapshot_quality = _as_mapping(
-        _as_mapping(context_snapshot).get("analysis_context_pack_overview")
-    ).get("data_quality")
+    snapshot_quality = _extract_snapshot_data_quality(context_snapshot)
     if snapshot_quality:
         return snapshot_quality
     return _as_mapping(getattr(result, "analysis_context_pack_overview", None)).get("data_quality")
