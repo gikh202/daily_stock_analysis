@@ -22,8 +22,13 @@ def apply_data_quality_decision_guardrail(
     """Downgrade actionable advice when the context pack is explicitly poor.
 
     This guardrail intentionally runs after market-context guardrails. If a
-    more specific guardrail has already softened the public advice to watch,
+    more specific guardrail has already softened the execution action to watch,
     this stage is a no-op so the audit trail keeps the real first cause.
+
+    ``result.action`` is the canonical execution action and therefore wins over
+    the model's free-form ``operation_advice``. ``decision_type`` is analytical
+    metadata, not an executable instruction, so it must never turn ambiguous
+    advice into a buy/add action.
     """
 
     if result is None or not isinstance(analysis_context_pack_overview, Mapping):
@@ -36,11 +41,9 @@ def apply_data_quality_decision_guardrail(
     if quality_level != "poor":
         return []
 
-    current_action = normalize_decision_action(getattr(result, "operation_advice", None))
+    current_action = normalize_decision_action(getattr(result, "action", None))
     if current_action is None:
-        current_action = normalize_decision_action(getattr(result, "action", None))
-    if current_action is None:
-        current_action = normalize_decision_action(getattr(result, "decision_type", None))
+        current_action = normalize_decision_action(getattr(result, "operation_advice", None))
     if current_action not in ACTIONABLE_ACTIONS:
         return []
 
