@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-import json
 import math
 import re
 from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+
+from .final_decision_service import build_final_decision_packets
+from .fusion_contracts import (
+    FinalDecisionPacket,
+    action_label_zh,
+    agreement_label_zh,
+    direction_label_zh,
+    render_final_decision_lines,
+)
+from .v4_research_adapter import latest_v4_views
 
 
 # Keep the underlying V6 schema stable; localization is presentation-only.
@@ -37,8 +46,14 @@ _TEXT_REPLACEMENTS: tuple[tuple[str, str], ...] = (
 )
 
 _TABLE_REPLACEMENTS: tuple[tuple[str, str], ...] = (
-    ("| Rank | Symbol | Decision | Direction | Forecast | Opportunity | Quality | Risk | Evidence | LLM |", "| 排名 | 标的 | 决策 | 方向 | 预测分 | 机会分 | 质量分 | 风险分 | 证据 | LLM |"),
-    ("| Horizon | N | Direction Hit | BUY N | BUY Hit | Avoid N | Avoid Hit | Forecast IC | Opportunity IC |", "| 周期 | 样本数 | 方向命中率 | 买入样本 | 买入命中率 | 回避样本 | 回避命中率 | 预测 IC | 机会 IC |"),
+    (
+        "| Rank | Symbol | Decision | Direction | Forecast | Opportunity | Quality | Risk | Evidence | LLM |",
+        "| 排名 | 标的 | 决策 | 方向 | 预测分 | 机会分 | 质量分 | 风险分 | 证据 | LLM |",
+    ),
+    (
+        "| Horizon | N | Direction Hit | BUY N | BUY Hit | Avoid N | Avoid Hit | Forecast IC | Opportunity IC |",
+        "| 周期 | 样本数 | 方向命中率 | 买入样本 | 买入命中率 | 回避样本 | 回避命中率 | 预测 IC | 机会 IC |",
+    ),
 )
 
 _TOKEN_MAP = {
@@ -62,9 +77,19 @@ _TOKEN_MAP = {
     "narrow": "狭窄",
 }
 
-_DIRECTION_LABEL = {"bullish": "看多", "neutral": "中性", "bearish": "看空"}
-_DECISION_LABEL = {"BUY_SETUP": "买入准备", "WATCH": "观察", "WAIT": "等待", "AVOID": "回避"}
-_LLM_LABEL = {"healthy": "正常", "fallback": "已回退", "degraded": "降级", "unknown": "未知", "missing": "缺失"}
+_DECISION_LABEL = {
+    "BUY_SETUP": "买入准备",
+    "WATCH": "观察",
+    "WAIT": "等待",
+    "AVOID": "回避",
+}
+_LLM_LABEL = {
+    "healthy": "正常",
+    "fallback": "已回退",
+    "degraded": "降级",
+    "unknown": "未知",
+    "missing": "缺失",
+}
 
 
 def translate_v6_markdown_to_chinese(markdown: str) -> str:
@@ -75,7 +100,11 @@ def translate_v6_markdown_to_chinese(markdown: str) -> str:
     for old, new in _TEXT_REPLACEMENTS:
         text = text.replace(old, new)
     for token, translated in _TOKEN_MAP.items():
-        text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", translated, text)
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])",
+            translated,
+            text,
+        )
     return text
 
 
@@ -97,40 +126,12 @@ def _pct01(value: Any) -> str:
     return "N/A" if number is None else f"{100.0 * number:.0f}%"
 
 
-def _parse_object(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return {}
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _mapping(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _texts(value: Any, *, limit: int = 6) -> list[str]:
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if not isinstance(value, (list, tuple)):
-        return []
-    result: list[str] = []
-    for item in value:
-        candidate = _text(item)
-        if candidate and candidate not in result:
-            result.append(candidate)
-        if len(result) >= limit:
-            break
-    return result
 
 
 def _dedupe(items: Iterable[Any], *, limit: int = 6) -> list[str]:
@@ -151,312 +152,26 @@ def _dedupe(items: Iterable[Any], *, limit: int = 6) -> list[str]:
     return result
 
 
-def _normalize_direction(value: Any) -> str:
-    text = _text(value).lower()
-    if text in {"bullish", "看多", "强烈看多", "偏多", "上涨"}:
-        return "bullish"
-    if text in {"bearish", "看空", "强烈看空", "偏空", "下跌"}:
-        return "bearish"
-    if text in {"neutral", "中性", "震荡", "横盘"}:
-        return "neutral"
-    if "看多" in text or "bull" in text:
-        return "bullish"
-    if "看空" in text or "bear" in text:
-        return "bearish"
-    return "neutral"
+def _latest_v4_views(
+    records: Optional[Sequence[Mapping[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    """Compatibility alias; V4 normalization now has one implementation."""
+    return latest_v4_views(records)
 
 
-def _v4_forecast(raw: Mapping[str, Any]) -> Dict[str, Any]:
-    forecast = _mapping(raw.get("forecast")) or _mapping(_mapping(raw.get("dashboard")).get("forecast"))
-    horizon = _text(forecast.get("primary_horizon")) or "10d"
-    block = _mapping(_mapping(forecast.get("horizons")).get(horizon))
-    direction = _normalize_direction(block.get("direction") or raw.get("trend_prediction"))
-    return {
-        "horizon": horizon,
-        "direction": direction,
-        "up_probability": _finite(block.get("up_probability")),
-        "expected_return_pct": _finite(block.get("expected_return_pct")),
-        "confidence": _text(block.get("confidence")),
-        "rationale": _text(block.get("rationale")),
-    }
-
-
-def _latest_v4_views(records: Optional[Sequence[Mapping[str, Any]]]) -> Dict[str, Dict[str, Any]]:
-    latest: Dict[str, tuple[int, Mapping[str, Any]]] = {}
-    for record in records or ():
-        code = _text(record.get("code")).upper()
-        if not code:
-            continue
-        try:
-            history_id = int(record.get("id") or 0)
-        except (TypeError, ValueError):
-            history_id = 0
-        previous = latest.get(code)
-        if previous is None or history_id >= previous[0]:
-            latest[code] = (history_id, record)
-
-    views: Dict[str, Dict[str, Any]] = {}
-    for code, (history_id, record) in latest.items():
-        raw = _parse_object(record.get("raw_result"))
-        if not raw:
-            continue
-        dashboard = _mapping(raw.get("dashboard"))
-        core = _mapping(dashboard.get("core_conclusion"))
-        intel = _mapping(dashboard.get("intelligence"))
-        battle = _mapping(dashboard.get("battle_plan"))
-        phase = _mapping(dashboard.get("phase_decision"))
-        attr = _mapping(dashboard.get("signal_attribution"))
-        data = _mapping(dashboard.get("data_perspective"))
-        execution = _mapping(raw.get("execution")) or _mapping(dashboard.get("execution"))
-        phase_context = _mapping(phase.get("phase_context"))
-        view = {
-            "history_id": history_id,
-            "code": code,
-            "name": _text(raw.get("name")) or code,
-            "score": _finite(raw.get("sentiment_score") or dashboard.get("sentiment_score")),
-            "operation": _text(execution.get("operation_advice") or raw.get("operation_advice")),
-            "execution_action": _text(execution.get("action") or raw.get("action")),
-            "trend_prediction": _text(raw.get("trend_prediction")),
-            "forecast": _v4_forecast(raw),
-            "one_sentence": _text(core.get("one_sentence")),
-            "position_advice": _mapping(core.get("position_advice")),
-            "analysis_summary": _text(raw.get("analysis_summary")),
-            "technical_analysis": _text(raw.get("technical_analysis")),
-            "fundamental_analysis": _text(raw.get("fundamental_analysis")),
-            "volume_analysis": _text(raw.get("volume_analysis")),
-            "news_summary": _text(raw.get("news_summary")),
-            "risk_warning": _text(raw.get("risk_warning")),
-            "earnings_outlook": _text(intel.get("earnings_outlook")),
-            "sentiment_summary": _text(intel.get("sentiment_summary")),
-            "latest_news": _text(intel.get("latest_news")),
-            "catalysts": _texts(intel.get("positive_catalysts")),
-            "risks": _texts(intel.get("risk_alerts")),
-            "sniper_points": _mapping(battle.get("sniper_points")),
-            "position_strategy": _mapping(battle.get("position_strategy")),
-            "watch_conditions": _texts(phase.get("watch_conditions")),
-            "next_check_time": _text(phase.get("next_check_time")),
-            "immediate_action": _text(phase.get("immediate_action")),
-            "data_limitations": _texts(phase.get("data_limitations")),
-            "strongest_bullish": _text(attr.get("strongest_bullish_signal")),
-            "strongest_bearish": _text(attr.get("strongest_bearish_signal")),
-            "phase": _text(phase_context.get("phase")),
-            "is_trading_day": phase_context.get("is_trading_day"),
-            "effective_daily_bar_date": _text(phase_context.get("effective_daily_bar_date")),
-            "data_perspective": data,
-        }
-        views[code] = view
-    return views
-
-
-def count_v4_structured_records(records: Optional[Sequence[Mapping[str, Any]]]) -> int:
-    return len(_latest_v4_views(records))
+def count_v4_structured_records(
+    records: Optional[Sequence[Mapping[str, Any]]],
+) -> int:
+    return len(latest_v4_views(records))
 
 
 def _direction_label(value: Any) -> str:
-    return _DIRECTION_LABEL.get(_normalize_direction(value), "中性")
+    return direction_label_zh(_text(value))
 
 
 def _decision_label(value: Any) -> str:
     normalized = _text(value).upper()
     return _DECISION_LABEL.get(normalized, _text(value) or "等待")
-
-
-def _agreement(v6_direction: Any, v4_direction: Any) -> str:
-    left = _normalize_direction(v6_direction)
-    right = _normalize_direction(v4_direction)
-    if left == right and left != "neutral":
-        return "方向一致"
-    if left == right:
-        return "共同偏中性"
-    if "neutral" in {left, right}:
-        return "部分一致"
-    return "方向分歧"
-
-
-def _is_non_trading(v4: Mapping[str, Any]) -> bool:
-    if v4.get("is_trading_day") is False:
-        return True
-    return _text(v4.get("phase")).lower() in {"non_trading", "closed"}
-
-
-def _final_action(v6: Mapping[str, Any], v4: Mapping[str, Any], agreement: str) -> str:
-    decision = _text(v6.get("decision")).upper()
-    if decision == "AVOID":
-        return "回避"
-    if decision == "WAIT":
-        return "等待"
-    if decision == "WATCH":
-        return "观察"
-    if decision == "BUY_SETUP":
-        if agreement == "方向分歧":
-            return "观察"
-        if _text(v4.get("operation")) in {"观望", "卖出", "减仓"} or _is_non_trading(v4):
-            return "观察（等待确认）"
-        return "买入准备"
-    return _decision_label(decision)
-
-
-def _fusion_reason(v6: Mapping[str, Any], v4: Mapping[str, Any], agreement: str, final_action: str) -> str:
-    forecast = _mapping(v4.get("forecast"))
-    v4_dir = _direction_label(forecast.get("direction"))
-    v6_dir = _direction_label(v6.get("direction"))
-    horizon = _text(forecast.get("horizon")) or "10d"
-    expected = _finite(forecast.get("expected_return_pct"))
-    v4_phrase = f"V4 {horizon}预测{v4_dir}"
-    if expected is not None:
-        v4_phrase += f"、预期收益{expected:+.1f}%"
-    v6_phrase = f"V6确定性方向{v6_dir}，机会分{_number(v6.get('opportunity_score'))}、风险分{_number(v6.get('risk_score'))}"
-
-    if agreement == "方向一致":
-        reason = f"{v4_phrase}，{v6_phrase}，两层方向一致。"
-    elif agreement == "部分一致":
-        reason = f"{v4_phrase}，但{v6_phrase}，方向尚未形成完全共振。"
-    elif agreement == "方向分歧":
-        reason = f"{v4_phrase}，而{v6_phrase}，出现方向分歧，按风险优先原则不升级仓位。"
-    else:
-        reason = f"{v4_phrase}，{v6_phrase}。"
-
-    immediate = _text(v4.get("immediate_action"))
-    if _is_non_trading(v4):
-        reason += " 当前为非交易时段，最终只形成下一交易日计划，不等同于立即下单。"
-    elif immediate:
-        reason += f" V4执行护栏：{immediate}"
-    return f"**{final_action}**。{reason}"
-
-
-def _has_active_trade_plan(v6: Mapping[str, Any]) -> bool:
-    plan = _mapping(v6.get("trade_plan"))
-    max_position = _finite(plan.get("max_position_pct"))
-    return bool(plan.get("entry_zone")) and max_position is not None and max_position > 0
-
-
-def _decision_balance_lines(
-    v6: Mapping[str, Any],
-    v4: Mapping[str, Any],
-    agreement: str,
-    final_action: str,
-) -> list[str]:
-    """Explain both sides of the buy decision without deleting contrary evidence.
-
-    The analytical layer is deliberately symmetric: bullish evidence remains visible
-    even when execution says WAIT/AVOID, and risk evidence remains visible when the
-    setup is bullish. The final action still controls execution and position limits.
-    """
-    forecast = _mapping(v4.get("forecast"))
-    v4_direction = _normalize_direction(forecast.get("direction"))
-    v6_direction = _normalize_direction(v6.get("direction"))
-    horizon = _text(forecast.get("horizon")) or "10d"
-    expected = _finite(forecast.get("expected_return_pct"))
-    active_plan = _has_active_trade_plan(v6)
-    opportunity = _finite(v6.get("opportunity_score"))
-    risk = _finite(v6.get("risk_score"))
-
-    bullish_candidates: list[Any] = [
-        v4.get("strongest_bullish"),
-        *v4.get("catalysts", []),
-        *v6.get("catalysts", []),
-    ]
-    bearish_candidates: list[Any] = [
-        v4.get("strongest_bearish"),
-        *v4.get("risks", []),
-        *v6.get("risks", []),
-        v4.get("risk_warning"),
-    ]
-    rationale = _text(forecast.get("rationale"))
-    if rationale:
-        if v4_direction == "bullish":
-            bullish_candidates.append(rationale)
-        elif v4_direction == "bearish":
-            bearish_candidates.append(rationale)
-
-    bullish = _dedupe(bullish_candidates, limit=4)
-    bearish = _dedupe(bearish_candidates, limit=4)
-    watch = _dedupe(v4.get("watch_conditions", []), limit=3)
-
-    direction_conflict = agreement == "方向分歧"
-    constructive_direction = (
-        "bullish" in {v4_direction, v6_direction}
-        and "bearish" not in {v4_direction, v6_direction}
-    )
-    risk_heavy = bool(
-        (risk is not None and risk >= 60.0)
-        or (
-            opportunity is not None
-            and risk is not None
-            and risk >= opportunity
-        )
-    )
-
-    decision = _text(v6.get("decision")).upper()
-    if decision == "AVOID" or final_action == "回避":
-        verdict = "当前不买/回避"
-        if bullish:
-            execution_reason = "即使存在局部看多证据，风险闸门当前占优；除非风险条件明显改善，否则不建立新仓。"
-        else:
-            execution_reason = "当前没有足够的结构化看多证据可以对冲风险闸门，维持回避，不建立新仓。"
-    elif final_action.startswith("买入准备"):
-        verdict = "可以买，但只按计划买"
-        execution_reason = "方向与执行层已达到买入准备，但仍必须服从入场、止损和最大仓位，不把看多等同于无条件追价。"
-    elif final_action.startswith("观察"):
-        if active_plan and constructive_direction and not direction_conflict and not risk_heavy:
-            verdict = "条件式可买"
-            execution_reason = "当前动作仍是观察，不代表否定买入；只有进入确定性入场区间并满足确认条件时才执行。"
-        else:
-            verdict = "继续观察"
-            if direction_conflict:
-                execution_reason = "多空方向存在直接分歧，不能因为某一侧更乐观就提前买入；等待冲突收敛后再评估。"
-            elif risk_heavy:
-                execution_reason = "当前风险分偏高或已不低于机会分，即使保留潜在买点也不足以升级为条件式买入。"
-            elif not active_plan:
-                execution_reason = "存在潜在机会，但没有活动确定性交易计划；保留看多逻辑，同时等待明确的入场与风控边界。"
-            else:
-                execution_reason = "执行层尚未达到可操作条件；保留现有多空证据，等待价格、量价或事件确认。"
-    elif final_action == "等待" or decision == "WAIT":
-        verdict = "暂不买，等待确认"
-        if bullish:
-            execution_reason = "看多逻辑仍保留，但量化与投研尚未形成足够共振或交易计划尚未触发，当前不执行。"
-        else:
-            execution_reason = "当前缺少足够的结构化看多证据，且执行层未触发，维持等待而不是勉强构造买入理由。"
-    else:
-        verdict = "等待更多证据"
-        execution_reason = "当前证据不足以支持无条件买入或回避，继续按确认条件更新判断。"
-
-    basis = [f"投研{horizon}预测{_direction_label(v4_direction)}"]
-    if expected is not None:
-        basis.append(f"预期收益{expected:+.1f}%")
-    basis.append(f"量化方向{_direction_label(v6_direction)}")
-    basis.append(
-        f"机会/风险{_number(v6.get('opportunity_score'))}/{_number(v6.get('risk_score'))}"
-    )
-    basis.append(agreement)
-
-    lines = [f"- **是否值得买**：**{verdict}**。{'，'.join(basis)}。{execution_reason}"]
-    lines.append(
-        "  - **支持买入的证据**："
-        + ("；".join(bullish) if bullish else "暂无足够的结构化看多证据，不能为了凑结论补造理由。")
-    )
-    lines.append(
-        "  - **支持等待/不买的证据**："
-        + ("；".join(bearish) if bearish else "暂无足够的结构化看空证据；当前保守动作主要来自执行层未触发或方向未共振。")
-    )
-
-    boundaries: list[str] = []
-    if active_plan:
-        plan = _mapping(v6.get("trade_plan"))
-        boundaries.append(f"确定性入场区间 {plan.get('entry_zone')}")
-        max_position = _finite(plan.get("max_position_pct"))
-        if max_position is not None:
-            boundaries.append(f"最大仓位上限 {100.0 * max_position:.1f}%")
-        if plan.get("stop_loss") is not None:
-            boundaries.append(f"失效/止损 {plan.get('stop_loss')}")
-    boundaries.extend(watch)
-    if not boundaries and v4.get("immediate_action"):
-        boundaries.append(_text(v4.get("immediate_action")))
-    lines.append(
-        "  - **关键分界**："
-        + ("；".join(boundaries[:6]) if boundaries else "暂无足够的结构化确认条件，继续观察而不主动下单。")
-    )
-    return lines
 
 
 def _feature_line(features: Mapping[str, Any]) -> str:
@@ -468,7 +183,15 @@ def _feature_line(features: Mapping[str, Any]) -> str:
         ("fundamental_quality", "基本面"),
         ("market_regime", "市场状态"),
     )
-    return " | ".join(f"{label} {_number(features.get(key), 0)}" for key, label in labels)
+    return " | ".join(
+        f"{label} {_number(features.get(key), 0)}" for key, label in labels
+    )
+
+
+def _is_non_trading(v4: Mapping[str, Any]) -> bool:
+    if v4.get("is_trading_day") is False:
+        return True
+    return _text(v4.get("phase")).lower() in {"non_trading", "closed"}
 
 
 def _format_plan(v6: Mapping[str, Any], v4: Mapping[str, Any]) -> list[str]:
@@ -501,7 +224,12 @@ def _format_plan(v6: Mapping[str, Any], v4: Mapping[str, Any]) -> list[str]:
     elif strategy.get("suggested_position"):
         lines.append(f"- **V4 仓位参考**: {strategy.get('suggested_position')}")
 
-    v4_refs = [sniper.get("ideal_buy"), sniper.get("secondary_buy"), sniper.get("stop_loss"), sniper.get("take_profit")]
+    v4_refs = [
+        sniper.get("ideal_buy"),
+        sniper.get("secondary_buy"),
+        sniper.get("stop_loss"),
+        sniper.get("take_profit"),
+    ]
     compact = "；".join(_text(item) for item in v4_refs if _text(item))
     if compact and (entry or stop is not None or targets):
         lines.append(f"- **V4 价格参考**: {compact}")
@@ -510,7 +238,10 @@ def _format_plan(v6: Mapping[str, Any], v4: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _market_conclusion(pulse: Mapping[str, Any], v4_views: Mapping[str, Mapping[str, Any]]) -> str:
+def _market_conclusion(
+    pulse: Mapping[str, Any],
+    v4_views: Mapping[str, Mapping[str, Any]],
+) -> str:
     regime = _text(pulse.get("regime")).lower()
     breadth = _text(pulse.get("breadth")).lower()
     avg_risk = _finite(pulse.get("average_risk"))
@@ -527,15 +258,58 @@ def _market_conclusion(pulse: Mapping[str, Any], v4_views: Mapping[str, Mapping[
     return base + "。"
 
 
+def _typed_fusion_summary(
+    packet: FinalDecisionPacket,
+    v4: Mapping[str, Any],
+) -> str:
+    """Explain a typed decision without deriving a second decision."""
+    parts = [
+        f"V4 {packet.v4_horizon or '10d'}预测{direction_label_zh(packet.v4_direction)}",
+    ]
+    if packet.v4_expected_return_pct is not None:
+        parts.append(f"预期收益{packet.v4_expected_return_pct:+.1f}%")
+    parts.append(f"V6确定性方向{direction_label_zh(packet.v6_direction)}")
+    parts.append(
+        f"机会分{_number(packet.opportunity_score)}、风险分{_number(packet.risk_score)}"
+    )
+
+    agreement = agreement_label_zh(packet)
+    if agreement == "方向一致":
+        alignment = "两层方向一致。"
+    elif agreement == "部分一致":
+        alignment = "方向尚未形成完全共振。"
+    elif agreement == "方向分歧":
+        alignment = "两层方向存在直接分歧，最终执行状态以 typed 风控合同为准。"
+    elif agreement == "共同偏中性":
+        alignment = "两层共同偏中性，等待新的方向性证据。"
+    else:
+        alignment = "V4结构化数据缺失，当前不能形成最终跨层买入判断。"
+
+    summary = "，".join(parts) + "，" + alignment
+    immediate = _text(v4.get("immediate_action"))
+    if packet.non_trading:
+        summary += " 当前为非交易时段，只形成下一交易日计划，不等同于立即下单。"
+    elif immediate:
+        summary += f" V4执行护栏：{immediate}"
+    return summary
+
+
 def _render_deltas(deltas: Sequence[Mapping[str, Any]]) -> list[str]:
     meaningful: list[Mapping[str, Any]] = []
     for item in deltas:
-        changed = item.get("decision_before") != item.get("decision_after") or item.get("direction_before") != item.get("direction_after")
-        magnitudes = [_finite(item.get(name)) or 0.0 for name in ("opportunity_delta", "risk_delta", "forecast_delta")]
+        changed = (
+            item.get("decision_before") != item.get("decision_after")
+            or item.get("direction_before") != item.get("direction_after")
+        )
+        magnitudes = [
+            _finite(item.get(name)) or 0.0
+            for name in ("opportunity_delta", "risk_delta", "forecast_delta")
+        ]
         if changed or max(abs(v) for v in magnitudes) >= 5.0:
             meaningful.append(item)
     if not meaningful:
         return ["- 本轮没有达到 5 分变化阈值的显著变化，或这是该标的首次 V6 记录。"]
+
     result: list[str] = []
     for item in meaningful[:10]:
         result.append(
@@ -554,7 +328,12 @@ def _render_deltas(deltas: Sequence[Mapping[str, Any]]) -> list[str]:
 
 
 def _render_public_context(context: Mapping[str, Any]) -> list[str]:
-    lines = ["## 5. 宏观与官方数据", "", "> SEC/FRED 当前只作为证据与背景，不直接修改 V6 数值评分。", ""]
+    lines = [
+        "## 5. 宏观与官方数据",
+        "",
+        "> SEC/FRED 当前只作为证据与背景，不直接修改 V6 数值评分。",
+        "",
+    ]
     status = _mapping(context.get("status"))
     if not status or not status.get("enabled"):
         lines.extend(["- 免费公共数据增强：**已关闭**", ""])
@@ -574,7 +353,9 @@ def _render_public_context(context: Mapping[str, Any]) -> list[str]:
             latest = _mapping(item_map.get("latest"))
             label = labels.get(series_id, _text(item_map.get("label")) or series_id)
             if latest.get("value"):
-                lines.append(f"- {label}: **{latest.get('value')}**（{latest.get('date') or '-'}）")
+                lines.append(
+                    f"- {label}: **{latest.get('value')}**（{latest.get('date') or '-'}）"
+                )
             elif item_map.get("error"):
                 lines.append(f"- {label}: 暂不可用")
         lines.append("")
@@ -585,11 +366,13 @@ def _render_public_context(context: Mapping[str, Any]) -> list[str]:
         for code, item in sorted(sec.items()):
             item_map = _mapping(item)
             filings = item_map.get("recent_filings") or []
-            compact = []
+            compact: list[str] = []
             for filing in filings[:4] if isinstance(filings, list) else []:
                 filing_map = _mapping(filing)
                 if filing_map:
-                    compact.append(f"{filing_map.get('form') or '-'} {filing_map.get('filing_date') or '-'}")
+                    compact.append(
+                        f"{filing_map.get('form') or '-'} {filing_map.get('filing_date') or '-'}"
+                    )
             if compact:
                 lines.append(f"- **{code}**: " + "；".join(compact))
         lines.append("")
@@ -612,21 +395,23 @@ def _render_scoreboard(scoreboard: Mapping[str, Any]) -> list[str]:
     horizons = scoreboard.get("horizons") or []
     if isinstance(horizons, list) and horizons:
         for item in horizons:
-            item = _mapping(item)
+            row = _mapping(item)
+
             def p(name: str) -> str:
-                v = _finite(item.get(name))
-                return "N/A" if v is None else f"{v:.1f}%"
+                value = _finite(row.get(name))
+                return "N/A" if value is None else f"{value:.1f}%"
+
             lines.append(
                 "| {h}D | {n} | {hit} | {buy_n} | {buy_hit} | {avoid_n} | {avoid_hit} | {fic} | {oic} |".format(
-                    h=item.get("horizon_days", "-"),
-                    n=item.get("samples", 0),
+                    h=row.get("horizon_days", "-"),
+                    n=row.get("samples", 0),
                     hit=p("directional_hit_rate_pct"),
-                    buy_n=item.get("buy_setup_samples", 0),
+                    buy_n=row.get("buy_setup_samples", 0),
                     buy_hit=p("buy_setup_hit_rate_pct"),
-                    avoid_n=item.get("avoidance_samples", 0),
+                    avoid_n=row.get("avoidance_samples", 0),
                     avoid_hit=p("avoidance_hit_rate_pct"),
-                    fic=_number(item.get("forecast_score_ic_spearman"), 4),
-                    oic=_number(item.get("opportunity_ic_spearman"), 4),
+                    fic=_number(row.get("forecast_score_ic_spearman"), 4),
+                    oic=_number(row.get("opportunity_ic_spearman"), 4),
                 )
             )
     else:
@@ -641,22 +426,27 @@ def render_integrated_chinese_report(
     v4_records: Optional[Sequence[Mapping[str, Any]]] = None,
     report_date: Optional[str] = None,
 ) -> str:
-    """Render one coherent report by reconciling V4 research with V6 risk logic.
+    """Render the Chinese report from the typed V4+V6 final decision contract.
 
-    V4 contributes qualitative research, forecast narrative, news, fundamentals,
-    technical interpretation and phase-aware execution context. V6 owns the
-    deterministic ranking/risk layer. Both bullish and bearish evidence remain
-    visible; risk gates control execution but do not erase the opposite thesis.
+    FinalDecisionPacket is the only source allowed to decide final action,
+    cross-layer agreement, buy-worthiness and execution authorization. This
+    renderer may explain those fields, but it does not re-derive them.
     """
     report_date = report_date or datetime.now().strftime("%Y-%m-%d")
-    board = [dict(item) for item in (payload.get("board") or []) if isinstance(item, dict)]
+    board = [
+        dict(item)
+        for item in (payload.get("board") or [])
+        if isinstance(item, Mapping)
+    ]
     pulse = _mapping(payload.get("market_pulse"))
-    v4_views = _latest_v4_views(v4_records)
+    v4_views = latest_v4_views(v4_records)
+    packets = build_final_decision_packets(payload, v4_records=v4_records)
+    packet_by_symbol = {packet.symbol: packet for packet in packets if packet.symbol}
 
     lines = [
         f"# AI 美股综合日报 · {report_date}",
         "",
-        "> 本报告不是 V4 与 V6 的原文拼接：V4 提供 AI 投研、新闻、基本面、技术面和执行护栏；V6 提供确定性方向、机会/质量/风险评分、证据覆盖与风控计划。最终结论按“双边证据保留、执行风控优先、冲突显式展示、缺失不补分”规则融合；看多理由不会因为最终动作保守而删除，看空理由也不会因为趋势偏多而隐藏。",
+        "> V4 提供 AI 投研、新闻、基本面、技术面和阶段上下文；V6 提供确定性方向、机会/质量/风险评分和风控计划。最终动作、是否值得买、执行授权与 V4/V6 融合状态只读取 FinalDecisionPacket；报告层不再自行推导第二套结论。",
         "",
         "## 1. 今日最终总览",
         "",
@@ -672,31 +462,29 @@ def render_integrated_chinese_report(
         "|---:|---|---|---|---|---|---:|---:|---:|---:|",
     ]
 
-    fusion_rows: list[tuple[Dict[str, Any], Dict[str, Any], str, str]] = []
+    fusion_rows: list[tuple[Dict[str, Any], Dict[str, Any], FinalDecisionPacket]] = []
     for rank, item in enumerate(board, 1):
         code = _text(item.get("code")).upper()
+        packet = packet_by_symbol.get(code)
+        if packet is None:
+            continue
         v4 = v4_views.get(code, {})
-        v4_forecast = _mapping(v4.get("forecast"))
-        v4_direction = v4_forecast.get("direction") or v4.get("trend_prediction") or "neutral"
-        agreement = _agreement(item.get("direction"), v4_direction) if v4 else "V4结构化数据缺失"
-        action = _final_action(item, v4, agreement) if v4 else _decision_label(item.get("decision"))
-        fusion_rows.append((item, v4, agreement, action))
-        v4_view = _direction_label(v4_direction) if v4 else "缺失"
-        horizon = _text(v4_forecast.get("horizon")) if v4 else ""
-        if horizon and v4_view != "缺失":
-            v4_view = f"{horizon} {v4_view}"
+        fusion_rows.append((item, v4, packet))
+        v4_view = "缺失"
+        if packet.fusion_complete:
+            v4_view = f"{packet.v4_horizon or '10d'} {direction_label_zh(packet.v4_direction)}"
         lines.append(
             "| {rank} | {code} | {action} | {agreement} | {v4_view} | {v6_dir} | {forecast} | {opp} | {risk} | {evidence} |".format(
                 rank=rank,
                 code=code or "-",
-                action=action,
-                agreement=agreement,
+                action=action_label_zh(packet),
+                agreement=agreement_label_zh(packet),
                 v4_view=v4_view,
-                v6_dir=_direction_label(item.get("direction")),
-                forecast=_number(item.get("forecast_score")),
-                opp=_number(item.get("opportunity_score")),
-                risk=_number(item.get("risk_score")),
-                evidence=_pct01(item.get("evidence_coverage")),
+                v6_dir=direction_label_zh(packet.v6_direction),
+                forecast=_number(packet.v6_forecast_score),
+                opp=_number(packet.opportunity_score),
+                risk=_number(packet.risk_score),
+                evidence=_pct01(packet.evidence_coverage),
             )
         )
     if not board:
@@ -706,25 +494,29 @@ def render_integrated_chinese_report(
     lines.extend(_render_deltas(payload.get("deltas") or []))
     lines.extend(["", "## 3. 标的融合分析", ""])
 
-    for index, (item, v4, agreement, action) in enumerate(fusion_rows, 1):
-        code = _text(item.get("code")).upper()
+    for index, (item, v4, packet) in enumerate(fusion_rows, 1):
+        code = packet.symbol
         name = _text(v4.get("name")) if v4 else ""
         title = f"### {index}. {code}"
         if name and name.upper() != code:
             title += f" · {name}"
-        title += f" · 最终：{action} · {agreement}"
+        title += (
+            f" · 最终：{action_label_zh(packet)} · {agreement_label_zh(packet)}"
+        )
         lines.extend([title, ""])
 
-        if v4:
-            lines.append(f"- **最终结论**：{_fusion_reason(item, v4, agreement, action)}")
-            lines.extend(_decision_balance_lines(item, v4, agreement, action))
-            if v4.get("analysis_summary"):
-                lines.append(f"- **V4 投研摘要（原始观点）**：{v4.get('analysis_summary')}")
-        else:
-            lines.append(f"- **最终结论**：仅获得 V6 结构化信号，当前按 V6 决策 **{action}**；V4 结构化投研记录缺失，不补造定性证据。")
+        lines.append(
+            f"- **最终结论**：**{action_label_zh(packet)}**。{_typed_fusion_summary(packet, v4)}"
+        )
+        lines.extend(render_final_decision_lines(packet))
+
+        if v4.get("analysis_summary"):
+            lines.append(
+                f"- **V4 投研摘要（原始观点）**：{v4.get('analysis_summary')}"
+            )
 
         lines.append(
-            f"- **V6 确定性视角**：方向 **{_direction_label(item.get('direction'))}** | 预测分 **{_number(item.get('forecast_score'))}** | 机会/质量/风险 **{_number(item.get('opportunity_score'))}/{_number(item.get('quality_score'))}/{_number(item.get('risk_score'))}** | 证据 **{_pct01(item.get('evidence_coverage'))}**"
+            f"- **V6 确定性视角**：方向 **{direction_label_zh(packet.v6_direction)}** | 预测分 **{_number(packet.v6_forecast_score)}** | 机会/质量/风险 **{_number(packet.opportunity_score)}/{_number(item.get('quality_score'))}/{_number(packet.risk_score)}** | 证据 **{_pct01(packet.evidence_coverage)}**"
         )
         features = _mapping(item.get("features"))
         if features:
@@ -736,16 +528,26 @@ def render_integrated_chinese_report(
                 f"{forecast.get('horizon') or '10d'} **{_direction_label(forecast.get('direction'))}**",
             ]
             if forecast.get("expected_return_pct") is not None:
-                forecast_bits.append(f"预期收益 **{float(forecast['expected_return_pct']):+.1f}%**")
+                forecast_bits.append(
+                    f"预期收益 **{float(forecast['expected_return_pct']):+.1f}%**"
+                )
             if forecast.get("up_probability") is not None:
-                forecast_bits.append(f"模型上行概率 **{float(forecast['up_probability']):.0f}%（未校准）**")
+                forecast_bits.append(
+                    f"模型上行概率 **{float(forecast['up_probability']):.0f}%（未校准）**"
+                )
             forecast_bits.append(f"当前执行 **{v4.get('operation') or '未知'}**")
             lines.append("- **预测层 vs 执行层**：" + " | ".join(forecast_bits))
             if forecast.get("rationale"):
                 lines.append(f"  - V4 预测依据：{forecast.get('rationale')}")
 
             drivers = _dedupe(
-                [v4.get("strongest_bullish"), v4.get("earnings_outlook"), v4.get("latest_news"), *v4.get("catalysts", []), *item.get("catalysts", [])],
+                [
+                    v4.get("strongest_bullish"),
+                    v4.get("earnings_outlook"),
+                    v4.get("latest_news"),
+                    *v4.get("catalysts", []),
+                    *item.get("catalysts", []),
+                ],
                 limit=5,
             )
             if drivers:
@@ -753,7 +555,12 @@ def render_integrated_chinese_report(
                 lines.extend(f"  - {value}" for value in drivers)
 
             risks = _dedupe(
-                [v4.get("strongest_bearish"), *v4.get("risks", []), *item.get("risks", []), v4.get("risk_warning")],
+                [
+                    v4.get("strongest_bearish"),
+                    *v4.get("risks", []),
+                    *item.get("risks", []),
+                    v4.get("risk_warning"),
+                ],
                 limit=5,
             )
             if risks:
@@ -767,7 +574,9 @@ def render_integrated_chinese_report(
             if v4.get("fundamental_analysis"):
                 lines.append(f"- **基本面**：{v4.get('fundamental_analysis')}")
             if v4.get("sentiment_summary") or v4.get("news_summary"):
-                lines.append(f"- **舆情/新闻**：{v4.get('sentiment_summary') or v4.get('news_summary')}")
+                lines.append(
+                    f"- **舆情/新闻**：{v4.get('sentiment_summary') or v4.get('news_summary')}"
+                )
 
         plan_lines = _format_plan(item, v4)
         if plan_lines:
@@ -782,19 +591,33 @@ def render_integrated_chinese_report(
             if v4.get("next_check_time"):
                 lines.append(f"  - 下次检查：**{v4.get('next_check_time')}**")
 
-        limitations = _dedupe([*item.get("limitations", []), *v4.get("data_limitations", [])] if v4 else item.get("limitations", []), limit=5)
+        limitations = _dedupe(
+            [*item.get("limitations", []), *v4.get("data_limitations", [])]
+            if v4
+            else item.get("limitations", []),
+            limit=5,
+        )
         if limitations:
             lines.append("- **数据限制**：" + "；".join(limitations))
         lines.append("")
 
     lines.extend(["## 4. 大模型与数据健康度", ""])
-    health = Counter(_text(item.get("llm_health")) or "unknown" for item in board)
+    health = Counter(
+        _text(item.get("llm_health")) or "unknown" for item in board
+    )
     if health:
-        lines.append("- V4/上游 LLM 状态：" + "，".join(f"{_LLM_LABEL.get(key, key)} {value}" for key, value in health.items()))
+        lines.append(
+            "- V4/上游 LLM 状态："
+            + "，".join(
+                f"{_LLM_LABEL.get(key, key)} {value}" for key, value in health.items()
+            )
+        )
     else:
         lines.append("- 暂无可用 LLM 健康度记录。")
     lines.append(f"- V4 结构化投研记录参与融合：**{len(v4_views)}** 个标的")
-    lines.append("- V4 定性内容不会直接改写 V6 数值评分；执行风控可以限制行动，但不会删除相反方向的有效证据。")
+    lines.append(
+        "- FinalDecisionPacket 是最终动作、买入价值、融合状态和执行授权的唯一事实源；报告层只展示证据与上下文。"
+    )
     lines.append("")
 
     lines.extend(_render_public_context(_mapping(payload.get("public_context"))))
@@ -814,14 +637,15 @@ def render_integrated_chinese_report(
             "",
             "## 方法说明",
             "",
-            "- V4 负责新闻、事件、基本面、技术解释、预测叙事和市场阶段护栏。",
+            "- V4 负责新闻、事件、基本面、技术解释、预测叙事和市场阶段上下文。",
             "- V6 负责确定性方向、机会/质量/风险、证据覆盖、排序和数值风控。",
-            "- “是否值得买”同时展示支持买入与支持等待/不买的结构化证据；最终动作只决定执行，不删除另一侧证据。",
-            "- 最终报告逐标的比较两层方向与执行状态：一致则保留，分歧则显式展示；执行层可以降级，但分析层不得把反方证据静默删掉。",
+            "- FinalDecisionPacket 是 V4+V6 最终融合的唯一业务合同；unified_report 不再维护 `_final_action`、`_agreement` 或 `_decision_balance_lines` 等平行业务规则。",
+            "- “是否值得买”与“当前是否允许执行”是独立字段：条件式可买可以保留买入价值，但不会提前获得执行授权。",
+            "- 看多与看空证据同时保留；风险闸门可以限制执行，但不能删除另一侧有效证据。",
             "- V4 的 up_probability 属于模型预测字段，目前未做真实概率校准，因此仅作参考，不当作真实胜率。",
             "- 缺失证据保持缺失；SEC/FRED 在通过样本外验证前仅作背景证据。",
             "",
-            f"*生成器：V6 融合报告层 · {payload.get('version', 'v6')} · {payload.get('generated_at', '-')}*",
+            f"*生成器：V6 typed 融合报告层 · {payload.get('version', 'v6')} · {payload.get('generated_at', '-')}*",
         ]
     )
     return "\n".join(lines).rstrip() + "\n"
@@ -838,12 +662,15 @@ def build_unified_chinese_report(
     """Build the single final Chinese report.
 
     Normal production uses structured V4 analysis_history records + the V6 JSON
-    payload and therefore performs semantic reconciliation rather than text
-    concatenation. Markdown arguments remain only for backward-compatible
-    fallback; the V4 Markdown is never appended wholesale.
+    payload and typed FinalDecisionPacket. Markdown arguments remain only for a
+    backward-compatible fallback; V4 Markdown is never appended wholesale.
     """
     if v6_payload is not None:
-        return render_integrated_chinese_report(v6_payload, v4_records=v4_records, report_date=report_date)
+        return render_integrated_chinese_report(
+            v6_payload,
+            v4_records=v4_records,
+            report_date=report_date,
+        )
 
     fallback = translate_v6_markdown_to_chinese(v6_markdown).rstrip()
     if v4_markdown:
