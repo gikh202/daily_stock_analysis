@@ -37,6 +37,8 @@ def evaluate_stage13_production_gate(run_payload: Mapping[str, Any]) -> Dict[str
     retirement = _mapping(run_payload.get("physical_retirement"))
     post = _mapping(retirement.get("post_production"))
     status = str(retirement.get("status") or "").strip()
+    coverage = _mapping(retirement.get("normalized_coverage"))
+    coverage_migration = _mapping(retirement.get("coverage_migration"))
 
     if entrypoint != EXPECTED_STAGE13_ENTRYPOINT:
         reasons.append(
@@ -67,6 +69,8 @@ def evaluate_stage13_production_gate(run_payload: Mapping[str, Any]) -> Dict[str
         )
 
     if status == "retired":
+        if coverage.get("coverage_ready") is not True:
+            reasons.append("physical retirement did not prove exact normalized coverage")
         if retirement.get("archive_verified") is not True:
             reasons.append("physical retirement did not preserve a verified archive")
         if retirement.get("restore_verified") is not True:
@@ -78,8 +82,18 @@ def evaluate_stage13_production_gate(run_payload: Mapping[str, Any]) -> Dict[str
         dropped = retirement.get("dropped_tables") or []
         if not dropped:
             reasons.append("retired status recorded no dropped legacy tables")
+        if coverage_migration.get("applied") is True:
+            if coverage_migration.get("legacy_source_unchanged") is not True:
+                reasons.append("coverage migration did not prove legacy source immutability")
+            migrated_after = _mapping(coverage_migration.get("after"))
+            if migrated_after.get("coverage_ready") is not True:
+                reasons.append("coverage migration did not finish with exact normalized coverage")
 
     policy = _mapping(retirement.get("policy"))
+    if policy.get("normalized_coverage_required") is not True:
+        reasons.append("retirement policy does not require normalized coverage")
+    if policy.get("coverage_migration_requires_explicit_flag") is not True:
+        reasons.append("retirement policy permits implicit coverage migration")
     if policy.get("archive_before_drop") is not True:
         reasons.append("retirement policy does not require archive before DROP")
     if policy.get("verified_restore_before_drop") is not True:
@@ -101,6 +115,8 @@ def evaluate_stage13_production_gate(run_payload: Mapping[str, Any]) -> Dict[str
         "stage13_entrypoint": entrypoint,
         "physical_retirement_status": status,
         "legacy_tables_absent": post.get("legacy_tables_absent") is True,
+        "normalized_coverage_ready": coverage.get("coverage_ready") is True,
+        "coverage_migration_applied": coverage_migration.get("applied") is True,
         "archive_verified": retirement.get("archive_verified"),
         "restore_verified": retirement.get("restore_verified"),
         "gate_v6_passed": retirement.get("gate_v6_passed"),
