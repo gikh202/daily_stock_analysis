@@ -1,0 +1,169 @@
+name: V6 Legacy Physical Retirement Rehearsal
+
+on:
+  pull_request:
+    paths:
+      - 'src/v6_daily/legacy_physical_retirement.py'
+      - 'src/v6_daily/production_gate_v7.py'
+      - 'scripts/retire_v6_legacy.py'
+      - 'tests/test_v6_stage13_physical_retirement.py'
+      - '.github/workflows/03-v6-daily.yml'
+      - '.github/workflows/06-v6-legacy-physical-retirement.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  physical-retirement-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade pytest
+
+      - name: Run Stage 13 retirement tests
+        env:
+          V6_FREE_SOURCE_ENRICHMENT: 'false'
+        run: |
+          python -m py_compile \
+            src/v6_daily/legacy_physical_retirement.py \
+            src/v6_daily/production_gate_v7.py \
+            scripts/retire_v6_legacy.py
+          python -m pytest -q tests/test_v6_stage13_physical_retirement.py
+
+      - name: Restore latest V6 production history when available
+        uses: actions/cache/restore@v5
+        with:
+          path: v6_data/
+          key: v6-stage13-rehearsal-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            v6-daily-data-${{ runner.os }}-
+
+      - name: Prepare isolated retirement source
+        id: source
+        shell: bash
+        run: |
+          mkdir -p rehearsal
+          python - <<'PY'
+          import os
+          import shutil
+          import sqlite3
+          from pathlib import Path
+
+          from src.v6_daily.legacy_physical_retirement import normalized_legacy_coverage
+          from src.v6_daily.legacy_archive import migrate_legacy_to_normalized
+          from tests.test_v6_stage11_schema_archival import ENGINE, _create_legacy_history
+
+          cached = Path('v6_data/v6_daily.db')
+          target = Path('rehearsal/v6_daily.db')
+          origin = None
+          if cached.is_file():
+              conn = sqlite3.connect(f'file:{cached}?mode=ro', uri=True, timeout=10)
+              try:
+                  tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                  quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+                  signals = int(conn.execute('SELECT COUNT(*) FROM v6_signals').fetchone()[0]) if 'v6_signals' in tables else 0
+                  normalized = int(conn.execute('SELECT COUNT(*) FROM v6_forecast_runs').fetchone()[0]) if 'v6_forecast_runs' in tables else 0
+              finally:
+                  conn.close()
+              if quick == 'ok' and 'v6_signals' in tables and normalized > 0:
+                  shutil.copy2(cached, target)
+                  coverage = normalized_legacy_coverage(target)
+                  if coverage.get('coverage_ready') is True:
+                      origin = f'cached_production_history(legacy_signals={signals},normalized_signals={normalized})'
+                  else:
+                      target.unlink(missing_ok=True)
+
+          if origin is None:
+              _create_legacy_history(target)
+              migrated = migrate_legacy_to_normalized(
+                  target,
+                  engine_version=ENGINE,
+                  apply=True,
+                  report_date='2026-08-11',
+              )
+              if migrated.get('applied') is not True:
+                  raise SystemExit(f'fixture migration failed: {migrated}')
+              origin = 'deterministic_migrated_fixture'
+
+          with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as handle:
+              handle.write(f'source_origin={origin}\n')
+          print(f'Stage 13 isolated source: {origin}')
+          PY
+
+      - name: Apply verified physical retirement to isolated copy
+        shell: bash
+        run: |
+          python scripts/retire_v6_legacy.py \
+            --v6-db rehearsal/v6_daily.db \
+            --archive-dir rehearsal/archive \
+            --receipt rehearsal/retirement_receipt.json \
+            --repo-root . \
+            --source-commit '${{ github.event.pull_request.head.sha || github.sha }}' \
+            --apply
+
+      - name: Validate Stage 13 retirement evidence
+        env:
+          SOURCE_ORIGIN: ${{ steps.source.outputs.source_origin }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sqlite3
+          from pathlib import Path
+
+          receipt = json.loads(Path('rehearsal/retirement_receipt.json').read_text(encoding='utf-8'))
+          conn = sqlite3.connect('rehearsal/v6_daily.db')
+          try:
+              tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              fk = conn.execute('PRAGMA foreign_key_check').fetchall()
+              normalized = int(conn.execute('SELECT COUNT(*) FROM v6_forecast_runs').fetchone()[0])
+          finally:
+              conn.close()
+
+          if receipt.get('status') != 'retired':
+              raise SystemExit(f'expected retired receipt, got {receipt}')
+          if receipt.get('archive_verified') is not True or receipt.get('restore_verified') is not True:
+              raise SystemExit('verified archive/restore evidence missing')
+          if receipt.get('gate_v6_passed') is not True:
+              raise SystemExit('Gate v6 did not pass before DROP')
+          if (receipt.get('normalized_coverage') or {}).get('coverage_ready') is not True:
+              raise SystemExit('normalized coverage was not proven before DROP')
+          if {'v6_signals', 'v6_outcomes'} & tables:
+              raise SystemExit(f'legacy tables still present: {sorted(tables)}')
+          if quick != 'ok' or fk:
+              raise SystemExit(f'post-retirement integrity failed quick={quick!r} fk={len(fk)}')
+          if normalized <= 0:
+              raise SystemExit('normalized facts disappeared during retirement')
+          print(
+              'V6 Stage 13 physical retirement rehearsal: PASS '
+              f"source={os.getenv('SOURCE_ORIGIN')} normalized_signals={normalized}"
+          )
+          PY
+
+      - name: Upload Stage 13 retirement evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: v6-legacy-physical-retirement-${{ github.run_id }}
+          path: rehearsal/
+          if-no-files-found: warn
+          retention-days: 30
