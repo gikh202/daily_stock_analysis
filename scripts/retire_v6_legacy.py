@@ -17,7 +17,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Retire V6 legacy fact tables after exact normalized coverage, verified archive, "
-            "and isolated restore. Dry-run is the default; --apply is required for DROP."
+            "and isolated restore. Dry-run is the default; --apply is required for migration/DROP."
         )
     )
     parser.add_argument("--v6-db", required=True)
@@ -31,14 +31,18 @@ def _parser() -> argparse.ArgumentParser:
         "--migrate-missing-coverage",
         action="store_true",
         help=(
-            "On explicit --apply, migrate uncovered legacy identities into normalized tables "
-            "before archive/restore/DROP. Legacy source facts must remain unchanged."
+            "Explicitly request the one-time legacy-to-normalized coverage bridge. "
+            "For the retirement CLI, --apply also authorizes this bridge so old production "
+            "caches can upgrade atomically through the guarded retirement sequence."
         ),
     )
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Apply the transactional DROP after all retirement gates pass.",
+        help=(
+            "Apply the guarded retirement. If legacy identities are not fully normalized, "
+            "this explicitly authorizes a normalized-only coverage bridge before archive/restore/DROP."
+        ),
     )
     return parser
 
@@ -53,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         source_commit=args.source_commit,
         engine_version=args.engine_version,
         report_date=args.report_date,
-        migrate_missing_coverage=bool(args.migrate_missing_coverage),
+        migrate_missing_coverage=bool(args.migrate_missing_coverage or args.apply),
         apply=bool(args.apply),
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
