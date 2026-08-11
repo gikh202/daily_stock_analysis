@@ -39,6 +39,12 @@ EMAIL_SENDER_NAME
 
 两个 workflow 都复用 `00-daily-analysis.yml` 的通知环境，因此不需要为开盘确认再配置一套邮箱凭据。
 
+## 决策与邮件一致性
+
+最终邮件、分析历史与自动 DecisionSignal 必须使用同一条最终决策链。若 AnalysisContextPack 明确判定核心证据质量为 `poor`，原本可执行的 `buy/add` 会在生成最终输出前降级为 `watch`，并记录数据质量护栏原因。这样不会出现邮件仍提示买入、后台持久化信号却已经降级为观望的分裂状态。
+
+历史数据不足时，技术指标会明确标记为 unavailable；MA60 只有在真实历史长度足够时才展示，不再使用 MA20 冒充长期均线。技术评分同时记录可用指标覆盖率，覆盖率不足时不生成积极买入结论。
+
 ## 休市与 DST
 
 - `01-us-open-confirmation.yml` 使用 `America/New_York` offset gate 处理 EDT / EST，避免夏令时切换后固定 UTC cron 偏移一小时。
