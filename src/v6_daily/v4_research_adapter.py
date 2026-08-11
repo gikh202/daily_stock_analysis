@@ -5,6 +5,15 @@ import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 
+_NEUTRAL_RECENT_EVIDENCE_MARKERS = (
+    "暂无已验证的近期证据",
+    "暂无已验证的近期新闻证据",
+    "暂无已验证近期证据",
+    "暂无近期已验证证据",
+)
+_NON_SYMBOL_RECORD_CODES = {"MARKET"}
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -34,6 +43,24 @@ def _texts(value: Any, *, limit: int = 6) -> list[str]:
         if len(result) >= limit:
             break
     return result
+
+
+def _is_neutral_recent_evidence(value: Any) -> bool:
+    text = _text(value).rstrip("。.!！ ")
+    return any(text == marker for marker in _NEUTRAL_RECENT_EVIDENCE_MARKERS)
+
+
+def _verified_recent_text(value: Any) -> str:
+    text = _text(value)
+    return "" if _is_neutral_recent_evidence(text) else text
+
+
+def _verified_recent_texts(value: Any, *, limit: int = 6) -> list[str]:
+    return [
+        text
+        for text in _texts(value, limit=limit)
+        if not _is_neutral_recent_evidence(text)
+    ]
 
 
 def _parse_object(value: Any) -> Dict[str, Any]:
@@ -82,7 +109,7 @@ def normalize_v4_forecast(raw: Mapping[str, Any]) -> Dict[str, Any]:
 def normalize_v4_record(record: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     code = _text(record.get("code")).upper()
     raw = _parse_object(record.get("raw_result"))
-    if not code or not raw:
+    if not code or code in _NON_SYMBOL_RECORD_CODES or not raw:
         return None
     try:
         history_id = int(record.get("id") or 0)
@@ -118,9 +145,9 @@ def normalize_v4_record(record: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         "risk_warning": _text(raw.get("risk_warning")),
         "earnings_outlook": _text(intel.get("earnings_outlook")),
         "sentiment_summary": _text(intel.get("sentiment_summary")),
-        "latest_news": _text(intel.get("latest_news")),
-        "catalysts": _texts(intel.get("positive_catalysts")),
-        "risks": _texts(intel.get("risk_alerts")),
+        "latest_news": _verified_recent_text(intel.get("latest_news")),
+        "catalysts": _verified_recent_texts(intel.get("positive_catalysts")),
+        "risks": _verified_recent_texts(intel.get("risk_alerts")),
         "sniper_points": _mapping(battle.get("sniper_points")),
         "position_strategy": _mapping(battle.get("position_strategy")),
         "watch_conditions": _texts(phase.get("watch_conditions")),
