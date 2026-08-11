@@ -64,6 +64,73 @@ def _database_state(path: str | Path) -> Dict[str, Any]:
     }
 
 
+def normalized_legacy_coverage(path: str | Path) -> Dict[str, Any]:
+    """Prove that every legacy identity is represented in normalized facts."""
+    target = Path(path)
+    if not target.is_file():
+        return {
+            "status": "not_required",
+            "coverage_ready": True,
+            "legacy_signal_ids": 0,
+            "legacy_outcome_ids": 0,
+            "normalized_signal_ids": 0,
+            "normalized_outcome_ids": 0,
+            "missing_signal_ids": [],
+            "missing_outcome_ids": [],
+        }
+    with _connect(target) as conn:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        legacy_signal_ids = (
+            {int(row[0]) for row in conn.execute("SELECT id FROM v6_signals").fetchall()}
+            if "v6_signals" in tables
+            else set()
+        )
+        legacy_outcome_ids = (
+            {int(row[0]) for row in conn.execute("SELECT id FROM v6_outcomes").fetchall()}
+            if "v6_outcomes" in tables
+            else set()
+        )
+        normalized_signal_ids = (
+            {
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT source_signal_id FROM v6_forecast_runs WHERE source_signal_id IS NOT NULL"
+                ).fetchall()
+            }
+            if "v6_forecast_runs" in tables
+            else set()
+        )
+        normalized_outcome_ids = (
+            {
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT source_outcome_id FROM v6_forecast_outcomes WHERE source_outcome_id IS NOT NULL"
+                ).fetchall()
+            }
+            if "v6_forecast_outcomes" in tables
+            else set()
+        )
+
+    missing_signal_ids = sorted(legacy_signal_ids - normalized_signal_ids)
+    missing_outcome_ids = sorted(legacy_outcome_ids - normalized_outcome_ids)
+    ready = not missing_signal_ids and not missing_outcome_ids
+    return {
+        "status": "covered" if ready else "incomplete",
+        "coverage_ready": ready,
+        "legacy_signal_ids": len(legacy_signal_ids),
+        "legacy_outcome_ids": len(legacy_outcome_ids),
+        "normalized_signal_ids": len(normalized_signal_ids),
+        "normalized_outcome_ids": len(normalized_outcome_ids),
+        "missing_signal_ids": missing_signal_ids,
+        "missing_outcome_ids": missing_outcome_ids,
+    }
+
+
 def _write_receipt(receipt_path: str | Path | None, payload: Mapping[str, Any]) -> None:
     if receipt_path is None:
         return
@@ -92,6 +159,7 @@ def _base_receipt(
         "drop_order": list(LEGACY_DROP_ORDER),
         "before": dict(before),
         "policy": {
+            "normalized_coverage_required": True,
             "archive_before_drop": True,
             "verified_restore_before_drop": True,
             "transactional_drop": True,
@@ -109,12 +177,19 @@ def build_physical_retirement_evidence(
     source_commit: str | None = None,
     engine_version: str | None = None,
 ) -> Dict[str, Any]:
-    """Create the fail-closed archive/restore evidence required before DROP."""
+    """Create the fail-closed coverage/archive/restore evidence required before DROP."""
     target = Path(v6_db_path)
     if not target.is_file():
         raise FileNotFoundError(str(target))
 
     schema_registry = ensure_normalized_schema(target)
+    coverage = normalized_legacy_coverage(target)
+    if coverage.get("coverage_ready") is not True:
+        raise RuntimeError(
+            "Stage 13 normalized coverage incomplete; refusing legacy DROP: "
+            + repr(coverage)
+        )
+
     import_guard = assert_production_import_graph_clean(
         repo_root,
         entry_module=PRODUCTION_ENTRY_MODULE,
@@ -154,6 +229,7 @@ def build_physical_retirement_evidence(
 
     return {
         "status": "verified",
+        "normalized_coverage": coverage,
         "archive": archive,
         "restore": restore,
         "gate_v6": gate_v6,
@@ -175,7 +251,7 @@ def retire_legacy_tables(
     engine_version: str | None = None,
     apply: bool = False,
 ) -> Dict[str, Any]:
-    """Retire legacy fact tables only after a verified archive and restore.
+    """Retire legacy fact tables only after verified normalized coverage and restore.
 
     Dry-run is the API default. ``apply=True`` is intentionally required to
     perform the transactional DROP. The operation is idempotent: databases that
@@ -198,6 +274,7 @@ def retire_legacy_tables(
                 "action": "no_database_before_run",
                 "legacy_tables_absent": True,
                 "archive_required": False,
+                "normalized_coverage": normalized_legacy_coverage(target),
                 "dropped_tables": [],
                 "after": before,
             }
@@ -207,7 +284,9 @@ def retire_legacy_tables(
 
     schema_registry = ensure_normalized_schema(target)
     before = _database_state(target)
+    coverage = normalized_legacy_coverage(target)
     receipt["before"] = before
+    receipt["normalized_coverage"] = coverage
     receipt["schema_registry_before"] = schema_registry
 
     if before["legacy_tables_absent"]:
@@ -224,6 +303,12 @@ def retire_legacy_tables(
         )
         _write_receipt(receipt_path, receipt)
         return receipt
+
+    if coverage.get("coverage_ready") is not True:
+        raise RuntimeError(
+            "Stage 13 normalized coverage incomplete; refusing legacy DROP: "
+            + repr(coverage)
+        )
 
     evidence = build_physical_retirement_evidence(
         target,
@@ -256,6 +341,8 @@ def retire_legacy_tables(
         raise RuntimeError(f"Stage 13 retirement blocked by Gate v6: {gate_v6!r}")
     if evidence.get("source_unchanged") is not True:
         raise RuntimeError("Stage 13 retirement blocked: archive evidence changed source facts")
+    if (evidence.get("normalized_coverage") or {}).get("coverage_ready") is not True:
+        raise RuntimeError("Stage 13 retirement blocked: normalized coverage evidence is incomplete")
 
     with _connect(target) as conn:
         conn.execute("BEGIN IMMEDIATE")
