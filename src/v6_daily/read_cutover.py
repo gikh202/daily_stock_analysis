@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, Mapping, Sequence
+from typing import Any, Dict, Mapping
 
 from .normalized_read_store import NORMALIZED_READ_SCHEMA_VERSION, NormalizedV6ReadStore
 from .report import build_daily_payload
@@ -12,13 +12,13 @@ NORMALIZED_PRIMARY_SOURCE = "normalized_v6_tables"
 LEGACY_FALLBACK_SOURCE = "legacy_v6_signals_outcomes"
 
 
-def _canonical_trade_plan(value: Any) -> Dict[str, Any]:
+def _canonical_trade_plan(value: Any, *, decision: Any = None) -> Dict[str, Any]:
     plan = dict(value) if isinstance(value, Mapping) else {}
     invalidation = plan.get("invalidation")
     if invalidation is None:
         invalidation = plan.get("invalidations")
     return {
-        "action": plan.get("action"),
+        "action": plan.get("action") or decision,
         "entry_zone": plan.get("entry_zone"),
         "stop_loss": plan.get("stop_loss"),
         "targets": list(plan.get("targets") or []),
@@ -30,6 +30,7 @@ def _canonical_trade_plan(value: Any) -> Dict[str, Any]:
 
 
 def _canonical_board_item(value: Mapping[str, Any]) -> Dict[str, Any]:
+    decision = value.get("decision")
     return {
         "id": value.get("id"),
         "analysis_history_id": value.get("analysis_history_id"),
@@ -40,7 +41,7 @@ def _canonical_board_item(value: Mapping[str, Any]) -> Dict[str, Any]:
         "engine_version": value.get("engine_version"),
         "direction": value.get("direction"),
         "forecast_score": value.get("forecast_score"),
-        "decision": value.get("decision"),
+        "decision": decision,
         "quality_score": value.get("quality_score"),
         "opportunity_score": value.get("opportunity_score"),
         "risk_score": value.get("risk_score"),
@@ -52,7 +53,7 @@ def _canonical_board_item(value: Mapping[str, Any]) -> Dict[str, Any]:
         "instrument_type": value.get("instrument_type"),
         "effective_trade_date": value.get("effective_trade_date"),
         "features": value.get("features") or {},
-        "trade_plan": _canonical_trade_plan(value.get("trade_plan")),
+        "trade_plan": _canonical_trade_plan(value.get("trade_plan"), decision=decision),
         "catalysts": list(value.get("catalysts") or []),
         "risks": list(value.get("risks") or []),
         "limitations": list(value.get("limitations") or []),
@@ -191,8 +192,6 @@ def cutover_daily_payload(
         selected_source = LEGACY_FALLBACK_SOURCE
         mode = "manual_legacy_fallback"
 
-    # Preserve the original run timestamp so cutover changes only the read source,
-    # not report identity or notification dedup semantics.
     selected["generated_at"] = legacy_payload.get("generated_at")
     selected["read_cutover"] = {
         **parity,
