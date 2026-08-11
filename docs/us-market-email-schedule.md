@@ -43,6 +43,8 @@ EMAIL_SENDER_NAME
 
 最终邮件、分析历史与自动 DecisionSignal 必须使用同一条最终决策链。若 AnalysisContextPack 明确判定核心证据质量为 `poor`，原本可执行的 `buy/add` 会在生成最终输出前降级为 `watch`，并记录数据质量护栏原因。这样不会出现邮件仍提示买入、后台持久化信号却已经降级为观望的分裂状态。
 
+市场阶段约束、DailyMarketContext 大盘环境约束和数据质量约束是三个独立的决策阶段。系统会保留**真正导致动作变化的阶段来源**，例如 `daily_market_context` 或 `data_quality`，而不是把所有降级笼统记成 `market_phase`。这样邮件中的风险解释、分析历史和 DecisionSignal 审计记录能够对应同一条因果链。
+
 历史数据不足时，技术指标会明确标记为 unavailable；MA60 只有在真实历史长度足够时才展示，不再使用 MA20 冒充长期均线。技术评分同时记录可用指标覆盖率，覆盖率不足时不生成积极买入结论。
 
 ## 休市与 DST
