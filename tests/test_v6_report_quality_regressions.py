@@ -81,8 +81,8 @@ def test_structured_backend_repairs_json_locally_before_extra_model_call() -> No
     class ValidationFailure(RuntimeError):
         pass
 
-    failure = ValidationFailure("invalid_json: malformed object")
-    failure.last_response_text = '{"ok": true'
+    failure = ValidationFailure("invalid_json: trailing comma")
+    failure.last_response_text = '{"ok": true,}'
     failure.last_model = "deepseek/deepseek-v4-flash"
     failure.last_usage = {"provider": "deepseek"}
 
