@@ -324,6 +324,113 @@ def _fusion_reason(v6: Mapping[str, Any], v4: Mapping[str, Any], agreement: str,
     return f"**{final_action}**。{reason}"
 
 
+def _has_active_trade_plan(v6: Mapping[str, Any]) -> bool:
+    plan = _mapping(v6.get("trade_plan"))
+    max_position = _finite(plan.get("max_position_pct"))
+    return bool(plan.get("entry_zone")) and max_position is not None and max_position > 0
+
+
+def _decision_balance_lines(
+    v6: Mapping[str, Any],
+    v4: Mapping[str, Any],
+    agreement: str,
+    final_action: str,
+) -> list[str]:
+    """Explain both sides of the buy decision without deleting contrary evidence.
+
+    The analytical layer is deliberately symmetric: bullish evidence remains visible
+    even when execution says WAIT/AVOID, and risk evidence remains visible when the
+    setup is bullish. The final action still controls execution and position limits.
+    """
+    forecast = _mapping(v4.get("forecast"))
+    v4_direction = _normalize_direction(forecast.get("direction"))
+    v6_direction = _normalize_direction(v6.get("direction"))
+    horizon = _text(forecast.get("horizon")) or "10d"
+    expected = _finite(forecast.get("expected_return_pct"))
+    active_plan = _has_active_trade_plan(v6)
+
+    bullish_candidates: list[Any] = [
+        v4.get("strongest_bullish"),
+        v4.get("earnings_outlook"),
+        *v4.get("catalysts", []),
+        *v6.get("catalysts", []),
+    ]
+    bearish_candidates: list[Any] = [
+        v4.get("strongest_bearish"),
+        *v4.get("risks", []),
+        *v6.get("risks", []),
+        v4.get("risk_warning"),
+    ]
+    rationale = _text(forecast.get("rationale"))
+    if rationale:
+        if v4_direction == "bullish":
+            bullish_candidates.append(rationale)
+        elif v4_direction == "bearish":
+            bearish_candidates.append(rationale)
+
+    bullish = _dedupe(bullish_candidates, limit=4)
+    bearish = _dedupe(bearish_candidates, limit=4)
+    watch = _dedupe(v4.get("watch_conditions", []), limit=3)
+
+    decision = _text(v6.get("decision")).upper()
+    if decision == "AVOID" or final_action == "回避":
+        verdict = "当前不买/回避"
+        execution_reason = "即使存在局部看多证据，风险闸门当前占优；除非风险条件明显改善，否则不建立新仓。"
+    elif final_action.startswith("买入准备"):
+        verdict = "可以买，但只按计划买"
+        execution_reason = "方向与执行层已达到买入准备，但仍必须服从入场、止损和最大仓位，不把看多等同于无条件追价。"
+    elif final_action.startswith("观察"):
+        if active_plan and (v4_direction == "bullish" or v6_direction == "bullish"):
+            verdict = "条件式可买"
+            execution_reason = "当前动作仍是观察，不代表否定买入；只有进入确定性入场区间并满足确认条件时才执行。"
+        else:
+            verdict = "继续观察"
+            execution_reason = "存在潜在机会，但执行层尚未达到可操作条件；保留看多逻辑，同时等待更明确的价格或量价确认。"
+    elif final_action == "等待" or decision == "WAIT":
+        verdict = "暂不买，等待确认"
+        execution_reason = "看多逻辑仍保留，但量化与投研尚未形成足够共振或交易计划尚未触发，当前不执行。"
+    else:
+        verdict = "等待更多证据"
+        execution_reason = "当前证据不足以支持无条件买入或回避，继续按确认条件更新判断。"
+
+    basis = [f"投研{horizon}预测{_direction_label(v4_direction)}"]
+    if expected is not None:
+        basis.append(f"预期收益{expected:+.1f}%")
+    basis.append(f"量化方向{_direction_label(v6_direction)}")
+    basis.append(
+        f"机会/风险{_number(v6.get('opportunity_score'))}/{_number(v6.get('risk_score'))}"
+    )
+    basis.append(agreement)
+
+    lines = [f"- **是否值得买**：**{verdict}**。{'，'.join(basis)}。{execution_reason}"]
+    lines.append(
+        "  - **支持买入的证据**："
+        + ("；".join(bullish) if bullish else "暂无足够的结构化看多证据，不能为了凑结论补造理由。")
+    )
+    lines.append(
+        "  - **支持等待/不买的证据**："
+        + ("；".join(bearish) if bearish else "暂无足够的结构化看空证据；当前保守动作主要来自执行层未触发或方向未共振。")
+    )
+
+    boundaries: list[str] = []
+    if active_plan:
+        plan = _mapping(v6.get("trade_plan"))
+        boundaries.append(f"确定性入场区间 {plan.get('entry_zone')}")
+        max_position = _finite(plan.get("max_position_pct"))
+        if max_position is not None:
+            boundaries.append(f"最大仓位上限 {100.0 * max_position:.1f}%")
+        if plan.get("stop_loss") is not None:
+            boundaries.append(f"失效/止损 {plan.get('stop_loss')}")
+    boundaries.extend(watch)
+    if not boundaries and v4.get("immediate_action"):
+        boundaries.append(_text(v4.get("immediate_action")))
+    lines.append(
+        "  - **关键分界**："
+        + ("；".join(boundaries[:6]) if boundaries else "暂无足够的结构化确认条件，继续观察而不主动下单。")
+    )
+    return lines
+
+
 def _feature_line(features: Mapping[str, Any]) -> str:
     labels = (
         ("trend", "趋势"),
@@ -510,8 +617,8 @@ def render_integrated_chinese_report(
 
     V4 contributes qualitative research, forecast narrative, news, fundamentals,
     technical interpretation and phase-aware execution context. V6 owns the
-    deterministic ranking/risk layer. Conflicts are surfaced and can only make
-    the final action more conservative; V4 prose never upgrades V6 risk gates.
+    deterministic ranking/risk layer. Both bullish and bearish evidence remain
+    visible; risk gates control execution but do not erase the opposite thesis.
     """
     report_date = report_date or datetime.now().strftime("%Y-%m-%d")
     board = [dict(item) for item in (payload.get("board") or []) if isinstance(item, dict)]
@@ -521,7 +628,7 @@ def render_integrated_chinese_report(
     lines = [
         f"# AI 美股综合日报 · {report_date}",
         "",
-        "> 本报告不是 V4 与 V6 的原文拼接：V4 提供 AI 投研、新闻、基本面、技术面和执行护栏；V6 提供确定性方向、机会/质量/风险评分、证据覆盖与风控计划。最终结论按“风险优先、冲突降级、缺失不补分”规则融合。",
+        "> 本报告不是 V4 与 V6 的原文拼接：V4 提供 AI 投研、新闻、基本面、技术面和执行护栏；V6 提供确定性方向、机会/质量/风险评分、证据覆盖与风控计划。最终结论按“双边证据保留、执行风控优先、冲突显式展示、缺失不补分”规则融合；看多理由不会因为最终动作保守而删除，看空理由也不会因为趋势偏多而隐藏。",
         "",
         "## 1. 今日最终总览",
         "",
@@ -582,8 +689,9 @@ def render_integrated_chinese_report(
 
         if v4:
             lines.append(f"- **最终结论**：{_fusion_reason(item, v4, agreement, action)}")
+            lines.extend(_decision_balance_lines(item, v4, agreement, action))
             if v4.get("analysis_summary"):
-                lines.append(f"- **V4 投研摘要**：{v4.get('analysis_summary')}")
+                lines.append(f"- **V4 投研摘要（原始观点）**：{v4.get('analysis_summary')}")
         else:
             lines.append(f"- **最终结论**：仅获得 V6 结构化信号，当前按 V6 决策 **{action}**；V4 结构化投研记录缺失，不补造定性证据。")
 
@@ -658,7 +766,7 @@ def render_integrated_chinese_report(
     else:
         lines.append("- 暂无可用 LLM 健康度记录。")
     lines.append(f"- V4 结构化投研记录参与融合：**{len(v4_views)}** 个标的")
-    lines.append("- V4 定性内容不会直接改写 V6 数值评分；出现冲突时只允许维持或降低行动等级。")
+    lines.append("- V4 定性内容不会直接改写 V6 数值评分；执行风控可以限制行动，但不会删除相反方向的有效证据。")
     lines.append("")
 
     lines.extend(_render_public_context(_mapping(payload.get("public_context"))))
@@ -680,7 +788,8 @@ def render_integrated_chinese_report(
             "",
             "- V4 负责新闻、事件、基本面、技术解释、预测叙事和市场阶段护栏。",
             "- V6 负责确定性方向、机会/质量/风险、证据覆盖、排序和数值风控。",
-            "- 最终报告逐标的比较两层方向与执行状态：一致则保留，分歧则明确展示并降级，不进行原文拼接。",
+            "- “是否值得买”同时展示支持买入与支持等待/不买的结构化证据；最终动作只决定执行，不删除另一侧证据。",
+            "- 最终报告逐标的比较两层方向与执行状态：一致则保留，分歧则显式展示；执行层可以降级，但分析层不得把反方证据静默删掉。",
             "- V4 的 up_probability 属于模型预测字段，目前未做真实概率校准，因此仅作参考，不当作真实胜率。",
             "- 缺失证据保持缺失；SEC/FRED 在通过样本外验证前仅作背景证据。",
             "",
