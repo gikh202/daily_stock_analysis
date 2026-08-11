@@ -7,6 +7,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 
 
 DECISION_PACKET_SCHEMA_VERSION = "decision-packet-v1"
+PRE_FUSION_ASSESSMENT_SCOPE = "v6_deterministic_pre_fusion"
 
 
 class ExecutionStatus(str, Enum):
@@ -109,9 +110,13 @@ class DecisionAssessment:
     rationale: str
     bullish_evidence: Tuple[str, ...] = ()
     bearish_evidence: Tuple[str, ...] = ()
+    scope: str = PRE_FUSION_ASSESSMENT_SCOPE
+    is_final: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "scope": self.scope,
+            "is_final": self.is_final,
             "verdict": self.verdict.value,
             "worth_buying": self.worth_buying,
             "rationale": self.rationale,
@@ -229,23 +234,29 @@ def build_assessment(
     catalysts: Sequence[str] = (),
     risks: Sequence[str] = (),
 ) -> DecisionAssessment:
+    """Build the deterministic V6 pre-fusion view, never the final buy verdict.
+
+    V4 research disagreement, its bullish/bearish evidence and the integrated
+    report guards are intentionally unavailable here. Therefore WATCH remains
+    WATCH even when a valid execution plan exists; only the later V4+V6 fusion
+    layer may promote that state to a final conditional-buy assessment.
+    """
     normalized = str(decision or "").strip().upper()
     if normalized == "BUY_SETUP" and execution.actionable:
         verdict = AssessmentVerdict.BUY_BY_PLAN
         worth_buying: Optional[bool] = True
-        rationale = "deterministic decision and active execution plan both permit buying by plan"
+        rationale = "V6 deterministic setup owns an active plan; final V4+V6 fusion may still downgrade execution"
     elif normalized == "BUY_SETUP":
         verdict = AssessmentVerdict.WATCH
         worth_buying = None
         rationale = "buy setup was not promoted to execution because the structured trade plan is incomplete or disabled"
-    elif normalized == "WATCH" and execution.actionable:
-        verdict = AssessmentVerdict.CONDITIONAL_BUY
-        worth_buying = True
-        rationale = "setup remains conditional: active plan exists but confirmation is still required"
     elif normalized == "WATCH":
         verdict = AssessmentVerdict.WATCH
         worth_buying = None
-        rationale = "watch state has no active executable plan"
+        rationale = (
+            "V6 deterministic state is watch; an active plan only defines execution readiness, "
+            "not the final cross-layer buy verdict"
+        )
     elif normalized == "WAIT":
         verdict = AssessmentVerdict.WAIT
         worth_buying = False
