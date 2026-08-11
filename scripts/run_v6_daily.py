@@ -23,6 +23,14 @@ from src.v6_daily.accuracy_lab import (
 )
 from src.v6_daily.accuracy_report import build_accuracy_unified_report
 from src.v6_daily.engine import V6DailyEngine
+from src.v6_daily.final_decision_renderer import (
+    apply_final_decision_contract,
+    assert_final_decision_report_consistency,
+)
+from src.v6_daily.final_decision_service import (
+    build_final_decision_packets,
+    build_final_decision_payload,
+)
 from src.v6_daily.free_sources import fetch_free_context
 from src.v6_daily.report import write_daily_report
 from src.v6_daily.store import V6DailyStore, mature_outcomes
@@ -180,15 +188,21 @@ def _finalize_report(
         v4_records=analysis_records,
         report_date=report_date,
     )
+    final_packets = build_final_decision_packets(v6_payload, v4_records=analysis_records)
+    unified = apply_final_decision_contract(unified, final_packets)
+    assert_final_decision_report_consistency(unified, final_packets)
     latest_path.write_text(unified, encoding="utf-8")
     dated_path.write_text(unified, encoding="utf-8")
     return {
         "language": "zh",
         "fusion_mode": "structured_v4_v6",
+        "decision_source": "FinalDecisionPacket",
+        "decision_contract": "final-decision-packet-v1",
         "accuracy_layer": "v6.2",
         "v4_merged": structured_count > 0,
         "v4_structured_records": structured_count,
         "v4_report": str(v4_path) if v4_markdown and v4_path is not None else None,
+        "final_decision_packets": len(final_packets),
         "output": str(latest_path),
     }
 
@@ -359,6 +373,7 @@ def run(
     # Keep the existing report writer stable while exposing V6.2 research data
     # to the unified report and machine-readable daily payload.
     payload["accuracy_lab"] = accuracy_lab
+    payload["final_decisions"] = build_final_decision_payload(payload, v4_records=records)
     (Path(report_dir) / "v6_daily_latest.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -386,6 +401,7 @@ def run(
         "unified_report": unified_report,
         "run": run_stats,
         "scoreboard_status": (payload.get("scoreboard") or {}).get("status"),
+        "final_decisions": (payload.get("final_decisions") or {}).get("summary") or {},
         "accuracy_lab": {
             "version": accuracy_lab.get("version"),
             "status": accuracy_lab.get("status"),

@@ -1,0 +1,184 @@
+name: V6 Architecture Backtest
+
+on:
+  pull_request:
+    paths:
+      - 'src/v6_daily/**'
+      - 'src/alpha_engine/**'
+      - 'scripts/run_v6_accuracy_weekly.py'
+      - 'scripts/backfill_v6_accuracy_history.py'
+      - 'tests/test_v6_decision_packet.py'
+      - '.github/workflows/ci-v6-architecture-backtest.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v6-architecture-backtest-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  historical-equivalence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v5
+        with:
+          path: head
+
+      - name: Checkout PR base
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: head/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r head/requirements.txt
+
+      - name: Restore latest production source database
+        uses: actions/cache/restore@v5
+        with:
+          path: data/
+          key: v6-architecture-backtest-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-analysis-data-${{ runner.os }}-
+
+      - name: Validate source database
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = 'data/stock_analysis.db'
+          if not os.path.isfile(path):
+              raise SystemExit('stock_analysis.db missing; cannot perform historical architecture backtest')
+          conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+              bars = int(conn.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]) if 'stock_daily' in tables else 0
+          finally:
+              conn.close()
+          if quick != 'ok' or bars <= 0:
+              raise SystemExit(f'invalid production source database: quick={quick!r} stock_daily={bars}')
+          print(f'Historical source: PASS stock_daily={bars}')
+          PY
+
+      - name: Build one isolated 3-year research database
+        shell: bash
+        run: |
+          cd head
+          python scripts/backfill_v6_accuracy_history.py \
+            --source-db ../data/stock_analysis.db \
+            --research-db ../v6_research/stock_analysis_research.db \
+            --codes 'MSFT,GOOGL,QQQM,VOO' \
+            --history-years 3 \
+            --minimum-bars 81 \
+            --summary ../backtest_artifacts/history_backfill.json
+
+      - name: Run PR-head no-lookahead replay
+        shell: bash
+        run: |
+          cd head
+          python scripts/run_v6_accuracy_weekly.py \
+            --stock-db ../v6_research/stock_analysis_research.db \
+            --codes 'MSFT,GOOGL,QQQM,VOO' \
+            --min-samples 50 \
+            --promotion-min-samples 100 \
+            --output-dir ../backtest_artifacts/head
+
+      - name: Run base no-lookahead replay on identical data
+        shell: bash
+        run: |
+          cd base
+          python scripts/run_v6_accuracy_weekly.py \
+            --stock-db ../v6_research/stock_analysis_research.db \
+            --codes 'MSFT,GOOGL,QQQM,VOO' \
+            --min-samples 50 \
+            --promotion-min-samples 100 \
+            --output-dir ../backtest_artifacts/base
+
+      - name: Compare prediction and research results
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('backtest_artifacts')
+          with (root / 'head' / 'v6_accuracy_weekly.json').open(encoding='utf-8') as f:
+              head = json.load(f)
+          with (root / 'base' / 'v6_accuracy_weekly.json').open(encoding='utf-8') as f:
+              base = json.load(f)
+
+          if int(head.get('observations') or 0) <= 0:
+              raise SystemExit('head backtest produced zero observations')
+          if int(base.get('observations') or 0) <= 0:
+              raise SystemExit('base backtest produced zero observations')
+
+          comparable_top_level = (
+              'method',
+              'yearly_walk_forward_method',
+              'selectivity_analysis_method',
+              'selectivity_margin_thresholds',
+              'alpha_target_method',
+              'alpha_calibration_method',
+              'alpha_calibration_buckets',
+              'regime_matrix_method',
+              'alpha_target_definition',
+              'observations',
+              'results',
+          )
+          drift = []
+          for key in comparable_top_level:
+              if head.get(key) != base.get(key):
+                  drift.append(key)
+
+          if drift:
+              raise SystemExit(
+                  'architecture change altered historical forecast/research outputs: '
+                  + ', '.join(drift)
+              )
+
+          print(
+              'V6 architecture historical equivalence: PASS '
+              f"observations={head.get('observations')} "
+              f"result_rows={len(head.get('results') or [])}"
+          )
+          for item in head.get('results') or []:
+              if item.get('variant') != 'champion':
+                  continue
+              independent = item.get('non_overlapping') or {}
+              alpha = (item.get('alpha_target') or {}).get('non_overlapping') or {}
+              print(
+                  'champion '
+                  f"{item.get('horizon_days')}D "
+                  f"N={independent.get('samples')} "
+                  f"hit={independent.get('directional_hit_rate_pct')} "
+                  f"spy_alpha={independent.get('avg_excess_vs_spy_pct')} "
+                  f"alpha_target_hit={alpha.get('alpha_hit_rate_pct')}"
+              )
+          PY
+
+      - name: Upload backtest artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v6-architecture-backtest-${{ github.run_id }}
+          path: backtest_artifacts/
+          if-no-files-found: warn
+          retention-days: 14
