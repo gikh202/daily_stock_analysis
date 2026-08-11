@@ -348,10 +348,11 @@ def _decision_balance_lines(
     horizon = _text(forecast.get("horizon")) or "10d"
     expected = _finite(forecast.get("expected_return_pct"))
     active_plan = _has_active_trade_plan(v6)
+    opportunity = _finite(v6.get("opportunity_score"))
+    risk = _finite(v6.get("risk_score"))
 
     bullish_candidates: list[Any] = [
         v4.get("strongest_bullish"),
-        v4.get("earnings_outlook"),
         *v4.get("catalysts", []),
         *v6.get("catalysts", []),
     ]
@@ -372,23 +373,50 @@ def _decision_balance_lines(
     bearish = _dedupe(bearish_candidates, limit=4)
     watch = _dedupe(v4.get("watch_conditions", []), limit=3)
 
+    direction_conflict = agreement == "方向分歧"
+    constructive_direction = (
+        "bullish" in {v4_direction, v6_direction}
+        and "bearish" not in {v4_direction, v6_direction}
+    )
+    risk_heavy = bool(
+        (risk is not None and risk >= 60.0)
+        or (
+            opportunity is not None
+            and risk is not None
+            and risk >= opportunity
+        )
+    )
+
     decision = _text(v6.get("decision")).upper()
     if decision == "AVOID" or final_action == "回避":
         verdict = "当前不买/回避"
-        execution_reason = "即使存在局部看多证据，风险闸门当前占优；除非风险条件明显改善，否则不建立新仓。"
+        if bullish:
+            execution_reason = "即使存在局部看多证据，风险闸门当前占优；除非风险条件明显改善，否则不建立新仓。"
+        else:
+            execution_reason = "当前没有足够的结构化看多证据可以对冲风险闸门，维持回避，不建立新仓。"
     elif final_action.startswith("买入准备"):
         verdict = "可以买，但只按计划买"
         execution_reason = "方向与执行层已达到买入准备，但仍必须服从入场、止损和最大仓位，不把看多等同于无条件追价。"
     elif final_action.startswith("观察"):
-        if active_plan and (v4_direction == "bullish" or v6_direction == "bullish"):
+        if active_plan and constructive_direction and not direction_conflict and not risk_heavy:
             verdict = "条件式可买"
             execution_reason = "当前动作仍是观察，不代表否定买入；只有进入确定性入场区间并满足确认条件时才执行。"
         else:
             verdict = "继续观察"
-            execution_reason = "存在潜在机会，但执行层尚未达到可操作条件；保留看多逻辑，同时等待更明确的价格或量价确认。"
+            if direction_conflict:
+                execution_reason = "多空方向存在直接分歧，不能因为某一侧更乐观就提前买入；等待冲突收敛后再评估。"
+            elif risk_heavy:
+                execution_reason = "当前风险分偏高或已不低于机会分，即使保留潜在买点也不足以升级为条件式买入。"
+            elif not active_plan:
+                execution_reason = "存在潜在机会，但没有活动确定性交易计划；保留看多逻辑，同时等待明确的入场与风控边界。"
+            else:
+                execution_reason = "执行层尚未达到可操作条件；保留现有多空证据，等待价格、量价或事件确认。"
     elif final_action == "等待" or decision == "WAIT":
         verdict = "暂不买，等待确认"
-        execution_reason = "看多逻辑仍保留，但量化与投研尚未形成足够共振或交易计划尚未触发，当前不执行。"
+        if bullish:
+            execution_reason = "看多逻辑仍保留，但量化与投研尚未形成足够共振或交易计划尚未触发，当前不执行。"
+        else:
+            execution_reason = "当前缺少足够的结构化看多证据，且执行层未触发，维持等待而不是勉强构造买入理由。"
     else:
         verdict = "等待更多证据"
         execution_reason = "当前证据不足以支持无条件买入或回避，继续按确认条件更新判断。"
