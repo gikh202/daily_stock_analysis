@@ -168,9 +168,9 @@ jobs:
                   'champion '
                   f"{item.get('horizon_days')}D "
                   f"N={independent.get('samples')} "
-                  f"hit={independent.get('hit_rate_pct')} "
+                  f"hit={independent.get('directional_hit_rate_pct')} "
                   f"spy_alpha={independent.get('avg_excess_vs_spy_pct')} "
-                  f"alpha_target_hit={alpha.get('hit_rate_pct')}"
+                  f"alpha_target_hit={alpha.get('alpha_hit_rate_pct')}"
               )
           PY
 
