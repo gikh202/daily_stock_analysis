@@ -36,7 +36,7 @@ concurrency:
 env:
   PYTHONPATH: ${{ github.workspace }}
   V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
-  # 生产工作流固定使用 normalized facts。legacy 只保留诊断/人工迁移用途，不能通过仓库变量静默切回。
+  # Stage 9 生产工作流只允许 normalized facts。legacy projection 仍保留一个观察窗口，但不能被活动消费者读取。
   V6_DAILY_READ_SOURCE: normalized
 
 jobs:
@@ -173,8 +173,9 @@ jobs:
             echo "⚠️ 手动 V6 未提供上游 V4 报告，将仅使用生产数据库中的 V4 结构化记录"
           fi
 
-          # 这里只生成并持久化候选结果，不发送通知。最终邮件必须在 production gate 完整校验通过后再发送。
-          V6_DAILY_NOTIFY=false python scripts/run_v6_daily.py \
+          # Stage 9 生产入口：活动读取消费者全部走 normalized。legacy 仅保留 Stage 8 写侧兼容投影观察窗口。
+          # 这里只生成并持久化候选结果，不发送通知；最终邮件必须在 production gate 完整校验通过后再发送。
+          V6_DAILY_NOTIFY=false python scripts/run_v6_daily_stage9.py \
             --stock-db data/stock_analysis.db \
             --v6-db v6_data/v6_daily.db \
             --report-dir v6_reports \
@@ -182,7 +183,7 @@ jobs:
             --min-samples "${V6_DAILY_MIN_SAMPLES}" \
             "${EXTRA_ARGS[@]}"
 
-      - name: 校验 V6 数据库、Accuracy Lab、Normalized Read Gate 与综合日报
+      - name: 校验 V6 数据库、Accuracy Lab、Normalized Consumer Gate 与综合日报
         id: validate_v6
         shell: bash
         env:
@@ -218,17 +219,21 @@ jobs:
                   row[0]
                   for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
               }
-              signals = int(conn.execute('SELECT COUNT(*) FROM v6_signals').fetchone()[0])
-              outcomes = int(conn.execute('SELECT COUNT(*) FROM v6_outcomes').fetchone()[0])
+              signals = int(conn.execute('SELECT COUNT(*) FROM v6_forecast_runs').fetchone()[0])
+              outcomes = int(conn.execute('SELECT COUNT(*) FROM v6_forecast_outcomes').fetchone()[0])
           finally:
               conn.close()
           if quick != 'ok':
               raise SystemExit(f'v6_daily.db quick_check failed: {quick!r}')
           if signals <= 0:
-              raise SystemExit('V6 generated zero usable signals')
-          missing_lab_tables = {'v6_shadow_forecasts', 'v6_shadow_outcomes', 'v6_trade_outcomes'} - tables
+              raise SystemExit('V6 generated zero usable normalized forecasts')
+          missing_lab_tables = {
+              'v6_accuracy_shadow_forecasts',
+              'v6_accuracy_shadow_outcomes',
+              'v6_accuracy_trade_outcomes',
+          } - tables
           if missing_lab_tables:
-              raise SystemExit(f'missing V6.2 Accuracy Lab tables: {sorted(missing_lab_tables)}')
+              raise SystemExit(f'missing normalized V6 Accuracy Lab tables: {sorted(missing_lab_tables)}')
 
           with open(run, encoding='utf-8') as f:
               run_payload = json.load(f)
@@ -239,8 +244,8 @@ jobs:
           with open(report, encoding='utf-8') as f:
               report_text = f.read()
 
-          # Stage 7 production gate: only normalized + exact parity + healthy DB/FK
-          # may become persisted production state or send the final notification.
+          # Stage 9 production gate: normalized canonical writes + normalized-only
+          # active consumers + retirement readiness are all required before cache/notification.
           production_gate = assert_production_read_gate(run_payload)
           if production_gate.get('production_ready') is not True:
               raise SystemExit(f'V6 production gate unexpectedly not ready: {production_gate}')
@@ -248,6 +253,10 @@ jobs:
               raise SystemExit(f"unexpected production read source: {production_gate.get('selected_source')!r}")
           if production_gate.get('read_parity') != 'exact':
               raise SystemExit(f"unexpected production read parity: {production_gate.get('read_parity')!r}")
+          if int(production_gate.get('legacy_consumer_count') or -1) != 0:
+              raise SystemExit(f"active legacy consumers remain: {production_gate.get('legacy_consumer_count')!r}")
+          if production_gate.get('projection_retirement_ready') is not True:
+              raise SystemExit('legacy projection is not retirement-ready')
 
           # Persist gate evidence into both machine-readable artifacts so every
           # production notification can be audited back to the exact gate result.
@@ -291,7 +300,7 @@ jobs:
           if missing_codes:
               raise SystemExit(f'V6 report is missing board symbols: {missing_codes}')
           if signals < len(board):
-              raise SystemExit(f'V6 database signal count {signals} is smaller than board size {len(board)}')
+              raise SystemExit(f'normalized forecast count {signals} is smaller than board size {len(board)}')
           if str(payload.get('version') or '') != str(run_payload.get('version') or ''):
               raise SystemExit('V6 JSON payload version does not match v6_run.json version')
 
@@ -301,6 +310,13 @@ jobs:
               raise SystemExit('embedded Accuracy Lab version does not match artifact')
           if run_lab.get('version') != lab_payload.get('version'):
               raise SystemExit('v6_run Accuracy Lab version does not match artifact')
+          lab_source = lab_payload.get('source') or {}
+          if lab_source.get('mode') != 'normalized_only':
+              raise SystemExit(f"Accuracy Lab source is not normalized-only: {lab_source}")
+          if int(lab_source.get('legacy_signal_reads') or 0) != 0:
+              raise SystemExit('Accuracy Lab still reads legacy signal facts')
+          if int(lab_source.get('legacy_outcome_reads') or 0) != 0:
+              raise SystemExit('Accuracy Lab still reads legacy outcome facts')
           policy = lab_payload.get('policy') or {}
           if policy.get('auto_promotion') is not False or policy.get('auto_weight_tuning') is not False:
               raise SystemExit('unsafe Accuracy Lab policy: automatic promotion/tuning must remain disabled')
@@ -308,6 +324,14 @@ jobs:
               raise SystemExit('Accuracy Lab non-overlapping validation is not enabled')
           if not isinstance(lab_payload.get('champion'), list) or not isinstance(lab_payload.get('challengers'), list):
               raise SystemExit('Accuracy Lab metrics payload is incomplete')
+
+          retirement = run_payload.get('legacy_retirement') or {}
+          if retirement.get('status') != 'retirement_ready':
+              raise SystemExit(f"legacy retirement audit not ready: {retirement}")
+          if int(retirement.get('legacy_consumer_count') or -1) != 0:
+              raise SystemExit(f"legacy retirement audit reports active consumers: {retirement}")
+          if retirement.get('legacy_projection_required_by_active_consumers') is not False:
+              raise SystemExit('legacy projection is still required by an active consumer')
 
           notification = run_payload.get('notification') or {}
           if notification.get('status') != 'disabled' or notification.get('attempted') is not False:
@@ -323,10 +347,12 @@ jobs:
               f.write('valid=true\n')
               f.write('production_ready=true\n')
           print(
-              'V6.2 production validation: PASS '
-              f'signals={signals} outcomes={outcomes} board={len(board)} '
+              'V6 Stage 9 production validation: PASS '
+              f'normalized_signals={signals} normalized_outcomes={outcomes} board={len(board)} '
               f"source={production_gate.get('selected_source')} "
               f"parity={production_gate.get('read_parity')} "
+              f"legacy_consumers={production_gate.get('legacy_consumer_count')} "
+              f"retirement_ready={production_gate.get('projection_retirement_ready')} "
               f"scoreboard={run_payload.get('scoreboard_status')} "
               f"accuracy_lab={lab_payload.get('status')} "
               f"v4_merged={unified.get('v4_merged')} chinese_chars={chinese_chars}"
@@ -396,11 +422,15 @@ jobs:
           with run_path.open(encoding='utf-8') as f:
               run_payload = json.load(f)
 
-          # Defense in depth: notification independently re-runs the production
+          # Defense in depth: notification independently re-runs the Stage 9
           # gate instead of trusting only the previous step condition.
           gate = assert_production_read_gate(run_payload)
           if gate.get('notification_allowed') is not True:
               raise SystemExit(f'production gate forbids notification: {gate}')
+          if int(gate.get('legacy_consumer_count') or -1) != 0:
+              raise SystemExit('notification blocked: active legacy consumer remains')
+          if gate.get('projection_retirement_ready') is not True:
+              raise SystemExit('notification blocked: legacy projection retirement not ready')
 
           if not truthy(os.getenv('V6_DAILY_NOTIFY')):
               print('V6 通知已禁用；报告和 production-ready 研究历史仍已正常生成并保存。')
