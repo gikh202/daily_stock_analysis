@@ -33,6 +33,7 @@ from src.v6_daily.final_decision_service import (
     build_final_decision_payload,
 )
 from src.v6_daily.free_sources import fetch_free_context
+from src.v6_daily.normalized_persistence import NormalizedV6Persistence
 from src.v6_daily.report import write_daily_report
 from src.v6_daily.store import mature_outcomes
 from src.v6_daily.unified_report import count_v4_structured_records
@@ -60,15 +61,7 @@ def _is_current_external_context_safe(
     effective_trade_date: str | None,
     analysis_created_at: str | None = None,
 ) -> bool:
-    """Allow current SEC/FRED scoring only for a newly-created forecast.
-
-    The external snapshot fetched by this runner is current, not point-in-time
-    historical data. A recent effective market bar alone is insufficient: the
-    V4 analysis record itself must also have been created today (or at most one
-    calendar day earlier for timezone-boundary runs). This prevents a weekend
-    or manual rebuild from retroactively injecting new filings/rates into an
-    older forecast whose evaluation window has already begun.
-    """
+    """Allow current SEC/FRED scoring only for a newly-created forecast."""
     trade_date = _parse_iso_date(effective_trade_date)
     if trade_date is None:
         return False
@@ -88,12 +81,7 @@ def _is_current_external_context_safe(
 def _canonicalize_provisional(
     provisional: Iterable[Tuple[Dict[str, Any], Any]],
 ) -> Tuple[list[Tuple[Dict[str, Any], Any]], int]:
-    """Keep one deterministic V4 record per symbol/effective trade date.
-
-    Multiple forced V4 runs on the same market date are correlated observations,
-    not independent forecast samples. The newest analysis_created_at wins; the
-    history id is a deterministic tie-breaker.
-    """
+    """Keep one deterministic V4 record per symbol/effective trade date."""
     canonical: Dict[tuple[str, str], Tuple[Dict[str, Any], Any]] = {}
     total = 0
     for record, signal in provisional:
@@ -145,7 +133,11 @@ def _notify(report_path: Path, codes: list[str]) -> Dict[str, Any]:
             severity="info",
             dedup_key=f"v6-unified-daily-{datetime.now().strftime('%Y%m%d')}",
         )
-        return {"attempted": True, "success": bool(success), "status": "sent" if success else "failed"}
+        return {
+            "attempted": True,
+            "success": bool(success),
+            "status": "sent" if success else "failed",
+        }
     except Exception as exc:
         logger.exception("V6 unified notification failed")
         return {
@@ -175,7 +167,10 @@ def _finalize_report(
         v4_markdown = v4_path.read_text(encoding="utf-8")
         logger.info("[V6] 已加载同次运行的 V4 报告 Artifact: %s", v4_path)
     elif v4_report_path:
-        logger.warning("[V6] 指定的 V4 报告不存在，将仅使用数据库中的 V4 结构化记录: %s", v4_report_path)
+        logger.warning(
+            "[V6] 指定的 V4 报告不存在，将仅使用数据库中的 V4 结构化记录: %s",
+            v4_report_path,
+        )
 
     structured_count = count_v4_structured_records(analysis_records)
     if structured_count:
@@ -239,8 +234,6 @@ def run(
     )
     public_context = fetch_free_context(source_codes)
 
-    # First build every usable signal WITHOUT newly fetched SEC/FRED. This
-    # establishes the signal date independently of current external evidence.
     provisional_raw: list[tuple[Dict[str, Any], Any]] = []
     skipped_unusable = 0
     for record in records:
@@ -377,11 +370,10 @@ def run(
         report_date=report_date,
         public_context=public_context,
     )
-    # Keep the existing report writer stable while exposing V6.2 research data
-    # to the unified report and machine-readable daily payload.
     payload["accuracy_lab"] = accuracy_lab
     final_packets = build_final_decision_packets(payload, v4_records=records)
     payload["final_decisions"] = build_final_decision_payload(payload, v4_records=records)
+
     decision_audit = FinalDecisionAuditStore(v6_db_path).persist_packets(
         payload,
         final_packets,
@@ -389,6 +381,22 @@ def run(
         source_engine_version=engine.version,
     )
     payload["decision_audit"] = decision_audit
+
+    normalized_storage = NormalizedV6Persistence(v6_db_path).persist_snapshot(
+        payload,
+        source_engine_version=engine.version,
+        report_date=report_date,
+        run_mode="LIVE",
+        metadata={
+            "accuracy_layer": "v6.2",
+            "decision_source": "FinalDecisionPacket",
+            "decision_contract": "final-decision-packet-v1",
+            "final_decision_packets": len(final_packets),
+            "decision_audit_schema_version": decision_audit.get("schema_version"),
+        },
+    )
+    payload["normalized_storage"] = normalized_storage
+
     (Path(report_dir) / "v6_daily_latest.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -418,6 +426,7 @@ def run(
         "scoreboard_status": (payload.get("scoreboard") or {}).get("status"),
         "final_decisions": (payload.get("final_decisions") or {}).get("summary") or {},
         "decision_audit": decision_audit,
+        "normalized_storage": normalized_storage,
         "accuracy_lab": {
             "version": accuracy_lab.get("version"),
             "status": accuracy_lab.get("status"),
@@ -436,15 +445,28 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the V6.2 deterministic multi-horizon US-stock daily intelligence and accuracy lab")
+    parser = argparse.ArgumentParser(
+        description="Run the V6.2 deterministic multi-horizon US-stock daily intelligence and accuracy lab"
+    )
     parser.add_argument("--stock-db", default=os.getenv("STOCK_DB_PATH", "data/stock_analysis.db"))
     parser.add_argument("--v6-db", default=os.getenv("V6_DAILY_DB_PATH", "v6_data/v6_daily.db"))
     parser.add_argument("--report-dir", default=os.getenv("V6_DAILY_REPORT_DIR", "v6_reports"))
     parser.add_argument("--v4-report", default=os.getenv("V6_UPSTREAM_V4_REPORT"))
     parser.add_argument("--limit", type=int, default=int(os.getenv("V6_DAILY_SCAN_LIMIT", "5000")))
-    parser.add_argument("--min-samples", type=int, default=int(os.getenv("V6_DAILY_MIN_SAMPLES", "50")))
-    parser.add_argument("--primary-model", default=os.getenv("LITELLM_MODEL") or os.getenv("V6_PRIMARY_LLM_MODEL"))
-    parser.add_argument("--notify", action="store_true", default=_truthy(os.getenv("V6_DAILY_NOTIFY", "false")))
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=int(os.getenv("V6_DAILY_MIN_SAMPLES", "50")),
+    )
+    parser.add_argument(
+        "--primary-model",
+        default=os.getenv("LITELLM_MODEL") or os.getenv("V6_PRIMARY_LLM_MODEL"),
+    )
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        default=_truthy(os.getenv("V6_DAILY_NOTIFY", "false")),
+    )
     parser.add_argument(
         "--accuracy-lab-cost-bps",
         type=float,
@@ -453,12 +475,19 @@ def main() -> int:
     parser.add_argument(
         "--accuracy-lab-max-holding-bars",
         type=int,
-        default=int(os.getenv("V6_ACCURACY_LAB_MAX_HOLDING_BARS", str(DEFAULT_MAX_HOLDING_BARS))),
+        default=int(
+            os.getenv("V6_ACCURACY_LAB_MAX_HOLDING_BARS", str(DEFAULT_MAX_HOLDING_BARS))
+        ),
     )
     parser.add_argument(
         "--accuracy-lab-promotion-min-samples",
         type=int,
-        default=int(os.getenv("V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES", str(DEFAULT_PROMOTION_MIN_SAMPLES))),
+        default=int(
+            os.getenv(
+                "V6_ACCURACY_LAB_PROMOTION_MIN_SAMPLES",
+                str(DEFAULT_PROMOTION_MIN_SAMPLES),
+            )
+        ),
     )
     args = parser.parse_args()
 
