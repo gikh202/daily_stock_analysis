@@ -28,6 +28,7 @@ on:
       - 'tests/test_v6_normalized_persistence.py'
       - 'tests/test_v6_normalized_read_cutover.py'
       - 'tests/test_v6_production_gate.py'
+      - 'tests/test_v6_canonical_write_store.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -64,6 +65,7 @@ on:
       - 'tests/test_v6_normalized_persistence.py'
       - 'tests/test_v6_normalized_read_cutover.py'
       - 'tests/test_v6_production_gate.py'
+      - 'tests/test_v6_canonical_write_store.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -109,6 +111,7 @@ jobs:
             src/v6_daily/decision_audit.py \
             src/v6_daily/versioned_store.py \
             src/v6_daily/normalized_persistence.py \
+            src/v6_daily/canonical_write_store.py \
             src/v6_daily/normalized_read_store.py \
             src/v6_daily/read_cutover.py \
             src/v6_daily/production_gate.py \
@@ -153,5 +156,6 @@ jobs:
             tests/test_v6_normalized_persistence.py \
             tests/test_v6_normalized_read_cutover.py \
             tests/test_v6_production_gate.py \
+            tests/test_v6_canonical_write_store.py \
             tests/test_alpha_engine.py \
             tests/test_alpha_validation.py

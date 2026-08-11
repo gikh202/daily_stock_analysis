@@ -22,6 +22,7 @@ from src.v6_daily.accuracy_lab import (
     run_accuracy_lab,
 )
 from src.v6_daily.accuracy_report import build_accuracy_unified_report
+from src.v6_daily.canonical_write_store import CanonicalV6WriteStore
 from src.v6_daily.decision_audit import FinalDecisionAuditStore
 from src.v6_daily.engine import V6DailyEngine
 from src.v6_daily.final_decision_renderer import (
@@ -220,7 +221,7 @@ def run(
     accuracy_lab_promotion_min_samples: int = DEFAULT_PROMOTION_MIN_SAMPLES,
 ) -> Dict[str, Any]:
     engine = V6DailyEngine()
-    store = VersionedV6DailyStore(
+    store = CanonicalV6WriteStore(
         v6_db_path,
         active_engine_version=engine.version,
     )
@@ -318,6 +319,8 @@ def run(
             "[V6.2] SEC/FRED 当前快照未注入历史/旧分析记录；仅作为当期报告背景展示"
         )
 
+    # Outcome maturation now enumerates normalized canonical forecast rows and
+    # writes normalized forecast outcomes before legacy compatibility projection.
     maturation = mature_outcomes(store, stock_db_path)
     accuracy_lab = run_accuracy_lab(
         v6_db_path,
@@ -350,6 +353,8 @@ def run(
         "promotion_candidates": len(accuracy_lab.get("promotion_candidates") or []),
         "quick_check": quick,
         "signal_identity_migrated": store.signal_identity_migrated,
+        "canonical_write_bootstrap": bool(store.bootstrap_summary.get("performed")),
+        "write_source": "normalized_v6_tables",
         "active_engine_version": engine.version,
         "free_source_enrichment": (public_context.get("status") or {}).get("enabled", False),
         "external_numeric_trade_date": latest_effective_date if external_numeric_signals else None,
@@ -358,10 +363,15 @@ def run(
     }
     report_date = datetime.now().strftime("%Y-%m-%d")
 
-    # The legacy store now produces only the comparison snapshot. It is not the
-    # outward production read source when normalized cutover is enabled.
+    # Legacy tables are now compatibility projections only. Build a separate
+    # comparison payload from them so normalized read parity still proves that
+    # older consumers see the same business facts during the migration window.
+    legacy_store = VersionedV6DailyStore(
+        v6_db_path,
+        active_engine_version=engine.version,
+    )
     legacy_payload = write_daily_report(
-        store,
+        legacy_store,
         report_dir,
         run_stats=run_stats,
         min_samples=max(3, int(min_samples)),
@@ -369,6 +379,9 @@ def run(
         public_context=public_context,
     )
 
+    # Reconciliation/manifest attachment remains fail-closed. New facts already
+    # exist in normalized tables; this pass backfills any historical compatibility
+    # rows and attaches the LIVE run manifest before read cutover.
     normalized_storage = NormalizedV6Persistence(v6_db_path).persist_snapshot(
         legacy_payload,
         source_engine_version=engine.version,
@@ -376,10 +389,15 @@ def run(
         run_mode="LIVE",
         metadata={
             "accuracy_layer": "v6.2",
-            "migration_phase": "normalized_read_cutover",
-            "legacy_role": "parity_and_manual_fallback_only",
+            "migration_phase": "normalized_write_primary",
+            "canonical_write_source": "normalized_v6_tables",
+            "legacy_role": "compatibility_projection_only",
         },
     )
+    write_path = store.write_status()
+    if write_path.get("parity") != "exact":
+        raise RuntimeError(f"V6 canonical write parity failed: {write_path}")
+    run_stats["write_parity"] = write_path.get("parity")
 
     requested_read_source = os.getenv("V6_DAILY_READ_SOURCE", "normalized")
     payload, read_cutover = cutover_daily_payload(
@@ -395,10 +413,11 @@ def run(
     run_stats["read_parity"] = read_cutover.get("parity")
     payload["run"] = run_stats
     payload["accuracy_lab"] = accuracy_lab
+    payload["write_path"] = write_path
     payload["normalized_storage"] = normalized_storage
 
-    # FinalDecisionPacket is now built only after the normalized read parity
-    # guard has selected the outward production payload.
+    # FinalDecisionPacket is built only after canonical write parity and the
+    # normalized read parity guard have both succeeded.
     final_packets = build_final_decision_packets(payload, v4_records=records)
     payload["final_decisions"] = build_final_decision_payload(payload, v4_records=records)
 
@@ -449,6 +468,7 @@ def run(
         "scoreboard_status": (payload.get("scoreboard") or {}).get("status"),
         "final_decisions": (payload.get("final_decisions") or {}).get("summary") or {},
         "decision_audit": decision_audit,
+        "write_path": write_path,
         "normalized_storage": normalized_storage,
         "read_cutover": read_cutover,
         "accuracy_lab": {
