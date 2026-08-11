@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .decision_contracts import DecisionPacket
 
 
 @dataclass(frozen=True)
@@ -33,9 +36,22 @@ class V6Signal:
     horizon_forecasts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     context_features: Dict[str, Any] = field(default_factory=dict)
 
+    def to_decision_packet(self) -> "DecisionPacket":
+        """Build the canonical typed decision contract for downstream consumers.
+
+        The packet is derived from the already-computed deterministic V6 signal;
+        it does not rescore the symbol or introduce any LLM influence. Report,
+        API and future persistence layers can consume this contract without
+        reverse-engineering execution state from Markdown.
+        """
+        from .decision_contracts import build_decision_packet
+
+        return build_decision_packet(self)
+
     @property
     def actionable(self) -> bool:
-        return self.decision in {"BUY_SETUP", "WATCH"}
+        """True only when the signal owns a structurally active trade plan."""
+        return self.to_decision_packet().execution.actionable
 
     def horizon(self, days: int) -> Dict[str, Any]:
         return dict(self.horizon_forecasts.get(f"{int(days)}d") or {})
