@@ -63,6 +63,47 @@ def test_retirement_refuses_incomplete_normalized_coverage(tmp_path: Path) -> No
     assert facts["tables"]["v6_outcomes"]["present"] is True
 
 
+def test_explicit_stage13_bridge_migrates_missing_coverage_then_retires(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-upgrade.db"
+    _create_legacy_history(path)
+    before_facts = inspect_legacy_facts(path)
+    assert normalized_legacy_coverage(path)["coverage_ready"] is False
+
+    result = retire_legacy_tables(
+        path,
+        archive_dir=tmp_path / "archive-upgrade",
+        receipt_path=tmp_path / "receipt-upgrade.json",
+        repo_root=REPO_ROOT,
+        source_commit="stage13-upgrade",
+        report_date="2026-08-11",
+        migrate_missing_coverage=True,
+        apply=True,
+    )
+
+    assert result["status"] == "retired"
+    assert result["coverage_migration"]["applied"] is True
+    assert result["coverage_migration"]["legacy_source_unchanged"] is True
+    assert result["coverage_migration"]["after"]["coverage_ready"] is True
+    assert result["normalized_coverage"]["coverage_ready"] is True
+    assert result["archive_verified"] is True
+    assert result["restore_verified"] is True
+    assert result["gate_v6_passed"] is True
+    assert result["evidence"]["legacy_before"]["tables"] == before_facts["tables"]
+    with sqlite3.connect(str(path)) as conn:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "v6_signals" not in tables
+        assert "v6_outcomes" not in tables
+        assert conn.execute("SELECT COUNT(*) FROM v6_forecast_runs").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM v6_forecast_outcomes").fetchone()[0] == 1
+
+
 def test_stage13_dry_run_builds_verified_evidence_without_drop(tmp_path: Path) -> None:
     path = _migrated_legacy_db(tmp_path)
     before = inspect_legacy_facts(path)
@@ -180,8 +221,15 @@ def test_gate_v7_requires_terminal_retirement_and_post_run_absence(
         "archive_verified": True,
         "restore_verified": True,
         "gate_v6_passed": True,
+        "normalized_coverage": {"coverage_ready": True},
+        "coverage_migration": {
+            "status": "already_covered",
+            "applied": False,
+            "legacy_source_unchanged": True,
+        },
         "policy": {
             "normalized_coverage_required": True,
+            "coverage_migration_requires_explicit_flag": True,
             "archive_before_drop": True,
             "verified_restore_before_drop": True,
             "transactional_drop": True,
