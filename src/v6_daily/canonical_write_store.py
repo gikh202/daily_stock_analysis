@@ -65,7 +65,29 @@ class CanonicalV6WriteStore(VersionedV6DailyStore):
                     (self.active_engine_version,),
                 ).fetchone()[0]
             )
-        if canonical_signals >= legacy_signals:
+            legacy_outcomes = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM v6_outcomes o
+                    JOIN v6_signals s ON s.id=o.signal_id
+                    WHERE s.engine_version=?
+                    """,
+                    (self.active_engine_version,),
+                ).fetchone()[0]
+            )
+            canonical_outcomes = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM v6_forecast_outcomes o
+                    JOIN v6_forecast_runs f ON f.id=o.forecast_run_id
+                    WHERE f.engine_version=?
+                    """,
+                    (self.active_engine_version,),
+                ).fetchone()[0]
+            )
+        if canonical_signals >= legacy_signals and canonical_outcomes >= legacy_outcomes:
             return
 
         payload = {
@@ -77,15 +99,20 @@ class CanonicalV6WriteStore(VersionedV6DailyStore):
             payload,
             source_engine_version=self.active_engine_version,
             report_date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            run_mode="MIGRATION",
+            # Reuse an existing non-production run mode rather than widening the
+            # persisted run-mode contract solely for a one-time migration. The
+            # metadata below is the explicit audit marker for this bootstrap.
+            run_mode="SHADOW",
             metadata={
                 "migration_phase": "normalized_write_primary_bootstrap",
+                "migration_only": True,
                 "legacy_role": "historical_bootstrap_only",
             },
         )
         self.bootstrap_summary = {
             "performed": True,
             "reason": "legacy_history_backfilled_before_write_cutover",
+            "run_mode": "SHADOW",
             "source_signals": summary.get("source_signals"),
             "forecast_runs": summary.get("forecast_runs"),
             "source_outcomes": summary.get("source_outcomes"),
