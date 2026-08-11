@@ -2247,6 +2247,16 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
              patch('src.core.pipeline.GeminiAnalyzer'), \
              patch('src.core.pipeline.NotificationService'), \
              patch('src.core.pipeline.SearchService'), \
+             patch(
+                 'src.core.pipeline.render_analysis_context_pack_overview',
+                 return_value={
+                     'data_quality': {
+                         'overall_score': 95,
+                         'level': 'good',
+                         'limitations': [],
+                     }
+                 },
+             ), \
              patch('src.core.pipeline.stabilize_decision_with_structure'), \
              patch('src.agent.factory.build_agent_executor') as mock_build_executor:
 
