@@ -353,9 +353,8 @@ def build_final_decision_packet(
         elif execution.has_active_plan and constructive_direction:
             verdict = FinalVerdict.CONDITIONAL_BUY
             worth_buying = True
-            execution_authorized = not non_trading
             rationale = (
-                "bullish evidence and deterministic direction are constructive with an active risk plan; entry still requires the listed confirmations"
+                "bullish evidence and deterministic direction are constructive with an active risk plan; entry still requires the listed confirmations, so execution remains unauthorized until confirmation"
             )
         else:
             verdict = FinalVerdict.WATCH
