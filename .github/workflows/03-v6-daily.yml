@@ -36,7 +36,7 @@ concurrency:
 env:
   PYTHONPATH: ${{ github.workspace }}
   V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
-  # Stage 9 生产工作流只允许 normalized facts。legacy projection 仍保留一个观察窗口，但不能被活动消费者读取。
+  # Stage 10 生产读写均只允许 normalized facts；legacy tables 仅保留历史只读/显式迁移用途。
   V6_DAILY_READ_SOURCE: normalized
 
 jobs:
@@ -173,9 +173,9 @@ jobs:
             echo "⚠️ 手动 V6 未提供上游 V4 报告，将仅使用生产数据库中的 V4 结构化记录"
           fi
 
-          # Stage 9 生产入口：活动读取消费者全部走 normalized。legacy 仅保留 Stage 8 写侧兼容投影观察窗口。
-          # 这里只生成并持久化候选结果，不发送通知；最终邮件必须在 production gate 完整校验通过后再发送。
-          V6_DAILY_NOTIFY=false python scripts/run_v6_daily_stage9.py \
+          # Stage 10 生产入口：normalized-only write + normalized-only consumers。
+          # legacy fact tables 在运行前后做内容指纹校验，任何写入都会阻断缓存和通知。
+          V6_DAILY_NOTIFY=false python scripts/run_v6_daily_stage10.py \
             --stock-db data/stock_analysis.db \
             --v6-db v6_data/v6_daily.db \
             --report-dir v6_reports \
@@ -183,7 +183,7 @@ jobs:
             --min-samples "${V6_DAILY_MIN_SAMPLES}" \
             "${EXTRA_ARGS[@]}"
 
-      - name: 校验 V6 数据库、Accuracy Lab、Normalized Consumer Gate 与综合日报
+      - name: 校验 V6 数据库、Accuracy Lab、Stage 10 Gate 与综合日报
         id: validate_v6
         shell: bash
         env:
@@ -196,7 +196,7 @@ jobs:
           import sqlite3
           from pathlib import Path
 
-          from src.v6_daily.production_gate import assert_production_read_gate
+          from src.v6_daily.production_gate import assert_stage10_production_gate
 
           db = 'v6_data/v6_daily.db'
           report = 'v6_reports/v6_daily_latest.md'
@@ -244,22 +244,31 @@ jobs:
           with open(report, encoding='utf-8') as f:
               report_text = f.read()
 
-          # Stage 9 production gate: normalized canonical writes + normalized-only
-          # active consumers + retirement readiness are all required before cache/notification.
-          production_gate = assert_production_read_gate(run_payload)
+          if run_payload.get('stage10_entrypoint') != 'v6-stage10-legacy-projection-shutdown-v1':
+              raise SystemExit(f"unexpected Stage 10 entrypoint metadata: {run_payload.get('stage10_entrypoint')!r}")
+
+          production_gate = assert_stage10_production_gate(run_payload)
           if production_gate.get('production_ready') is not True:
               raise SystemExit(f'V6 production gate unexpectedly not ready: {production_gate}')
           if production_gate.get('selected_source') != 'normalized_v6_tables':
               raise SystemExit(f"unexpected production read source: {production_gate.get('selected_source')!r}")
           if production_gate.get('read_parity') != 'exact':
               raise SystemExit(f"unexpected production read parity: {production_gate.get('read_parity')!r}")
+          if production_gate.get('write_mode') != 'normalized_only_no_legacy_projection':
+              raise SystemExit(f"unexpected production write mode: {production_gate.get('write_mode')!r}")
+          if production_gate.get('identity_source') != 'normalized_sequence_only':
+              raise SystemExit(f"unexpected normalized identity source: {production_gate.get('identity_source')!r}")
+          if production_gate.get('legacy_projection_enabled') is not False:
+              raise SystemExit('legacy compatibility projection is still enabled')
+          if int(production_gate.get('legacy_projection_writes') or -1) != 0:
+              raise SystemExit(f"legacy projection wrote rows: {production_gate.get('legacy_projection_writes')!r}")
+          if production_gate.get('legacy_fact_tables_unchanged') is not True:
+              raise SystemExit('legacy fact-table fingerprint changed during production run')
           if int(production_gate.get('legacy_consumer_count') or -1) != 0:
               raise SystemExit(f"active legacy consumers remain: {production_gate.get('legacy_consumer_count')!r}")
           if production_gate.get('projection_retirement_ready') is not True:
               raise SystemExit('legacy projection is not retirement-ready')
 
-          # Persist gate evidence into both machine-readable artifacts so every
-          # production notification can be audited back to the exact gate result.
           run_payload['production_gate'] = production_gate
           payload['production_gate'] = production_gate
           Path(run).write_text(
@@ -281,7 +290,6 @@ jobs:
           if os.getenv('EXPECT_V4_MERGED') == 'true' and unified.get('v4_merged') is not True:
               raise SystemExit('workflow_run expected same-run V4 structured data, but v4_merged is not true')
 
-          # 不再绑定某个会随报告版式变化的固定标题；验证真实中文内容和结构。
           chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', report_text))
           heading_count = len(re.findall(r'(?m)^##\s+', report_text))
           if chinese_chars < 40:
@@ -328,10 +336,22 @@ jobs:
           retirement = run_payload.get('legacy_retirement') or {}
           if retirement.get('status') != 'retirement_ready':
               raise SystemExit(f"legacy retirement audit not ready: {retirement}")
+          if retirement.get('legacy_projection_enabled') is not False:
+              raise SystemExit('legacy retirement metadata still marks projection enabled')
           if int(retirement.get('legacy_consumer_count') or -1) != 0:
               raise SystemExit(f"legacy retirement audit reports active consumers: {retirement}")
           if retirement.get('legacy_projection_required_by_active_consumers') is not False:
               raise SystemExit('legacy projection is still required by an active consumer')
+
+          write_guard = run_payload.get('legacy_write_guard') or {}
+          if write_guard.get('status') != 'unchanged':
+              raise SystemExit(f"legacy write guard did not pass: {write_guard}")
+          if write_guard.get('legacy_writes_detected') is not False:
+              raise SystemExit('legacy write guard detected a mutation')
+          if write_guard.get('fact_tables_unchanged') is not True:
+              raise SystemExit('legacy write guard did not prove fact tables unchanged')
+          if int(write_guard.get('legacy_projection_writes') or -1) != 0:
+              raise SystemExit('legacy write guard reports projection writes')
 
           notification = run_payload.get('notification') or {}
           if notification.get('status') != 'disabled' or notification.get('attempted') is not False:
@@ -347,12 +367,13 @@ jobs:
               f.write('valid=true\n')
               f.write('production_ready=true\n')
           print(
-              'V6 Stage 9 production validation: PASS '
+              'V6 Stage 10 production validation: PASS '
               f'normalized_signals={signals} normalized_outcomes={outcomes} board={len(board)} '
               f"source={production_gate.get('selected_source')} "
-              f"parity={production_gate.get('read_parity')} "
-              f"legacy_consumers={production_gate.get('legacy_consumer_count')} "
-              f"retirement_ready={production_gate.get('projection_retirement_ready')} "
+              f"read_parity={production_gate.get('read_parity')} "
+              f"write_mode={production_gate.get('write_mode')} "
+              f"legacy_writes={production_gate.get('legacy_projection_writes')} "
+              f"legacy_unchanged={production_gate.get('legacy_fact_tables_unchanged')} "
               f"scoreboard={run_payload.get('scoreboard_status')} "
               f"accuracy_lab={lab_payload.get('status')} "
               f"v4_merged={unified.get('v4_merged')} chinese_chars={chinese_chars}"
@@ -405,7 +426,7 @@ jobs:
           from datetime import datetime
           from pathlib import Path
 
-          from src.v6_daily.production_gate import assert_production_read_gate
+          from src.v6_daily.production_gate import assert_stage10_production_gate
 
           logging.basicConfig(
               level=os.getenv('LOG_LEVEL', 'INFO').upper(),
@@ -422,15 +443,18 @@ jobs:
           with run_path.open(encoding='utf-8') as f:
               run_payload = json.load(f)
 
-          # Defense in depth: notification independently re-runs the Stage 9
-          # gate instead of trusting only the previous step condition.
-          gate = assert_production_read_gate(run_payload)
+          # Defense in depth：通知阶段独立重跑 Stage 10 strict gate。
+          gate = assert_stage10_production_gate(run_payload)
           if gate.get('notification_allowed') is not True:
               raise SystemExit(f'production gate forbids notification: {gate}')
+          if gate.get('legacy_projection_enabled') is not False:
+              raise SystemExit('notification blocked: legacy projection enabled')
+          if int(gate.get('legacy_projection_writes') or -1) != 0:
+              raise SystemExit('notification blocked: legacy projection wrote rows')
+          if gate.get('legacy_fact_tables_unchanged') is not True:
+              raise SystemExit('notification blocked: legacy fact tables changed')
           if int(gate.get('legacy_consumer_count') or -1) != 0:
               raise SystemExit('notification blocked: active legacy consumer remains')
-          if gate.get('projection_retirement_ready') is not True:
-              raise SystemExit('notification blocked: legacy projection retirement not ready')
 
           if not truthy(os.getenv('V6_DAILY_NOTIFY')):
               print('V6 通知已禁用；报告和 production-ready 研究历史仍已正常生成并保存。')
