@@ -7,6 +7,9 @@ on:
       - 'scripts/run_v6_daily.py'
       - 'scripts/run_v6_daily_stage9.py'
       - 'scripts/run_v6_daily_stage10.py'
+      - 'scripts/run_v6_daily_stage11.py'
+      - 'scripts/archive_v6_legacy.py'
+      - 'scripts/migrate_v6_legacy.py'
       - 'scripts/run_v6_replay.py'
       - 'scripts/run_v6_accuracy_replay.py'
       - 'scripts/run_v6_accuracy_weekly.py'
@@ -34,6 +37,8 @@ on:
       - 'tests/test_v6_normalized_only_write_store.py'
       - 'tests/test_v6_legacy_consumer_retirement.py'
       - 'tests/test_v6_stage10_projection_shutdown.py'
+      - 'tests/test_v6_stage11_schema_archival.py'
+      - 'tests/test_v6_stage11_production_runner.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -49,6 +54,9 @@ on:
       - 'scripts/run_v6_daily.py'
       - 'scripts/run_v6_daily_stage9.py'
       - 'scripts/run_v6_daily_stage10.py'
+      - 'scripts/run_v6_daily_stage11.py'
+      - 'scripts/archive_v6_legacy.py'
+      - 'scripts/migrate_v6_legacy.py'
       - 'scripts/run_v6_replay.py'
       - 'scripts/run_v6_accuracy_replay.py'
       - 'scripts/run_v6_accuracy_weekly.py'
@@ -76,6 +84,8 @@ on:
       - 'tests/test_v6_normalized_only_write_store.py'
       - 'tests/test_v6_legacy_consumer_retirement.py'
       - 'tests/test_v6_stage10_projection_shutdown.py'
+      - 'tests/test_v6_stage11_schema_archival.py'
+      - 'tests/test_v6_stage11_production_runner.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -131,6 +141,17 @@ jobs:
             src/v6_daily/normalized_accuracy_lab.py \
             src/v6_daily/legacy_retirement.py \
             src/v6_daily/production_gate.py \
+            src/v6_daily/normalized_schema.py \
+            src/v6_daily/production_common.py \
+            src/v6_daily/production_write_store.py \
+            src/v6_daily/production_read_store.py \
+            src/v6_daily/production_outcomes.py \
+            src/v6_daily/production_report.py \
+            src/v6_daily/production_cutover.py \
+            src/v6_daily/production_import_guard.py \
+            src/v6_daily/production_gate_v5.py \
+            src/v6_daily/production_runner.py \
+            src/v6_daily/legacy_archive.py \
             src/v6_daily/unified_report.py \
             src/v6_daily/accuracy.py \
             src/v6_daily/accuracy_lab.py \
@@ -145,6 +166,9 @@ jobs:
             scripts/run_v6_daily.py \
             scripts/run_v6_daily_stage9.py \
             scripts/run_v6_daily_stage10.py \
+            scripts/run_v6_daily_stage11.py \
+            scripts/archive_v6_legacy.py \
+            scripts/migrate_v6_legacy.py \
             scripts/run_v6_replay.py \
             scripts/run_v6_accuracy_replay.py \
             scripts/run_v6_accuracy_weekly.py \
@@ -178,5 +202,7 @@ jobs:
             tests/test_v6_normalized_only_write_store.py \
             tests/test_v6_legacy_consumer_retirement.py \
             tests/test_v6_stage10_projection_shutdown.py \
+            tests/test_v6_stage11_schema_archival.py \
+            tests/test_v6_stage11_production_runner.py \
             tests/test_alpha_engine.py \
             tests/test_alpha_validation.py
