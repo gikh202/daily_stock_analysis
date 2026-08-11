@@ -5,7 +5,7 @@ import copy
 import pytest
 
 from src.v6_daily.production_gate import (
-    assert_production_read_gate,
+    assert_stage10_production_gate,
     evaluate_production_read_gate,
 )
 
@@ -80,6 +80,7 @@ def _ready_payload() -> dict:
         "legacy_write_guard": {
             "status": "unchanged",
             "legacy_writes_detected": False,
+            "fact_tables_unchanged": True,
             "legacy_projection_enabled": False,
             "legacy_projection_writes": 0,
             "before": copy.deepcopy(snapshot),
@@ -91,7 +92,7 @@ def _ready_payload() -> dict:
 
 def test_production_gate_requires_normalized_only_write_read_and_immutable_legacy() -> None:
     payload = _ready_payload()
-    gate = assert_production_read_gate(payload)
+    gate = assert_stage10_production_gate(payload)
 
     assert gate["status"] == "ready"
     assert gate["production_ready"] is True
@@ -133,7 +134,7 @@ def test_production_gate_treats_manual_legacy_fallback_as_diagnostic_only() -> N
     assert any("selected_source" in reason for reason in gate["reasons"])
     assert any("legacy reference" in reason for reason in gate["reasons"])
     with pytest.raises(RuntimeError, match="production normalized-only gate blocked"):
-        assert_production_read_gate(payload)
+        assert_stage10_production_gate(payload)
 
 
 def test_production_gate_blocks_any_legacy_write_or_bootstrap_path() -> None:
@@ -212,6 +213,7 @@ def test_production_gate_blocks_legacy_fingerprint_drift() -> None:
     mutations = [
         ("status", "changed"),
         ("legacy_writes_detected", True),
+        ("fact_tables_unchanged", False),
         ("legacy_projection_enabled", True),
         ("legacy_projection_writes", 1),
     ]
