@@ -102,11 +102,13 @@ def test_machine_readable_payload_contains_final_decision_contract() -> None:
     assert final_payload["summary"]["symbols"] == 1
     assert final_payload["summary"]["fusion_complete"] == 1
     assert final_payload["summary"]["worth_buying"] == 1
+    assert final_payload["summary"]["execution_authorized"] == 0
     packet = final_payload["packets"][0]
     assert packet["assessment"]["scope"] == "v4_v6_final_fusion"
     assert packet["assessment"]["is_final"] is True
     assert packet["assessment"]["verdict"] == "conditional_buy"
     assert packet["assessment"]["worth_buying"] is True
+    assert packet["assessment"]["execution_authorized"] is False
     assert packet["execution"]["entry_zone"] == [502.0, 506.0]
     assert packet["execution"]["max_position_pct"] == 0.05
 
