@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from src.analysis_context_pack_prompt import CORE_DEGRADED_STATUSES
 from src.market_phase_summary import render_market_phase_summary
 from src.report_language import localize_confidence_level, normalize_report_language
+from src.schemas.decision_action import localize_action_label, normalize_decision_action
 
 if TYPE_CHECKING:
     from src.analyzer import AnalysisResult
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 INTRADAY_PHASES = {"intraday", "lunch_break", "closing_auction"}
 CONSERVATIVE_ACTION_PHASES = {"premarket", "non_trading", "unknown"}
 CORE_DATA_BLOCKS = {"quote", "daily_bars", "technical"}
+ACTIONABLE_ACTIONS = {"buy", "add"}
 
 _PHASE_CONTEXT_KEYS = (
     "phase",
@@ -166,6 +168,52 @@ def apply_phase_decision_guardrails(
         )
         _append_reason(phase_decision, reason)
         adjustments.append("confidence_capped_core_data_degraded")
+
+    data_quality = overview.get("data_quality") if isinstance(overview, Mapping) else None
+    quality_level = (
+        _safe_text(data_quality.get("level")).lower()
+        if isinstance(data_quality, Mapping)
+        else ""
+    )
+    current_action = normalize_decision_action(getattr(result, "action", None))
+    if current_action is None:
+        current_action = normalize_decision_action(getattr(result, "operation_advice", None))
+    if quality_level == "poor" and current_action in ACTIONABLE_ACTIONS:
+        guardrail_reason = "insufficient_data_quality:poor"
+        watch_label = localize_action_label("watch", language) or _safe_wait_action(language)
+        result.operation_advice = watch_label
+        result.action = "watch"
+        result.action_label = watch_label
+        result.decision_type = "hold"
+        phase_decision["immediate_action"] = watch_label
+        phase_decision["data_quality_guardrail_reason"] = guardrail_reason
+        _append_reason(
+            phase_decision,
+            _reason_text(
+                language,
+                en="Core evidence quality is poor; actionable buy/add advice was downgraded to watch.",
+                zh="核心证据质量较差，买入/加仓动作已降级为观望。",
+                ko="핵심 근거 품질이 낮아 매수/추가 매수 동작을 관망으로 하향 조정했습니다.",
+            ),
+        )
+        stability = dashboard.get("decision_stability")
+        if not isinstance(stability, dict):
+            stability = {}
+            dashboard["decision_stability"] = stability
+        existing_reason = _safe_text(stability.get("reason"))
+        stability["applied"] = True
+        stability["reason"] = (
+            guardrail_reason
+            if not existing_reason
+            else f"{existing_reason}; {guardrail_reason}"
+        )
+        stability["data_quality_guardrail"] = {
+            "before_action": current_action,
+            "after_action": "watch",
+            "quality_level": quality_level,
+            "reason": guardrail_reason,
+        }
+        adjustments.append("action_downgraded_poor_data_quality")
 
     has_non_intraday_action = (
         phase in CONSERVATIVE_ACTION_PHASES
