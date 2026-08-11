@@ -11,6 +11,13 @@ LEGACY_WRITE_GUARD_SCHEMA_VERSION = "v6-legacy-write-guard-v1"
 LEGACY_FACT_TABLES = ("v6_signals", "v6_outcomes")
 
 
+def _empty_tables() -> Dict[str, Dict[str, Any]]:
+    return {
+        table: {"present": False, "rows": 0, "sha256": None}
+        for table in LEGACY_FACT_TABLES
+    }
+
+
 def _row_digest(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps(columns, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -34,7 +41,7 @@ def snapshot_legacy_facts(v6_db_path: str | Path) -> Dict[str, Any]:
     if not path.is_file():
         return {
             "database_present": False,
-            "tables": {},
+            "tables": _empty_tables(),
         }
 
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
@@ -45,14 +52,9 @@ def snapshot_legacy_facts(v6_db_path: str | Path) -> Dict[str, Any]:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        result: Dict[str, Any] = {}
+        result = _empty_tables()
         for table in LEGACY_FACT_TABLES:
             if table not in tables:
-                result[table] = {
-                    "present": False,
-                    "rows": 0,
-                    "sha256": None,
-                }
                 continue
             cursor = conn.execute(f"SELECT * FROM {table} ORDER BY id ASC")
             columns = [str(item[0]) for item in cursor.description or []]
@@ -74,29 +76,22 @@ def compare_legacy_snapshots(
     before: Dict[str, Any],
     after: Dict[str, Any],
 ) -> Dict[str, Any]:
-    unchanged = before == after
+    before_tables = dict(before.get("tables") or _empty_tables())
+    after_tables = dict(after.get("tables") or _empty_tables())
     changes: list[Dict[str, Any]] = []
-    before_tables = dict(before.get("tables") or {})
-    after_tables = dict(after.get("tables") or {})
     for table in LEGACY_FACT_TABLES:
         left = before_tables.get(table)
         right = after_tables.get(table)
         if left != right:
             changes.append({"table": table, "before": left, "after": right})
-    if bool(before.get("database_present")) != bool(after.get("database_present")):
-        changes.append(
-            {
-                "table": "__database__",
-                "before": before.get("database_present"),
-                "after": after.get("database_present"),
-            }
-        )
+    unchanged = not changes
     return {
         "schema_version": LEGACY_WRITE_GUARD_SCHEMA_VERSION,
         "status": "unchanged" if unchanged else "changed",
         "legacy_writes_detected": not unchanged,
         "legacy_projection_enabled": False,
         "legacy_projection_writes": 0 if unchanged else None,
+        "fact_tables_unchanged": unchanged,
         "before": before,
         "after": after,
         "changes": changes,
