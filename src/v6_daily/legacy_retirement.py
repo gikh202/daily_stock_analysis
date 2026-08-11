@@ -11,7 +11,7 @@ from .normalized_accuracy_lab import (
 )
 
 
-LEGACY_RETIREMENT_SCHEMA_VERSION = "v6-legacy-retirement-readiness-v1"
+LEGACY_RETIREMENT_SCHEMA_VERSION = "v6-legacy-retirement-readiness-v2"
 LEGACY_TABLES = ("v6_signals", "v6_outcomes")
 ACTIVE_CONSUMERS = (
     ("daily_business_payload", "normalized_v6_tables"),
@@ -29,13 +29,17 @@ def _connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def evaluate_legacy_retirement(v6_db_path: str | Path) -> Dict[str, Any]:
-    """Return whether active Stage 9 consumers can run without legacy projection.
+def evaluate_legacy_retirement(
+    v6_db_path: str | Path,
+    *,
+    projection_enabled: bool | None = None,
+) -> Dict[str, Any]:
+    """Return whether active consumers are independent from legacy V6 facts.
 
-    Legacy tables may still exist and Stage 8 may still project into them during
-    the observation window. Readiness only becomes true when every active
-    production/research consumer uses normalized facts and the active Accuracy
-    Lab schema has no foreign-key dependency on the legacy signal/outcome tables.
+    ``projection_enabled`` is an execution-policy input rather than an inference
+    from table presence. Stage 9 callers may omit it and retain the observation-
+    window behavior; Stage 10 passes ``False`` explicitly so historical legacy
+    tables can remain present without being classified as an active projection.
     """
     with _connect(v6_db_path) as conn:
         tables = {
@@ -97,6 +101,9 @@ def evaluate_legacy_retirement(v6_db_path: str | Path) -> Dict[str, Any]:
         and normalized_signals > 0
     )
     legacy_consumer_count = 0 if healthy else len(legacy_fk_dependencies) + len(missing)
+    effective_projection_enabled = (
+        bool(legacy_present) if projection_enabled is None else bool(projection_enabled)
+    )
     return {
         "schema_version": LEGACY_RETIREMENT_SCHEMA_VERSION,
         "status": "retirement_ready" if healthy else "blocked",
@@ -113,15 +120,26 @@ def evaluate_legacy_retirement(v6_db_path: str | Path) -> Dict[str, Any]:
         "normalized_outcomes": normalized_outcomes,
         "legacy_tables_present": legacy_present,
         "legacy_table_counts": legacy_counts,
-        "legacy_projection_enabled": bool(legacy_present),
-        "legacy_projection_policy": "temporary_observation_window_only",
+        "legacy_projection_enabled": effective_projection_enabled,
+        "legacy_projection_policy": (
+            "historical_read_only_explicit_migration_source"
+            if projection_enabled is False
+            else "temporary_observation_window_only"
+        ),
         "quick_check": quick,
         "foreign_key_errors": len(fk_errors),
     }
 
 
-def assert_legacy_retirement_ready(v6_db_path: str | Path) -> Dict[str, Any]:
-    status = evaluate_legacy_retirement(v6_db_path)
+def assert_legacy_retirement_ready(
+    v6_db_path: str | Path,
+    *,
+    projection_enabled: bool | None = None,
+) -> Dict[str, Any]:
+    status = evaluate_legacy_retirement(
+        v6_db_path,
+        projection_enabled=projection_enabled,
+    )
     if status.get("projection_retirement_ready") is not True:
         raise RuntimeError(
             "V6 legacy projection retirement is not ready: " + repr(status)
