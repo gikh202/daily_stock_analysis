@@ -234,6 +234,10 @@ def build_assessment(
         verdict = AssessmentVerdict.BUY_BY_PLAN
         worth_buying: Optional[bool] = True
         rationale = "deterministic decision and active execution plan both permit buying by plan"
+    elif normalized == "BUY_SETUP":
+        verdict = AssessmentVerdict.WATCH
+        worth_buying = None
+        rationale = "buy setup was not promoted to execution because the structured trade plan is incomplete or disabled"
     elif normalized == "WATCH" and execution.actionable:
         verdict = AssessmentVerdict.CONDITIONAL_BUY
         worth_buying = True
