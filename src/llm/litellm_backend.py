@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
+
+from json_repair import repair_json
 
 from src.llm.generation_backend import (
     GenerationBackend,
@@ -88,6 +91,33 @@ Repair rules:
     )
 
 
+def _try_local_json_repair(
+    previous_response: str,
+    response_validator: Callable[[str], None],
+) -> Optional[str]:
+    """Repair syntax/format drift locally, then re-run the same strict validator.
+
+    This path cannot weaken evidence or forecast validation: repaired text is
+    accepted only when the caller's original validator passes unchanged. It is
+    primarily useful for malformed/ambiguous JSON wrappers and avoids an extra
+    paid model request when the semantic payload was already valid.
+    """
+    previous = str(previous_response or "").strip()
+    if not previous:
+        return None
+    try:
+        repaired = repair_json(previous, return_objects=False)
+        if not isinstance(repaired, str):
+            repaired = json.dumps(repaired, ensure_ascii=False)
+        repaired = repaired.strip()
+        if not repaired or repaired == previous:
+            return None
+        response_validator(repaired)
+        return repaired
+    except Exception:
+        return None
+
+
 class LiteLLMGenerationBackend(GenerationBackend):
     """Thin adapter around the existing LiteLLM analyzer call path."""
 
@@ -126,6 +156,7 @@ class LiteLLMGenerationBackend(GenerationBackend):
             )
 
         validator_repair_used = False
+        validator_local_json_repair_used = False
         try:
             text, model, usage = self._completion_callable(
                 prompt,
@@ -145,50 +176,65 @@ class LiteLLMGenerationBackend(GenerationBackend):
             if response_validator is None or not previous_response:
                 raise
 
-            validator_repair_used = True
-            repair_prompt = _build_validator_repair_prompt(
-                prompt,
+            local_repair = _try_local_json_repair(
                 str(previous_response),
-                exc,
+                response_validator,
             )
-            repair_generation_config = _clamp_temperature(
-                effective_generation_config,
-                cap=_STRUCTURED_REPAIR_TEMPERATURE_CAP,
-            )
-            logger.warning(
-                "[LLM结构修复] configured model chain returned content but failed "
-                "validation; retrying once with evidence-aware repair prompt"
-            )
-            try:
-                text, model, usage = self._completion_callable(
-                    repair_prompt,
-                    repair_generation_config,
-                    system_prompt=system_prompt,
-                    # Repair JSON non-streaming to avoid partial-object failure modes.
-                    stream=False,
-                    stream_progress_callback=stream_progress_callback,
-                    response_validator=response_validator,
-                    audit_context=audit_context,
+            if local_repair is not None:
+                validator_repair_used = True
+                validator_local_json_repair_used = True
+                text = local_repair
+                model = str(getattr(exc, "last_model", "") or "")
+                usage = dict(getattr(exc, "last_usage", {}) or {})
+                logger.info(
+                    "[LLM结构修复] local JSON repair passed the original validator; "
+                    "skipping additional model repair request"
                 )
-            except Exception as repair_exc:
-                # Preserve the pre-existing analyzer safety contract. Before this
-                # repair layer, an all-model validation failure carrying a usable
-                # `last_response_text` was handled by deterministic post-gates in
-                # `analyze()`. A failed optional repair must never replace that
-                # recoverable response with a newer transport/empty-output error.
+            else:
+                validator_repair_used = True
+                repair_prompt = _build_validator_repair_prompt(
+                    prompt,
+                    str(previous_response),
+                    exc,
+                )
+                repair_generation_config = _clamp_temperature(
+                    effective_generation_config,
+                    cap=_STRUCTURED_REPAIR_TEMPERATURE_CAP,
+                )
                 logger.warning(
-                    "[LLM结构修复] repair attempt failed; preserving original "
-                    "validated-response fallback for deterministic post-gates: %s",
-                    type(repair_exc).__name__,
+                    "[LLM结构修复] configured model chain returned content but failed "
+                    "validation; retrying once with evidence-aware repair prompt"
                 )
-                raise exc
+                try:
+                    text, model, usage = self._completion_callable(
+                        repair_prompt,
+                        repair_generation_config,
+                        system_prompt=system_prompt,
+                        # Repair JSON non-streaming to avoid partial-object failure modes.
+                        stream=False,
+                        stream_progress_callback=stream_progress_callback,
+                        response_validator=response_validator,
+                        audit_context=audit_context,
+                    )
+                except Exception as repair_exc:
+                    # Preserve the pre-existing analyzer safety contract. Before this
+                    # repair layer, an all-model validation failure carrying a usable
+                    # `last_response_text` was handled by deterministic post-gates in
+                    # `analyze()`. A failed optional repair must never replace that
+                    # recoverable response with a newer transport/empty-output error.
+                    logger.warning(
+                        "[LLM结构修复] repair attempt failed; preserving original "
+                        "validated-response fallback for deterministic post-gates: %s",
+                        type(repair_exc).__name__,
+                    )
+                    raise exc
 
         provider = str((usage or {}).get("provider") or _provider_from_model(model))
-        diagnostics = (
-            {"validator_repair_used": True}
-            if validator_repair_used
-            else {}
-        )
+        diagnostics: Dict[str, Any] = {}
+        if validator_repair_used:
+            diagnostics["validator_repair_used"] = True
+        if validator_local_json_repair_used:
+            diagnostics["validator_local_json_repair_used"] = True
         return GenerationResult(
             text=text,
             model=model,
