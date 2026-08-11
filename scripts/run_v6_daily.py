@@ -22,6 +22,7 @@ from src.v6_daily.accuracy_lab import (
     run_accuracy_lab,
 )
 from src.v6_daily.accuracy_report import build_accuracy_unified_report
+from src.v6_daily.decision_audit import FinalDecisionAuditStore
 from src.v6_daily.engine import V6DailyEngine
 from src.v6_daily.final_decision_renderer import (
     apply_final_decision_contract,
@@ -33,8 +34,9 @@ from src.v6_daily.final_decision_service import (
 )
 from src.v6_daily.free_sources import fetch_free_context
 from src.v6_daily.report import write_daily_report
-from src.v6_daily.store import V6DailyStore, mature_outcomes
+from src.v6_daily.store import mature_outcomes
 from src.v6_daily.unified_report import count_v4_structured_records
+from src.v6_daily.versioned_store import VersionedV6DailyStore
 
 
 logger = logging.getLogger("v6_daily")
@@ -221,8 +223,11 @@ def run(
     accuracy_lab_max_holding_bars: int = DEFAULT_MAX_HOLDING_BARS,
     accuracy_lab_promotion_min_samples: int = DEFAULT_PROMOTION_MIN_SAMPLES,
 ) -> Dict[str, Any]:
-    store = V6DailyStore(v6_db_path)
     engine = V6DailyEngine()
+    store = VersionedV6DailyStore(
+        v6_db_path,
+        active_engine_version=engine.version,
+    )
     records = read_analysis_records(stock_db_path, limit=max(1, int(limit)))
 
     source_codes = list(
@@ -268,7 +273,7 @@ def run(
 
     for record, provisional_signal in provisional:
         history_id = int(record.get("id") or 0)
-        if store.has_analysis_history_id(history_id):
+        if store.has_analysis_history_version(history_id):
             skipped_existing += 1
             continue
 
@@ -356,6 +361,8 @@ def run(
         "new_trade_outcomes": lab_run.get("new_trade_outcomes", 0),
         "promotion_candidates": len(accuracy_lab.get("promotion_candidates") or []),
         "quick_check": quick,
+        "signal_identity_migrated": store.signal_identity_migrated,
+        "active_engine_version": engine.version,
         "free_source_enrichment": (public_context.get("status") or {}).get("enabled", False),
         "external_numeric_trade_date": latest_effective_date if external_numeric_signals else None,
         "external_numeric_signals": external_numeric_signals,
@@ -373,7 +380,15 @@ def run(
     # Keep the existing report writer stable while exposing V6.2 research data
     # to the unified report and machine-readable daily payload.
     payload["accuracy_lab"] = accuracy_lab
+    final_packets = build_final_decision_packets(payload, v4_records=records)
     payload["final_decisions"] = build_final_decision_payload(payload, v4_records=records)
+    decision_audit = FinalDecisionAuditStore(v6_db_path).persist_packets(
+        payload,
+        final_packets,
+        report_date=report_date,
+        source_engine_version=engine.version,
+    )
+    payload["decision_audit"] = decision_audit
     (Path(report_dir) / "v6_daily_latest.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -402,6 +417,7 @@ def run(
         "run": run_stats,
         "scoreboard_status": (payload.get("scoreboard") or {}).get("status"),
         "final_decisions": (payload.get("final_decisions") or {}).get("summary") or {},
+        "decision_audit": decision_audit,
         "accuracy_lab": {
             "version": accuracy_lab.get("version"),
             "status": accuracy_lab.get("status"),
