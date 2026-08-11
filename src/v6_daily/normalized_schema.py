@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-NORMALIZED_SCHEMA_REGISTRY_VERSION = "v6-normalized-schema-registry-v1"
+NORMALIZED_SCHEMA_REGISTRY_VERSION = "v6-normalized-schema-registry-v2"
 NORMALIZED_CORE_SCHEMA_VERSION = "v6-normalized-core-v1"
+NORMALIZED_ACCURACY_LAB_SCHEMA_VERSION = "v6-normalized-accuracy-lab-v1"
 CORE_MIGRATION_ID = "0001-normalized-core"
+ACCURACY_LAB_MIGRATION_ID = "0002-normalized-accuracy-lab"
 
 _CORE_DDL = """
 CREATE TABLE IF NOT EXISTS v6_run_manifests (
@@ -146,6 +148,96 @@ CREATE INDEX IF NOT EXISTS ix_v6_forecast_outcomes_horizon
     ON v6_forecast_outcomes(horizon_days, evaluated_at, id);
 """.strip()
 
+_ACCURACY_LAB_DDL = """
+CREATE TABLE IF NOT EXISTS v6_accuracy_shadow_forecasts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    forecast_run_id INTEGER NOT NULL,
+    source_signal_id INTEGER NOT NULL,
+    variant TEXT NOT NULL,
+    horizon_days INTEGER NOT NULL,
+    generated_at TEXT NOT NULL,
+    score REAL,
+    direction TEXT NOT NULL,
+    evidence_coverage REAL NOT NULL,
+    profile_json TEXT NOT NULL,
+    UNIQUE(forecast_run_id, variant, horizon_days),
+    FOREIGN KEY(forecast_run_id)
+        REFERENCES v6_forecast_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS v6_accuracy_shadow_outcomes (
+    shadow_forecast_id INTEGER PRIMARY KEY,
+    evaluated_at TEXT NOT NULL,
+    end_trade_date TEXT NOT NULL,
+    start_price REAL NOT NULL,
+    end_price REAL NOT NULL,
+    return_pct REAL NOT NULL,
+    directional_hit INTEGER,
+    benchmark_spy_return_pct REAL,
+    excess_vs_spy_pct REAL,
+    FOREIGN KEY(shadow_forecast_id)
+        REFERENCES v6_accuracy_shadow_forecasts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS v6_accuracy_trade_outcomes (
+    forecast_run_id INTEGER NOT NULL,
+    source_signal_id INTEGER NOT NULL,
+    execution_policy TEXT NOT NULL,
+    evaluated_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    entry_trade_date TEXT,
+    exit_trade_date TEXT,
+    entry_price REAL,
+    exit_price REAL,
+    return_pct REAL,
+    r_multiple REAL,
+    win INTEGER,
+    exit_reason TEXT,
+    holding_bars INTEGER,
+    mfe_pct REAL,
+    mae_pct REAL,
+    cost_bps REAL NOT NULL,
+    max_holding_bars INTEGER NOT NULL,
+    PRIMARY KEY(forecast_run_id, execution_policy),
+    FOREIGN KEY(forecast_run_id)
+        REFERENCES v6_forecast_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_v6_accuracy_shadow_variant_horizon
+    ON v6_accuracy_shadow_forecasts(variant, horizon_days, forecast_run_id);
+CREATE INDEX IF NOT EXISTS ix_v6_accuracy_shadow_outcomes_eval
+    ON v6_accuracy_shadow_outcomes(evaluated_at);
+CREATE INDEX IF NOT EXISTS ix_v6_accuracy_trade_policy
+    ON v6_accuracy_trade_outcomes(execution_policy, status, evaluated_at);
+""".strip()
+
+_MIGRATIONS = (
+    (
+        CORE_MIGRATION_ID,
+        "normalized_core",
+        NORMALIZED_CORE_SCHEMA_VERSION,
+        _CORE_DDL,
+    ),
+    (
+        ACCURACY_LAB_MIGRATION_ID,
+        "normalized_accuracy_lab",
+        NORMALIZED_ACCURACY_LAB_SCHEMA_VERSION,
+        _ACCURACY_LAB_DDL,
+    ),
+)
+
+_REQUIRED_TABLES = {
+    "v6_run_manifests",
+    "v6_forecast_runs",
+    "v6_horizon_forecasts",
+    "v6_decision_runs",
+    "v6_execution_plans",
+    "v6_forecast_outcomes",
+    "v6_accuracy_shadow_forecasts",
+    "v6_accuracy_shadow_outcomes",
+    "v6_accuracy_trade_outcomes",
+}
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -167,15 +259,23 @@ def _connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def ensure_normalized_schema(path: str | Path) -> Dict[str, Any]:
-    """Apply the registered normalized-core migrations idempotently.
+def _registry_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT migration_id, component, schema_version, checksum, applied_at
+        FROM v6_schema_migrations ORDER BY migration_id
+        """
+    ).fetchall()
 
-    Existing Stage 5-10 databases are adopted without rebuilding tables: the
-    canonical DDL is re-applied with IF NOT EXISTS and then recorded in the
-    registry. A checksum mismatch for an already-recorded migration fails closed.
+
+def ensure_normalized_schema(path: str | Path) -> Dict[str, Any]:
+    """Apply all registered normalized migrations idempotently.
+
+    Existing Stage 5-11 databases are adopted in place. Each migration is
+    checksum-pinned; an already-recorded checksum mismatch fails closed.
+    Accuracy Lab tables are part of the same registry from Stage 12 onward.
     """
-    ddl_checksum = _checksum(_CORE_DDL)
-    applied_now = False
+    applied_now_ids: list[str] = []
     with _connect(path) as conn:
         conn.execute(
             """
@@ -188,32 +288,35 @@ def ensure_normalized_schema(path: str | Path) -> Dict[str, Any]:
             )
             """
         )
-        row = conn.execute(
-            "SELECT checksum, schema_version FROM v6_schema_migrations WHERE migration_id=?",
-            (CORE_MIGRATION_ID,),
-        ).fetchone()
-        if row is not None and str(row["checksum"]) != ddl_checksum:
-            raise RuntimeError(
-                "normalized schema migration checksum mismatch for "
-                f"{CORE_MIGRATION_ID}: {row['checksum']} != {ddl_checksum}"
-            )
-        conn.executescript(_CORE_DDL)
-        if row is None:
-            conn.execute(
-                """
-                INSERT INTO v6_schema_migrations(
-                    migration_id, component, schema_version, checksum, applied_at
-                ) VALUES (?,?,?,?,?)
-                """,
-                (
-                    CORE_MIGRATION_ID,
-                    "normalized_core",
-                    NORMALIZED_CORE_SCHEMA_VERSION,
-                    ddl_checksum,
-                    _utc_now(),
-                ),
-            )
-            applied_now = True
+
+        for migration_id, component, schema_version, ddl in _MIGRATIONS:
+            ddl_checksum = _checksum(ddl)
+            row = conn.execute(
+                "SELECT checksum, schema_version FROM v6_schema_migrations WHERE migration_id=?",
+                (migration_id,),
+            ).fetchone()
+            if row is not None and str(row["checksum"]) != ddl_checksum:
+                raise RuntimeError(
+                    "normalized schema migration checksum mismatch for "
+                    f"{migration_id}: {row['checksum']} != {ddl_checksum}"
+                )
+            conn.executescript(ddl)
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO v6_schema_migrations(
+                        migration_id, component, schema_version, checksum, applied_at
+                    ) VALUES (?,?,?,?,?)
+                    """,
+                    (
+                        migration_id,
+                        component,
+                        schema_version,
+                        ddl_checksum,
+                        _utc_now(),
+                    ),
+                )
+                applied_now_ids.append(migration_id)
 
         quick = str(conn.execute("PRAGMA quick_check").fetchone()[0])
         fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
@@ -223,21 +326,8 @@ def ensure_normalized_schema(path: str | Path) -> Dict[str, Any]:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        required = {
-            "v6_run_manifests",
-            "v6_forecast_runs",
-            "v6_horizon_forecasts",
-            "v6_decision_runs",
-            "v6_execution_plans",
-            "v6_forecast_outcomes",
-        }
-        missing = sorted(required - tables)
-        rows = conn.execute(
-            """
-            SELECT migration_id, component, schema_version, checksum, applied_at
-            FROM v6_schema_migrations ORDER BY migration_id
-            """
-        ).fetchall()
+        missing = sorted(_REQUIRED_TABLES - tables)
+        rows = _registry_rows(conn)
 
     current = quick.strip().lower() == "ok" and not fk_errors and not missing
     if not current:
@@ -248,9 +338,11 @@ def ensure_normalized_schema(path: str | Path) -> Dict[str, Any]:
     return {
         "registry_version": NORMALIZED_SCHEMA_REGISTRY_VERSION,
         "core_schema_version": NORMALIZED_CORE_SCHEMA_VERSION,
+        "accuracy_lab_schema_version": NORMALIZED_ACCURACY_LAB_SCHEMA_VERSION,
         "status": "current",
         "pending_migrations": [],
-        "applied_now": applied_now,
+        "applied_now": bool(applied_now_ids),
+        "applied_migrations": applied_now_ids,
         "migration_count": len(rows),
         "migrations": [dict(item) for item in rows],
         "quick_check": quick,
@@ -261,12 +353,14 @@ def ensure_normalized_schema(path: str | Path) -> Dict[str, Any]:
 
 def normalized_schema_status(path: str | Path) -> Dict[str, Any]:
     target = Path(path)
+    expected_ids = [item[0] for item in _MIGRATIONS]
     if not target.is_file():
         return {
             "registry_version": NORMALIZED_SCHEMA_REGISTRY_VERSION,
             "core_schema_version": NORMALIZED_CORE_SCHEMA_VERSION,
+            "accuracy_lab_schema_version": NORMALIZED_ACCURACY_LAB_SCHEMA_VERSION,
             "status": "missing_database",
-            "pending_migrations": [CORE_MIGRATION_ID],
+            "pending_migrations": expected_ids,
             "migration_count": 0,
             "migrations": [],
         }
@@ -281,25 +375,29 @@ def normalized_schema_status(path: str | Path) -> Dict[str, Any]:
             return {
                 "registry_version": NORMALIZED_SCHEMA_REGISTRY_VERSION,
                 "core_schema_version": NORMALIZED_CORE_SCHEMA_VERSION,
+                "accuracy_lab_schema_version": NORMALIZED_ACCURACY_LAB_SCHEMA_VERSION,
                 "status": "unregistered",
-                "pending_migrations": [CORE_MIGRATION_ID],
+                "pending_migrations": expected_ids,
                 "migration_count": 0,
                 "migrations": [],
             }
-        rows = conn.execute(
-            "SELECT migration_id, component, schema_version, checksum, applied_at FROM v6_schema_migrations ORDER BY migration_id"
-        ).fetchall()
+        rows = _registry_rows(conn)
         applied = {str(row["migration_id"]) for row in rows}
-        pending = [] if CORE_MIGRATION_ID in applied else [CORE_MIGRATION_ID]
+        pending = [migration_id for migration_id in expected_ids if migration_id not in applied]
         quick = str(conn.execute("PRAGMA quick_check").fetchone()[0])
         fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
+        missing = sorted(_REQUIRED_TABLES - tables)
+
+    status = "current" if not pending and not missing and quick.strip().lower() == "ok" and not fk_errors else "pending"
     return {
         "registry_version": NORMALIZED_SCHEMA_REGISTRY_VERSION,
         "core_schema_version": NORMALIZED_CORE_SCHEMA_VERSION,
-        "status": "current" if not pending and quick.strip().lower() == "ok" and not fk_errors else "pending",
+        "accuracy_lab_schema_version": NORMALIZED_ACCURACY_LAB_SCHEMA_VERSION,
+        "status": status,
         "pending_migrations": pending,
         "migration_count": len(rows),
         "migrations": [dict(item) for item in rows],
         "quick_check": quick,
         "foreign_key_errors": len(fk_errors),
+        "missing_tables": missing,
     }
