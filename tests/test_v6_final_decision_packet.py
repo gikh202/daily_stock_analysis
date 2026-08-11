@@ -83,7 +83,7 @@ def test_watch_active_plan_becomes_final_conditional_buy_only_after_fusion() -> 
     assert packet.agreement == FusionAgreement.ALIGNED
     assert packet.assessment.verdict == FinalVerdict.CONDITIONAL_BUY
     assert packet.assessment.worth_buying is True
-    assert packet.assessment.execution_authorized is True
+    assert packet.assessment.execution_authorized is False
     assert packet.execution.has_active_plan is True
     assert action_label_zh(packet) == "观察"
     assert "多头排列且相对强弱领先" in packet.assessment.bullish_evidence
