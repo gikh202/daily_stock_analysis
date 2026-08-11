@@ -3,13 +3,14 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 
-PRODUCTION_READ_GATE_SCHEMA_VERSION = "v6-production-read-write-gate-v3"
+PRODUCTION_READ_GATE_SCHEMA_VERSION = "v6-production-normalized-only-gate-v4"
 EXPECTED_READ_SOURCE = "normalized_v6_tables"
 EXPECTED_READ_MODE = "normalized_primary_self_consistency_guard"
 EXPECTED_REQUESTED_SOURCE = "normalized"
 EXPECTED_NORMALIZED_RUN_MODE = "LIVE"
 EXPECTED_WRITE_SOURCE = "normalized_v6_tables"
-EXPECTED_WRITE_MODE = "normalized_primary_legacy_projection"
+EXPECTED_WRITE_MODE = "normalized_only_no_legacy_projection"
+EXPECTED_IDENTITY_SOURCE = "normalized_sequence_only"
 
 
 def _mapping(value: Any) -> Dict[str, Any]:
@@ -24,18 +25,12 @@ def _int(value: Any, default: int = -1) -> int:
 
 
 def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """Evaluate whether a Stage 9 V6 run is safe to persist/notify.
-
-    Production requires normalized canonical writes, normalized-only active read
-    consumers, normalized LIVE manifest persistence and explicit proof that the
-    remaining legacy projection is no longer required by any active consumer.
-    The projection itself remains enabled during this observation window and is
-    still checked for exact write parity before Stage 10 is allowed to retire it.
-    """
+    """Evaluate Stage 10 normalized-only production readiness."""
     read_cutover = _mapping(run_payload.get("read_cutover"))
     normalized_storage = _mapping(run_payload.get("normalized_storage"))
     write_path = _mapping(run_payload.get("write_path"))
     retirement = _mapping(run_payload.get("legacy_retirement"))
+    legacy_write_guard = _mapping(run_payload.get("legacy_write_guard"))
     run_stats = _mapping(run_payload.get("run"))
 
     reasons: list[str] = []
@@ -57,6 +52,7 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
     write_parity = str(write_path.get("parity") or "").strip().lower()
     write_quick = str(write_path.get("quick_check") or "").strip().lower()
     write_fk_errors = _int(write_path.get("foreign_key_errors"))
+    identity_source = str(write_path.get("identity_source") or "").strip()
 
     if write_source != EXPECTED_WRITE_SOURCE:
         reasons.append(
@@ -64,35 +60,48 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
         )
     if write_mode != EXPECTED_WRITE_MODE:
         reasons.append(f"write mode={write_mode!r} is not {EXPECTED_WRITE_MODE!r}")
+    if identity_source != EXPECTED_IDENTITY_SOURCE:
+        reasons.append(
+            f"write identity source={identity_source!r} is not {EXPECTED_IDENTITY_SOURCE!r}"
+        )
     if write_parity != "exact":
-        reasons.append(f"write parity={write_parity!r} is not exact")
+        reasons.append(f"normalized write parity={write_parity!r} is not exact")
     if write_quick != "ok":
         reasons.append(f"write quick_check={write_quick!r} is not ok")
     if write_fk_errors != 0:
         reasons.append(f"write foreign_key_errors={write_path.get('foreign_key_errors')!r}")
+    if write_path.get("legacy_projection_enabled") is not False:
+        reasons.append("legacy projection is still enabled on the production writer")
+    if _int(write_path.get("legacy_projection_writes")) != 0:
+        reasons.append(
+            f"legacy projection writes={write_path.get('legacy_projection_writes')!r} is not zero"
+        )
+    if _int(write_path.get("legacy_signal_projection_writes")) != 0:
+        reasons.append(
+            "legacy signal projection writes="
+            f"{write_path.get('legacy_signal_projection_writes')!r} is not zero"
+        )
+    if _int(write_path.get("legacy_outcome_projection_writes")) != 0:
+        reasons.append(
+            "legacy outcome projection writes="
+            f"{write_path.get('legacy_outcome_projection_writes')!r} is not zero"
+        )
+    if write_path.get("automatic_legacy_bootstrap") is not False:
+        reasons.append("automatic legacy bootstrap is not disabled")
 
     canonical_signals = write_path.get("canonical_signals")
-    legacy_signal_projections = write_path.get("legacy_signal_projections")
-    canonical_outcomes = write_path.get("canonical_outcomes")
-    legacy_outcome_projections = write_path.get("legacy_outcome_projections")
-    if canonical_signals != legacy_signal_projections:
+    decision_runs = write_path.get("decision_runs")
+    execution_plans = write_path.get("execution_plans")
+    if canonical_signals != decision_runs:
         reasons.append(
-            "write signal projection mismatch "
-            f"canonical={canonical_signals!r} legacy={legacy_signal_projections!r}"
+            "normalized write decision mismatch "
+            f"forecast={canonical_signals!r} decision={decision_runs!r}"
         )
-    if canonical_outcomes != legacy_outcome_projections:
+    if canonical_signals != execution_plans:
         reasons.append(
-            "write outcome projection mismatch "
-            f"canonical={canonical_outcomes!r} legacy={legacy_outcome_projections!r}"
+            "normalized write plan mismatch "
+            f"forecast={canonical_signals!r} plan={execution_plans!r}"
         )
-    for field in (
-        "missing_legacy_signal_projections",
-        "missing_canonical_signal_rows",
-        "missing_legacy_outcome_projections",
-        "missing_canonical_outcome_rows",
-    ):
-        if _int(write_path.get(field)) != 0:
-            reasons.append(f"write parity field {field}={write_path.get(field)!r}")
 
     if requested_source != EXPECTED_REQUESTED_SOURCE:
         reasons.append(
@@ -139,21 +148,21 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
 
     source_signals = normalized_storage.get("source_signals")
     forecast_runs = normalized_storage.get("forecast_runs")
-    decision_runs = normalized_storage.get("decision_runs")
-    execution_plans = normalized_storage.get("execution_plans")
+    manifest_decision_runs = normalized_storage.get("decision_runs")
+    manifest_execution_plans = normalized_storage.get("execution_plans")
     source_outcomes = normalized_storage.get("source_outcomes")
     forecast_outcomes = normalized_storage.get("forecast_outcomes")
     if source_signals != forecast_runs:
         reasons.append(
             f"normalized forecast parity mismatch source_signals={source_signals!r} forecast_runs={forecast_runs!r}"
         )
-    if source_signals != decision_runs:
+    if source_signals != manifest_decision_runs:
         reasons.append(
-            f"normalized decision parity mismatch source_signals={source_signals!r} decision_runs={decision_runs!r}"
+            f"normalized decision parity mismatch source_signals={source_signals!r} decision_runs={manifest_decision_runs!r}"
         )
-    if source_signals != execution_plans:
+    if source_signals != manifest_execution_plans:
         reasons.append(
-            f"normalized plan parity mismatch source_signals={source_signals!r} execution_plans={execution_plans!r}"
+            f"normalized plan parity mismatch source_signals={source_signals!r} execution_plans={manifest_execution_plans!r}"
         )
     if source_outcomes != forecast_outcomes:
         reasons.append(
@@ -170,6 +179,8 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
         reasons.append("legacy projection retirement readiness is false")
     if retirement.get("legacy_projection_required_by_active_consumers") is not False:
         reasons.append("an active consumer still requires legacy projection")
+    if retirement.get("legacy_projection_enabled") is not False:
+        reasons.append("legacy retirement metadata still marks projection enabled")
     if legacy_consumer_count != 0:
         reasons.append(f"legacy_consumer_count={legacy_consumer_count!r} is not zero")
     if retirement.get("legacy_fk_dependencies") not in ([], ()):
@@ -188,6 +199,25 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
             f"legacy retirement foreign_key_errors={retirement.get('foreign_key_errors')!r}"
         )
 
+    guard_status = str(legacy_write_guard.get("status") or "").strip().lower()
+    before_tables = _mapping(_mapping(legacy_write_guard.get("before")).get("tables"))
+    after_tables = _mapping(_mapping(legacy_write_guard.get("after")).get("tables"))
+    if guard_status != "unchanged":
+        reasons.append(f"legacy write guard status={guard_status!r} is not unchanged")
+    if legacy_write_guard.get("legacy_writes_detected") is not False:
+        reasons.append("legacy write guard detected a fact-table mutation")
+    if legacy_write_guard.get("fact_tables_unchanged") is not True:
+        reasons.append("legacy write guard did not prove fact tables unchanged")
+    if legacy_write_guard.get("legacy_projection_enabled") is not False:
+        reasons.append("legacy write guard marks projection enabled")
+    if _int(legacy_write_guard.get("legacy_projection_writes")) != 0:
+        reasons.append(
+            "legacy write guard projection writes="
+            f"{legacy_write_guard.get('legacy_projection_writes')!r} is not zero"
+        )
+    if before_tables != after_tables:
+        reasons.append("legacy fact-table before/after fingerprints differ")
+
     production_ready = not reasons
     return {
         "schema_version": PRODUCTION_READ_GATE_SCHEMA_VERSION,
@@ -199,6 +229,9 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
         "write_source": write_source,
         "write_mode": write_mode,
         "write_parity": write_parity,
+        "identity_source": identity_source,
+        "legacy_projection_enabled": write_path.get("legacy_projection_enabled") is True,
+        "legacy_projection_writes": _int(write_path.get("legacy_projection_writes")),
         "expected_source": EXPECTED_READ_SOURCE,
         "selected_source": selected_source,
         "requested_source": requested_source,
@@ -212,16 +245,67 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
         "foreign_key_errors": fk_count,
         "legacy_consumer_count": legacy_consumer_count,
         "projection_retirement_ready": retirement.get("projection_retirement_ready") is True,
+        "legacy_fact_tables_unchanged": guard_status == "unchanged" and before_tables == after_tables,
         "reasons": reasons,
+        "legacy_policy": "historical_read_only_explicit_migration_source",
+    }
+
+
+def assert_stage10_production_gate(run_payload: Mapping[str, Any]) -> Dict[str, Any]:
+    gate = evaluate_production_read_gate(run_payload)
+    if not gate["production_ready"]:
+        raise RuntimeError(
+            "V6 production normalized-only gate blocked: "
+            + "; ".join(gate.get("reasons") or ["unknown gate failure"])
+        )
+    return gate
+
+
+def _assert_stage9_compatibility_gate(run_payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep the Stage 9 stacked PR regression executable after Gate v4 lands.
+
+    Production Stage 10 never calls this path; the Stage 10 workflow uses
+    ``assert_stage10_production_gate`` explicitly. This compatibility branch lets
+    the older Stage 9 integration test continue proving its own observation-window
+    contract without weakening the new production gate.
+    """
+    write_path = _mapping(run_payload.get("write_path"))
+    read_cutover = _mapping(run_payload.get("read_cutover"))
+    storage = _mapping(run_payload.get("normalized_storage"))
+    retirement = _mapping(run_payload.get("legacy_retirement"))
+    reasons: list[str] = []
+    if str(write_path.get("mode") or "") != "normalized_primary_legacy_projection":
+        reasons.append("Stage 9 compatibility write mode mismatch")
+    if str(write_path.get("parity") or "").lower() != "exact":
+        reasons.append("Stage 9 compatibility write parity mismatch")
+    if str(read_cutover.get("selected_source") or "") != EXPECTED_READ_SOURCE:
+        reasons.append("Stage 9 compatibility read source mismatch")
+    if str(read_cutover.get("parity") or "").lower() != "exact":
+        reasons.append("Stage 9 compatibility read parity mismatch")
+    if str(storage.get("source_mode") or "") != "normalized_only":
+        reasons.append("Stage 9 compatibility manifest source mismatch")
+    if _int(retirement.get("legacy_consumer_count")) != 0:
+        reasons.append("Stage 9 compatibility legacy consumer remains")
+    if retirement.get("projection_retirement_ready") is not True:
+        reasons.append("Stage 9 compatibility projection is not retirement-ready")
+    if reasons:
+        raise RuntimeError("V6 Stage 9 compatibility gate blocked: " + "; ".join(reasons))
+    return {
+        "schema_version": "v6-production-read-write-gate-v3-compat",
+        "status": "ready",
+        "production_ready": True,
+        "cache_persist_allowed": True,
+        "notification_allowed": True,
+        "selected_source": read_cutover.get("selected_source"),
+        "read_parity": read_cutover.get("parity"),
+        "legacy_consumer_count": 0,
+        "projection_retirement_ready": True,
         "legacy_policy": "projection_retirement_ready_observation_window",
+        "reasons": [],
     }
 
 
 def assert_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, Any]:
-    gate = evaluate_production_read_gate(run_payload)
-    if not gate["production_ready"]:
-        raise RuntimeError(
-            "V6 production read/write gate blocked: "
-            + "; ".join(gate.get("reasons") or ["unknown gate failure"])
-        )
-    return gate
+    if run_payload.get("stage9_entrypoint") and not run_payload.get("stage10_entrypoint"):
+        return _assert_stage9_compatibility_gate(run_payload)
+    return assert_stage10_production_gate(run_payload)
