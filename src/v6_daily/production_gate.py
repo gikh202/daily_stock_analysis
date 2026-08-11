@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 
-PRODUCTION_READ_GATE_SCHEMA_VERSION = "v6-production-read-write-gate-v2"
+PRODUCTION_READ_GATE_SCHEMA_VERSION = "v6-production-read-write-gate-v3"
 EXPECTED_READ_SOURCE = "normalized_v6_tables"
-EXPECTED_READ_MODE = "normalized_primary_with_legacy_parity_guard"
+EXPECTED_READ_MODE = "normalized_primary_self_consistency_guard"
 EXPECTED_REQUESTED_SOURCE = "normalized"
 EXPECTED_NORMALIZED_RUN_MODE = "LIVE"
 EXPECTED_WRITE_SOURCE = "normalized_v6_tables"
@@ -24,22 +24,18 @@ def _int(value: Any, default: int = -1) -> int:
 
 
 def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """Evaluate whether a V6 run is safe to persist/notify as production.
+    """Evaluate whether a Stage 9 V6 run is safe to persist/notify.
 
-    Production now requires both sides of the storage cutover:
-
-    1. normalized tables are the canonical write destination and legacy tables
-       are only exact compatibility projections;
-    2. normalized tables are also the outward production read source with exact
-       business parity, healthy SQLite integrity and LIVE run semantics.
-
-    Legacy reads/writes remain available only as migration compatibility and
-    diagnostics. They cannot independently authorize a production cache save or
-    final notification.
+    Production requires normalized canonical writes, normalized-only active read
+    consumers, normalized LIVE manifest persistence and explicit proof that the
+    remaining legacy projection is no longer required by any active consumer.
+    The projection itself remains enabled during this observation window and is
+    still checked for exact write parity before Stage 10 is allowed to retire it.
     """
     read_cutover = _mapping(run_payload.get("read_cutover"))
     normalized_storage = _mapping(run_payload.get("normalized_storage"))
     write_path = _mapping(run_payload.get("write_path"))
+    retirement = _mapping(run_payload.get("legacy_retirement"))
     run_stats = _mapping(run_payload.get("run"))
 
     reasons: list[str] = []
@@ -112,6 +108,12 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
         reasons.append(f"read parity={read_parity!r} is not exact")
     if read_cutover.get("fail_closed") is not True:
         reasons.append("read cutover is not fail_closed")
+    if read_cutover.get("legacy_reference_used") is not False:
+        reasons.append("production read cutover still depends on a legacy reference")
+    if _int(read_cutover.get("legacy_consumer_count")) != 0:
+        reasons.append(
+            f"read cutover legacy_consumer_count={read_cutover.get('legacy_consumer_count')!r}"
+        )
     if read_quick != "ok":
         reasons.append(f"normalized read quick_check={read_quick!r} is not ok")
     fk_count = _int(foreign_key_errors)
@@ -125,6 +127,12 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
     if storage_run_mode != EXPECTED_NORMALIZED_RUN_MODE:
         reasons.append(
             f"normalized storage run_mode={storage_run_mode!r} is not {EXPECTED_NORMALIZED_RUN_MODE!r}"
+        )
+    if normalized_storage.get("legacy_reference_used") is not False:
+        reasons.append("LIVE manifest persistence still uses a legacy reference")
+    if str(normalized_storage.get("source_mode") or "").strip() != "normalized_only":
+        reasons.append(
+            f"normalized storage source_mode={normalized_storage.get('source_mode')!r}"
         )
     if run_quick != "ok":
         reasons.append(f"run quick_check={run_quick!r} is not ok")
@@ -152,6 +160,34 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
             f"normalized outcome parity mismatch source_outcomes={source_outcomes!r} forecast_outcomes={forecast_outcomes!r}"
         )
 
+    retirement_status = str(retirement.get("status") or "").strip()
+    retirement_quick = str(retirement.get("quick_check") or "").strip().lower()
+    retirement_fk_errors = _int(retirement.get("foreign_key_errors"))
+    legacy_consumer_count = _int(retirement.get("legacy_consumer_count"))
+    if retirement_status != "retirement_ready":
+        reasons.append(f"legacy retirement status={retirement_status!r} is not ready")
+    if retirement.get("projection_retirement_ready") is not True:
+        reasons.append("legacy projection retirement readiness is false")
+    if retirement.get("legacy_projection_required_by_active_consumers") is not False:
+        reasons.append("an active consumer still requires legacy projection")
+    if legacy_consumer_count != 0:
+        reasons.append(f"legacy_consumer_count={legacy_consumer_count!r} is not zero")
+    if retirement.get("legacy_fk_dependencies") not in ([], ()):
+        reasons.append(
+            f"legacy FK dependencies remain: {retirement.get('legacy_fk_dependencies')!r}"
+        )
+    if retirement.get("missing_normalized_dependencies") not in ([], ()):
+        reasons.append(
+            "normalized retirement dependencies missing: "
+            f"{retirement.get('missing_normalized_dependencies')!r}"
+        )
+    if retirement_quick != "ok":
+        reasons.append(f"legacy retirement quick_check={retirement_quick!r} is not ok")
+    if retirement_fk_errors != 0:
+        reasons.append(
+            f"legacy retirement foreign_key_errors={retirement.get('foreign_key_errors')!r}"
+        )
+
     production_ready = not reasons
     return {
         "schema_version": PRODUCTION_READ_GATE_SCHEMA_VERSION,
@@ -166,6 +202,7 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
         "expected_source": EXPECTED_READ_SOURCE,
         "selected_source": selected_source,
         "requested_source": requested_source,
+        "read_mode": read_mode,
         "read_parity": read_parity,
         "normalized_storage_parity": storage_parity,
         "write_quick_check": write_quick,
@@ -173,8 +210,10 @@ def evaluate_production_read_gate(run_payload: Mapping[str, Any]) -> Dict[str, A
         "normalized_storage_quick_check": storage_quick,
         "write_foreign_key_errors": write_fk_errors,
         "foreign_key_errors": fk_count,
+        "legacy_consumer_count": legacy_consumer_count,
+        "projection_retirement_ready": retirement.get("projection_retirement_ready") is True,
         "reasons": reasons,
-        "legacy_policy": "compatibility_projection_and_diagnostics_only",
+        "legacy_policy": "projection_retirement_ready_observation_window",
     }
 
 
