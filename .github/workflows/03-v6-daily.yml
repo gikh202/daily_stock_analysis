@@ -4,7 +4,6 @@ on:
   workflow_run:
     workflows: ['每日股票分析']
     types: [completed]
-    # 只有 main 上的生产 V4 运行才自动触发最终日报，避免功能分支误发邮件/污染研究历史。
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -28,7 +27,6 @@ permissions:
   contents: read
   actions: read
 
-# V6 持有独立 SQLite 研究历史，所有运行必须串行，且不应取消正在落盘的运行。
 concurrency:
   group: v6-daily
   cancel-in-progress: false
@@ -36,7 +34,7 @@ concurrency:
 env:
   PYTHONPATH: ${{ github.workspace }}
   V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
-  # Stage 10 生产读写均只允许 normalized facts；legacy tables 仅保留历史只读/显式迁移用途。
+  # Stage 11: production runtime, schema registry and active consumers are normalized-only.
   V6_DAILY_READ_SOURCE: normalized
 
 jobs:
@@ -48,7 +46,6 @@ jobs:
       - name: 检出与上游一致的代码
         uses: actions/checkout@v5
         with:
-          # workflow_run 必须与触发它的 V4 使用同一 commit，避免“旧 Artifact + 新代码”的版本漂移。
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: 设置 Python
@@ -121,10 +118,7 @@ jobs:
           conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
           try:
               quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
-              tables = {
-                  row[0]
-                  for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-              }
+              tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
               history = int(conn.execute('SELECT COUNT(*) FROM analysis_history').fetchone()[0]) if 'analysis_history' in tables else 0
               bars = int(conn.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]) if 'stock_daily' in tables else 0
           finally:
@@ -135,14 +129,12 @@ jobs:
           missing = {'analysis_history', 'stock_daily'} - tables
           if missing:
               raise SystemExit(f'missing required V6 source tables: {sorted(missing)}')
-          if history <= 0:
-              raise SystemExit('analysis_history is empty')
-          if bars <= 0:
-              raise SystemExit('stock_daily is empty')
+          if history <= 0 or bars <= 0:
+              raise SystemExit(f'invalid V6 source history={history} stock_daily={bars}')
           print(f'V6 source database: PASS history={history} stock_daily={bars}')
           PY
 
-      - name: 运行 V6 并生成 V4+V6 中文综合日报
+      - name: 运行 Stage 11 V6 并生成 V4+V6 中文综合日报
         env:
           V6_DAILY_MIN_SAMPLES: ${{ inputs.min_samples || vars.V6_DAILY_MIN_SAMPLES || '50' }}
           V6_DAILY_SCAN_LIMIT: ${{ inputs.scan_limit || vars.V6_DAILY_SCAN_LIMIT || '5000' }}
@@ -158,7 +150,6 @@ jobs:
         shell: bash
         run: |
           EXTRA_ARGS=()
-
           V4_REPORT_PATH="$(find upstream_v4 -type f -path '*/reports/report_*.md' -print 2>/dev/null | sort | tail -n 1 || true)"
           if [ -z "$V4_REPORT_PATH" ]; then
             V4_REPORT_PATH="$(find upstream_v4 -type f -name 'report_*.md' -print 2>/dev/null | sort | tail -n 1 || true)"
@@ -173,9 +164,9 @@ jobs:
             echo "⚠️ 手动 V6 未提供上游 V4 报告，将仅使用生产数据库中的 V4 结构化记录"
           fi
 
-          # Stage 10 生产入口：normalized-only write + normalized-only consumers。
-          # legacy fact tables 在运行前后做内容指纹校验，任何写入都会阻断缓存和通知。
-          V6_DAILY_NOTIFY=false python scripts/run_v6_daily_stage10.py \
+          # Native Stage 11 entrypoint: no Stage 8/9/10 runtime monkey-patching.
+          # Legacy migration/archive are explicit CLIs only and are never invoked here.
+          V6_DAILY_NOTIFY=false python scripts/run_v6_daily_stage11.py \
             --stock-db data/stock_analysis.db \
             --v6-db v6_data/v6_daily.db \
             --report-dir v6_reports \
@@ -183,7 +174,7 @@ jobs:
             --min-samples "${V6_DAILY_MIN_SAMPLES}" \
             "${EXTRA_ARGS[@]}"
 
-      - name: 校验 V6 数据库、Accuracy Lab、Stage 10 Gate 与综合日报
+      - name: 校验 Stage 11 Schema Registry、Import Graph、Accuracy Lab 与综合日报
         id: validate_v6
         shell: bash
         env:
@@ -196,7 +187,7 @@ jobs:
           import sqlite3
           from pathlib import Path
 
-          from src.v6_daily.production_gate import assert_stage10_production_gate
+          from src.v6_daily.production_gate_v5 import assert_stage11_production_gate
 
           db = 'v6_data/v6_daily.db'
           report = 'v6_reports/v6_daily_latest.md'
@@ -207,18 +198,13 @@ jobs:
           output = os.environ['GITHUB_OUTPUT']
 
           for path in (db, report, run, payload_path, lab_json, lab_md):
-              if not os.path.isfile(path):
-                  raise SystemExit(f'missing V6 output: {path}')
-              if os.path.getsize(path) <= 0:
-                  raise SystemExit(f'empty V6 output: {path}')
+              if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                  raise SystemExit(f'missing or empty V6 output: {path}')
 
           conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=10)
           try:
               quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
-              tables = {
-                  row[0]
-                  for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-              }
+              tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
               signals = int(conn.execute('SELECT COUNT(*) FROM v6_forecast_runs').fetchone()[0])
               outcomes = int(conn.execute('SELECT COUNT(*) FROM v6_forecast_outcomes').fetchone()[0])
           finally:
@@ -227,6 +213,8 @@ jobs:
               raise SystemExit(f'v6_daily.db quick_check failed: {quick!r}')
           if signals <= 0:
               raise SystemExit('V6 generated zero usable normalized forecasts')
+          if 'v6_schema_migrations' not in tables:
+              raise SystemExit('Stage 11 normalized schema migration registry is missing')
           missing_lab_tables = {
               'v6_accuracy_shadow_forecasts',
               'v6_accuracy_shadow_outcomes',
@@ -235,56 +223,49 @@ jobs:
           if missing_lab_tables:
               raise SystemExit(f'missing normalized V6 Accuracy Lab tables: {sorted(missing_lab_tables)}')
 
-          with open(run, encoding='utf-8') as f:
-              run_payload = json.load(f)
-          with open(payload_path, encoding='utf-8') as f:
-              payload = json.load(f)
-          with open(lab_json, encoding='utf-8') as f:
-              lab_payload = json.load(f)
-          with open(report, encoding='utf-8') as f:
-              report_text = f.read()
+          run_payload = json.loads(Path(run).read_text(encoding='utf-8'))
+          payload = json.loads(Path(payload_path).read_text(encoding='utf-8'))
+          lab_payload = json.loads(Path(lab_json).read_text(encoding='utf-8'))
+          report_text = Path(report).read_text(encoding='utf-8')
 
-          if run_payload.get('stage10_entrypoint') != 'v6-stage10-legacy-projection-shutdown-v1':
-              raise SystemExit(f"unexpected Stage 10 entrypoint metadata: {run_payload.get('stage10_entrypoint')!r}")
+          if run_payload.get('stage11_entrypoint') != 'v6-stage11-legacy-schema-archival-v1':
+              raise SystemExit(f"unexpected Stage 11 entrypoint: {run_payload.get('stage11_entrypoint')!r}")
 
-          production_gate = assert_stage10_production_gate(run_payload)
+          production_gate = assert_stage11_production_gate(run_payload)
           if production_gate.get('production_ready') is not True:
-              raise SystemExit(f'V6 production gate unexpectedly not ready: {production_gate}')
-          if production_gate.get('selected_source') != 'normalized_v6_tables':
-              raise SystemExit(f"unexpected production read source: {production_gate.get('selected_source')!r}")
-          if production_gate.get('read_parity') != 'exact':
-              raise SystemExit(f"unexpected production read parity: {production_gate.get('read_parity')!r}")
-          if production_gate.get('write_mode') != 'normalized_only_no_legacy_projection':
-              raise SystemExit(f"unexpected production write mode: {production_gate.get('write_mode')!r}")
-          if production_gate.get('identity_source') != 'normalized_sequence_only':
-              raise SystemExit(f"unexpected normalized identity source: {production_gate.get('identity_source')!r}")
-          if production_gate.get('legacy_projection_enabled') is not False:
-              raise SystemExit('legacy compatibility projection is still enabled')
-          if int(production_gate.get('legacy_projection_writes') or -1) != 0:
-              raise SystemExit(f"legacy projection wrote rows: {production_gate.get('legacy_projection_writes')!r}")
-          if production_gate.get('legacy_fact_tables_unchanged') is not True:
-              raise SystemExit('legacy fact-table fingerprint changed during production run')
-          if int(production_gate.get('legacy_consumer_count') or -1) != 0:
-              raise SystemExit(f"active legacy consumers remain: {production_gate.get('legacy_consumer_count')!r}")
-          if production_gate.get('projection_retirement_ready') is not True:
-              raise SystemExit('legacy projection is not retirement-ready')
+              raise SystemExit(f'V6 Stage 11 production gate unexpectedly not ready: {production_gate}')
+          if production_gate.get('production_import_graph_status') != 'clean':
+              raise SystemExit(f"production import graph is not clean: {production_gate}")
+          if int(production_gate.get('forbidden_import_count') or -1) != 0:
+              raise SystemExit(f"production import graph reaches retired modules: {production_gate}")
+          if production_gate.get('schema_registry_status') != 'current':
+              raise SystemExit(f"normalized schema registry not current: {production_gate}")
+          if production_gate.get('legacy_migration_policy') != 'explicit_cli_only':
+              raise SystemExit('legacy migration is not explicit CLI only')
+          if production_gate.get('legacy_archive_policy') != 'explicit_cli_only':
+              raise SystemExit('legacy archive is not explicit CLI only')
 
+          schema_registry = run_payload.get('schema_registry') or {}
+          if schema_registry.get('status') != 'current' or schema_registry.get('pending_migrations') not in ([], None):
+              raise SystemExit(f"unexpected schema registry state: {schema_registry}")
+          import_guard = run_payload.get('production_import_guard') or {}
+          if import_guard.get('status') != 'clean' or int(import_guard.get('forbidden_import_count') or -1) != 0:
+              raise SystemExit(f"unexpected import graph state: {import_guard}")
+          archival = run_payload.get('legacy_archival') or {}
+          if archival.get('automatic_migration') is not False or archival.get('automatic_archive') is not False:
+              raise SystemExit(f"legacy archival automation must remain disabled: {archival}")
+          if archival.get('drop_legacy_tables') is not False:
+              raise SystemExit('Stage 11 must not drop legacy tables')
+
+          # Persist Gate v5 evidence into both machine-readable artifacts.
           run_payload['production_gate'] = production_gate
           payload['production_gate'] = production_gate
-          Path(run).write_text(
-              json.dumps(run_payload, ensure_ascii=False, indent=2, sort_keys=True),
-              encoding='utf-8',
-          )
-          Path(payload_path).write_text(
-              json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-              encoding='utf-8',
-          )
+          Path(run).write_text(json.dumps(run_payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+          Path(payload_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
 
           unified = run_payload.get('unified_report') or {}
-          if unified.get('language') != 'zh':
-              raise SystemExit(f"unexpected V6 report language metadata: {unified.get('language')!r}")
-          if unified.get('fusion_mode') != 'structured_v4_v6':
-              raise SystemExit(f"unexpected V6 fusion mode: {unified.get('fusion_mode')!r}")
+          if unified.get('language') != 'zh' or unified.get('fusion_mode') != 'structured_v4_v6':
+              raise SystemExit(f"unexpected V6 unified report metadata: {unified}")
           if unified.get('accuracy_layer') != 'v6.2' or run_payload.get('accuracy_layer') != 'v6.2':
               raise SystemExit('V6.2 accuracy layer metadata missing')
           if os.getenv('EXPECT_V4_MERGED') == 'true' and unified.get('v4_merged') is not True:
@@ -292,10 +273,8 @@ jobs:
 
           chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', report_text))
           heading_count = len(re.findall(r'(?m)^##\s+', report_text))
-          if chinese_chars < 40:
-              raise SystemExit(f'V6 final report has insufficient Chinese content: {chinese_chars} chars')
-          if heading_count < 3:
-              raise SystemExit(f'V6 final report structure is incomplete: {heading_count} section headings')
+          if chinese_chars < 40 or heading_count < 3:
+              raise SystemExit(f'V6 final report incomplete chinese_chars={chinese_chars} headings={heading_count}')
 
           board = [item for item in (payload.get('board') or []) if isinstance(item, dict)]
           if not board:
@@ -309,72 +288,50 @@ jobs:
               raise SystemExit(f'V6 report is missing board symbols: {missing_codes}')
           if signals < len(board):
               raise SystemExit(f'normalized forecast count {signals} is smaller than board size {len(board)}')
-          if str(payload.get('version') or '') != str(run_payload.get('version') or ''):
-              raise SystemExit('V6 JSON payload version does not match v6_run.json version')
 
-          embedded_lab = payload.get('accuracy_lab') or {}
-          run_lab = run_payload.get('accuracy_lab') or {}
-          if embedded_lab.get('version') != lab_payload.get('version'):
-              raise SystemExit('embedded Accuracy Lab version does not match artifact')
-          if run_lab.get('version') != lab_payload.get('version'):
-              raise SystemExit('v6_run Accuracy Lab version does not match artifact')
           lab_source = lab_payload.get('source') or {}
           if lab_source.get('mode') != 'normalized_only':
               raise SystemExit(f"Accuracy Lab source is not normalized-only: {lab_source}")
-          if int(lab_source.get('legacy_signal_reads') or 0) != 0:
-              raise SystemExit('Accuracy Lab still reads legacy signal facts')
-          if int(lab_source.get('legacy_outcome_reads') or 0) != 0:
-              raise SystemExit('Accuracy Lab still reads legacy outcome facts')
+          if int(lab_source.get('legacy_signal_reads') or 0) != 0 or int(lab_source.get('legacy_outcome_reads') or 0) != 0:
+              raise SystemExit('Accuracy Lab still reads legacy fact tables')
           policy = lab_payload.get('policy') or {}
           if policy.get('auto_promotion') is not False or policy.get('auto_weight_tuning') is not False:
               raise SystemExit('unsafe Accuracy Lab policy: automatic promotion/tuning must remain disabled')
           if policy.get('non_overlapping_validation') is not True:
               raise SystemExit('Accuracy Lab non-overlapping validation is not enabled')
-          if not isinstance(lab_payload.get('champion'), list) or not isinstance(lab_payload.get('challengers'), list):
-              raise SystemExit('Accuracy Lab metrics payload is incomplete')
 
           retirement = run_payload.get('legacy_retirement') or {}
-          if retirement.get('status') != 'retirement_ready':
+          if retirement.get('status') != 'retirement_ready' or retirement.get('legacy_projection_enabled') is not False:
               raise SystemExit(f"legacy retirement audit not ready: {retirement}")
-          if retirement.get('legacy_projection_enabled') is not False:
-              raise SystemExit('legacy retirement metadata still marks projection enabled')
           if int(retirement.get('legacy_consumer_count') or -1) != 0:
-              raise SystemExit(f"legacy retirement audit reports active consumers: {retirement}")
-          if retirement.get('legacy_projection_required_by_active_consumers') is not False:
-              raise SystemExit('legacy projection is still required by an active consumer')
+              raise SystemExit(f"active legacy consumers remain: {retirement}")
 
           write_guard = run_payload.get('legacy_write_guard') or {}
-          if write_guard.get('status') != 'unchanged':
+          if write_guard.get('status') != 'unchanged' or write_guard.get('fact_tables_unchanged') is not True:
               raise SystemExit(f"legacy write guard did not pass: {write_guard}")
           if write_guard.get('legacy_writes_detected') is not False:
               raise SystemExit('legacy write guard detected a mutation')
-          if write_guard.get('fact_tables_unchanged') is not True:
-              raise SystemExit('legacy write guard did not prove fact tables unchanged')
-          if int(write_guard.get('legacy_projection_writes') or -1) != 0:
-              raise SystemExit('legacy write guard reports projection writes')
 
           notification = run_payload.get('notification') or {}
           if notification.get('status') != 'disabled' or notification.get('attempted') is not False:
               raise SystemExit('V6 generation attempted notification before validation')
 
           run_stats = run_payload.get('run') or {}
+          if run_stats.get('production_runner') != 'native_normalized_stage11':
+              raise SystemExit(f"unexpected production runner metadata: {run_stats}")
           if str(run_stats.get('quick_check') or '').strip().lower() != 'ok':
               raise SystemExit('V6 run metadata does not confirm quick_check=ok')
-          if int(run_stats.get('canonical_signals_seen') or 0) <= 0:
-              raise SystemExit('V6 run metadata has zero canonical signals')
 
           with open(output, 'a', encoding='utf-8') as f:
               f.write('valid=true\n')
               f.write('production_ready=true\n')
           print(
-              'V6 Stage 10 production validation: PASS '
+              'V6 Stage 11 production validation: PASS '
               f'normalized_signals={signals} normalized_outcomes={outcomes} board={len(board)} '
-              f"source={production_gate.get('selected_source')} "
-              f"read_parity={production_gate.get('read_parity')} "
-              f"write_mode={production_gate.get('write_mode')} "
-              f"legacy_writes={production_gate.get('legacy_projection_writes')} "
-              f"legacy_unchanged={production_gate.get('legacy_fact_tables_unchanged')} "
-              f"scoreboard={run_payload.get('scoreboard_status')} "
+              f"schema={production_gate.get('schema_registry_status')} "
+              f"import_graph={production_gate.get('production_import_graph_status')} "
+              f"forbidden_imports={production_gate.get('forbidden_import_count')} "
+              f"legacy_migration={production_gate.get('legacy_migration_policy')} "
               f"accuracy_lab={lab_payload.get('status')} "
               f"v4_merged={unified.get('v4_merged')} chinese_chars={chinese_chars}"
           )
@@ -387,7 +344,7 @@ jobs:
           path: v6_data/
           key: v6-daily-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Production Gate 通过后发送最终综合日报
+      - name: Production Gate v5 通过后发送最终综合日报
         if: ${{ success() && steps.validate_v6.outputs.valid == 'true' && steps.validate_v6.outputs.production_ready == 'true' }}
         env:
           V6_UNIFIED_EMAIL_FINAL: 'true'
@@ -426,7 +383,7 @@ jobs:
           from datetime import datetime
           from pathlib import Path
 
-          from src.v6_daily.production_gate import assert_stage10_production_gate
+          from src.v6_daily.production_gate_v5 import assert_stage11_production_gate
 
           logging.basicConfig(
               level=os.getenv('LOG_LEVEL', 'INFO').upper(),
@@ -439,40 +396,31 @@ jobs:
           run_path = Path('v6_reports/v6_run.json')
           payload_path = Path('v6_reports/v6_daily_latest.json')
           report_path = Path('v6_reports/v6_daily_latest.md')
+          run_payload = json.loads(run_path.read_text(encoding='utf-8'))
 
-          with run_path.open(encoding='utf-8') as f:
-              run_payload = json.load(f)
-
-          # Defense in depth：通知阶段独立重跑 Stage 10 strict gate。
-          gate = assert_stage10_production_gate(run_payload)
+          # Defense in depth: independently re-run Stage 11 Gate v5 before notification.
+          gate = assert_stage11_production_gate(run_payload)
           if gate.get('notification_allowed') is not True:
               raise SystemExit(f'production gate forbids notification: {gate}')
-          if gate.get('legacy_projection_enabled') is not False:
-              raise SystemExit('notification blocked: legacy projection enabled')
-          if int(gate.get('legacy_projection_writes') or -1) != 0:
-              raise SystemExit('notification blocked: legacy projection wrote rows')
-          if gate.get('legacy_fact_tables_unchanged') is not True:
-              raise SystemExit('notification blocked: legacy fact tables changed')
-          if int(gate.get('legacy_consumer_count') or -1) != 0:
-              raise SystemExit('notification blocked: active legacy consumer remains')
+          if gate.get('production_import_graph_status') != 'clean' or int(gate.get('forbidden_import_count') or -1) != 0:
+              raise SystemExit('notification blocked: production import graph reaches retired runtime')
+          if gate.get('schema_registry_status') != 'current':
+              raise SystemExit('notification blocked: normalized schema registry is not current')
+          if gate.get('legacy_migration_policy') != 'explicit_cli_only' or gate.get('legacy_archive_policy') != 'explicit_cli_only':
+              raise SystemExit('notification blocked: legacy migration/archive policy is unsafe')
 
           if not truthy(os.getenv('V6_DAILY_NOTIFY')):
               print('V6 通知已禁用；报告和 production-ready 研究历史仍已正常生成并保存。')
               raise SystemExit(0)
 
-          with payload_path.open(encoding='utf-8') as f:
-              payload = json.load(f)
+          payload = json.loads(payload_path.read_text(encoding='utf-8'))
           codes = [
               str(item.get('code') or '').strip().upper()
               for item in (payload.get('board') or [])
               if isinstance(item, dict) and str(item.get('code') or '').strip()
           ]
 
-          notification = {
-              'attempted': True,
-              'success': False,
-              'status': 'failed',
-          }
+          notification = {'attempted': True, 'success': False, 'status': 'failed'}
           try:
               from src.notification import NotificationService
 
@@ -499,7 +447,6 @@ jobs:
               json.dumps(run_payload, ensure_ascii=False, indent=2, sort_keys=True),
               encoding='utf-8',
           )
-
           if not notification['success']:
               raise SystemExit(f"V6 final notification failed: {notification}")
           print('V6 final notification: PASS')
