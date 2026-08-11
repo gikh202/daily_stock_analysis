@@ -1,0 +1,270 @@
+name: Temporary refactor consistency patch
+
+on:
+  push:
+    branches:
+      - agent/refactor-analysis-reliability
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/refactor-analysis-reliability
+          fetch-depth: 0
+
+      - name: Apply consistency refactor
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          # 1) Move the explicit poor-data action downgrade into the Pipeline guardrail.
+          path = Path("src/phase_decision_guardrail.py")
+          text = path.read_text(encoding="utf-8")
+
+          text = replace_once(
+              text,
+              "from src.market_phase_summary import render_market_phase_summary\nfrom src.report_language import localize_confidence_level, normalize_report_language\n",
+              "from src.market_phase_summary import render_market_phase_summary\nfrom src.report_language import localize_confidence_level, normalize_report_language\nfrom src.schemas.decision_action import localize_action_label, normalize_decision_action\nfrom src.services.decision_signal_data_quality import normalize_decision_signal_data_quality\n",
+              "phase imports",
+          )
+          text = replace_once(
+              text,
+              'CORE_DATA_BLOCKS = {"quote", "daily_bars", "technical"}\n',
+              'CORE_DATA_BLOCKS = {"quote", "daily_bars", "technical"}\nACTIONABLE_ACTIONS = {"buy", "add"}\n',
+              "actionable actions constant",
+          )
+
+          marker = '''        adjustments.append("confidence_capped_core_data_degraded")
+
+    has_non_intraday_action = (
+'''
+          replacement = '''        adjustments.append("confidence_capped_core_data_degraded")
+
+    quality_level = _overview_quality_level(overview)
+    current_action = normalize_decision_action(getattr(result, "action", None))
+    if current_action is None:
+        current_action = normalize_decision_action(getattr(result, "operation_advice", None))
+    if quality_level == "poor" and current_action in ACTIONABLE_ACTIONS:
+        guardrail_reason = "insufficient_data_quality:poor"
+        display_reason = _reason_text(
+            language,
+            en="Core evidence quality is poor; actionable buy/add advice was downgraded to watch.",
+            zh="核心证据质量较差，买入/加仓动作已降级为观望。",
+            ko="핵심 근거 품질이 낮아 매수/추가 매수 동작을 관망으로 하향 조정했습니다.",
+        )
+        watch_label = localize_action_label("watch", language) or _safe_wait_action(language)
+        result.operation_advice = watch_label
+        result.action = "watch"
+        result.action_label = watch_label
+        result.decision_type = "hold"
+        phase_decision["immediate_action"] = watch_label
+        phase_decision["data_quality_guardrail_reason"] = guardrail_reason
+        _append_reason(phase_decision, display_reason)
+        _record_data_quality_action_guardrail(
+            dashboard,
+            before_action=current_action,
+            reason=guardrail_reason,
+            quality_level=quality_level,
+        )
+        adjustments.append("action_downgraded_poor_data_quality")
+
+    has_non_intraday_action = (
+'''
+          text = replace_once(text, marker, replacement, "poor quality action guardrail")
+
+          helper_marker = '''def _overview_limitations(overview: Optional[Mapping[str, Any]]) -> List[str]:
+'''
+          helper = '''def _overview_quality_level(overview: Optional[Mapping[str, Any]]) -> str:
+    if not isinstance(overview, Mapping):
+        return "unknown"
+    return normalize_decision_signal_data_quality(overview.get("data_quality"))
+
+
+def _record_data_quality_action_guardrail(
+    dashboard: Dict[str, Any],
+    *,
+    before_action: str,
+    reason: str,
+    quality_level: str,
+) -> None:
+    stability = dashboard.get("decision_stability")
+    if not isinstance(stability, dict):
+        stability = {}
+        dashboard["decision_stability"] = stability
+    existing_reason = _safe_text(stability.get("reason"))
+    stability["applied"] = True
+    stability["reason"] = reason if not existing_reason else f"{existing_reason}; {reason}"
+    stability["data_quality_guardrail"] = {
+        "before_action": before_action,
+        "after_action": "watch",
+        "quality_level": quality_level,
+        "reason": reason,
+    }
+
+
+def _overview_limitations(overview: Optional[Mapping[str, Any]]) -> List[str]:
+'''
+          text = replace_once(text, helper_marker, helper, "data quality helpers")
+
+          limit_marker = '''    if adjustment == "confidence_capped_core_data_degraded":
+        return _reason_text(
+            language,
+            en="confidence capped due to degraded core data",
+            zh="核心数据受限已降低置信度",
+            ko="핵심 데이터 제한으로 신뢰도를 낮춤",
+        )
+    return adjustment
+'''
+          limit_replacement = '''    if adjustment == "confidence_capped_core_data_degraded":
+        return _reason_text(
+            language,
+            en="confidence capped due to degraded core data",
+            zh="核心数据受限已降低置信度",
+            ko="핵심 데이터 제한으로 신뢰도를 낮춤",
+        )
+    if adjustment == "action_downgraded_poor_data_quality":
+        return _reason_text(
+            language,
+            en="action downgraded because core evidence quality is poor",
+            zh="核心证据质量较差，动作已降级为观望",
+            ko="핵심 근거 품질이 낮아 동작을 관망으로 하향 조정함",
+        )
+    return adjustment
+'''
+          text = replace_once(text, limit_marker, limit_replacement, "adjustment limitation text")
+          path.write_text(text, encoding="utf-8")
+
+          # 2) Update the existing end-to-end Agent regression to the safer final contract.
+          path = Path("tests/test_agent_pipeline.py")
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(
+              text,
+              "    def test_analyze_with_agent_keeps_high_score_hold_action_consistent_across_outputs(self):\n        \"\"\"A high-score hold may align to buy, and every public output must use that action.\"\"\"\n",
+              "    def test_analyze_with_agent_poor_context_downgrades_high_score_buy_consistently(self):\n        \"\"\"Poor core evidence must downgrade the final execution action everywhere.\"\"\"\n",
+              "agent test name",
+          )
+          old_assertions = '''            self.assertIsNotNone(result)
+            self.assertEqual(result.decision_type, "hold")
+            self.assertEqual(result.action, "buy")
+            self.assertEqual(result.action_label, "买入")
+
+            explanation = result.dashboard["agent_disagreement_explanation"]
+            self.assertNotIn("final_signal", explanation)
+            self.assertEqual(explanation["pipeline_start_action"], "buy")
+            self.assertEqual(explanation["final_adjustments"], [])
+            self.assertEqual(explanation["final_action"], "buy")
+
+            saved_result = pipeline.db.save_analysis_history.call_args.kwargs["result"]
+            self.assertIs(saved_result, result)
+            self.assertEqual(saved_result.action, "buy")
+            self.assertEqual(
+                saved_result.dashboard["agent_disagreement_explanation"]["final_action"],
+                "buy",
+            )
+'''
+          new_assertions = '''            self.assertIsNotNone(result)
+            self.assertEqual(result.decision_type, "hold")
+            self.assertEqual(result.action, "watch")
+            self.assertEqual(result.action_label, "观望")
+
+            explanation = result.dashboard["agent_disagreement_explanation"]
+            self.assertNotIn("final_signal", explanation)
+            self.assertEqual(explanation["pipeline_start_action"], "buy")
+            self.assertTrue(explanation["final_adjustments"])
+            self.assertEqual(explanation["final_action"], "watch")
+            self.assertEqual(
+                result.dashboard["decision_stability"]["data_quality_guardrail"]["reason"],
+                "insufficient_data_quality:poor",
+            )
+
+            saved_result = pipeline.db.save_analysis_history.call_args.kwargs["result"]
+            self.assertIs(saved_result, result)
+            self.assertEqual(saved_result.action, "watch")
+            self.assertEqual(
+                saved_result.dashboard["agent_disagreement_explanation"]["final_action"],
+                "watch",
+            )
+'''
+          text = replace_once(text, old_assertions, new_assertions, "agent output assertions")
+          text = replace_once(
+              text,
+              '            self.assertEqual(signal_payload["action"], "buy")\n',
+              '            self.assertEqual(signal_payload["action"], "watch")\n',
+              "agent signal assertion",
+          )
+          path.write_text(text, encoding="utf-8")
+
+          # 3) Add a focused unit regression at the actual guardrail layer.
+          path = Path("tests/test_phase_decision_guardrail.py")
+          text = path.read_text(encoding="utf-8")
+          addition = '''
+
+
+def test_poor_data_quality_downgrades_actionable_result_before_persistence() -> None:
+    result = _result(
+        sentiment_score=80,
+        operation_advice="持有",
+        decision_type="hold",
+    )
+    result.action = "buy"
+    result.action_label = "买入"
+    overview = _overview("fetch_failed")
+    overview["data_quality"] = {
+        "overall_score": 40,
+        "level": "poor",
+        "limitations": ["quote: fetch_failed"],
+    }
+
+    adjustments = apply_phase_decision_guardrails(
+        result,
+        market_phase_summary=_phase("intraday"),
+        analysis_context_pack_overview=overview,
+        report_language="zh",
+    )
+
+    assert "action_downgraded_poor_data_quality" in adjustments
+    assert result.action == "watch"
+    assert result.action_label == "观望"
+    assert result.operation_advice == "观望"
+    assert result.decision_type == "hold"
+    stability = result.dashboard["decision_stability"]
+    assert stability["applied"] is True
+    assert stability["data_quality_guardrail"] == {
+        "before_action": "buy",
+        "after_action": "watch",
+        "quality_level": "poor",
+        "reason": "insufficient_data_quality:poor",
+    }
+'''
+          if "def test_poor_data_quality_downgrades_actionable_result_before_persistence" in text:
+              raise RuntimeError("phase guardrail regression test already exists")
+          path.write_text(text.rstrip() + addition + "\n", encoding="utf-8")
+
+          # This workflow is a one-shot patch carrier; remove it from the resulting commit.
+          Path(".github/workflows/zz-refactor-patch.yml").unlink()
+          PY
+
+          python -m py_compile src/phase_decision_guardrail.py tests/test_phase_decision_guardrail.py tests/test_agent_pipeline.py
+          git diff --check
+
+      - name: Commit refactor patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/phase_decision_guardrail.py tests/test_phase_decision_guardrail.py tests/test_agent_pipeline.py .github/workflows/zz-refactor-patch.yml
+          git commit -m "fix: apply data-quality guardrail before signal persistence"
+          git push origin HEAD:agent/refactor-analysis-reliability
