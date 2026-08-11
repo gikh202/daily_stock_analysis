@@ -8,7 +8,7 @@ import pandas as pd
 
 from src.analyzer import AnalysisResult
 from src.core.pipeline import StockAnalysisPipeline
-from src.phase_decision_guardrail import apply_phase_decision_guardrails
+from src.data_quality_decision_guardrail import apply_data_quality_decision_guardrail
 
 
 def test_poor_data_quality_downgrades_action_before_persistence() -> None:
@@ -60,21 +60,9 @@ def test_poor_data_quality_downgrades_action_before_persistence() -> None:
             "limitations": ["quote: fetch_failed"],
         },
     }
-    phase = {
-        "phase": "intraday",
-        "market": "us",
-        "market_local_time": "2026-08-11T09:45:00-04:00",
-        "session_date": "2026-08-11",
-        "effective_daily_bar_date": "2026-08-10",
-        "is_trading_day": True,
-        "is_market_open_now": True,
-        "is_partial_bar": True,
-        "warnings": [],
-    }
 
-    adjustments = apply_phase_decision_guardrails(
+    adjustments = apply_data_quality_decision_guardrail(
         result,
-        market_phase_summary=phase,
         analysis_context_pack_overview=overview,
         report_language="zh",
     )
