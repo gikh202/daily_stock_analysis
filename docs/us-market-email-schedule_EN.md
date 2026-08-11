@@ -31,6 +31,12 @@ Use the SMTP authorization code / app password required by your mail provider wh
 
 Both checkpoints reuse the notification environment from `00-daily-analysis.yml`; no second set of email credentials is required for the open-confirmation run.
 
+## Decision and email consistency
+
+The final email, analysis history, and automatic DecisionSignal use the same finalized action. When the AnalysisContextPack explicitly reports `poor` core-evidence quality, an otherwise actionable `buy/add` is downgraded to `watch` before public output and persistence, with the data-quality guardrail reason retained for auditability. This prevents the email from recommending a buy while the stored signal has already been downgraded.
+
+Insufficient technical history is represented as unavailable rather than inferred from placeholder values. MA60 is exposed only when enough real history exists, and technical-score coverage records which indicator groups are actually available before an active buy conclusion can be produced.
+
 ## Market holidays and DST
 
 - `01-us-open-confirmation.yml` uses an `America/New_York` offset gate to cover EDT / EST without a one-hour drift at daylight-saving transitions.
