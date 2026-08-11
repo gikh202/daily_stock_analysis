@@ -274,7 +274,12 @@ jobs:
           if schema_registry.get('status') != 'current' or schema_registry.get('pending_migrations') not in ([], None):
               raise SystemExit(f'unexpected schema registry state: {schema_registry}')
           import_guard = run_payload.get('production_import_guard') or {}
-          if import_guard.get('status') != 'clean' or int(import_guard.get('forbidden_import_count') or -1) != 0:
+          forbidden_import_count = import_guard.get('forbidden_import_count')
+          if (
+              import_guard.get('status') != 'clean'
+              or forbidden_import_count is None
+              or int(forbidden_import_count) != 0
+          ):
               raise SystemExit(f'unexpected import graph state: {import_guard}')
 
           unified = run_payload.get('unified_report') or {}
