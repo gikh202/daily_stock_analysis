@@ -6,8 +6,8 @@
 
 | 时点 | Workflow | 触发语义 |
 | --- | --- | --- |
-| 美股开盘 15 分钟后 | `.github/workflows/01-us-open-confirmation.yml` | 通过 13:45 UTC / 14:45 UTC 两个候选 cron，再按 `America/New_York` 当前 UTC offset 二次校验，只在 09:45 ET 真正 dispatch 完整分析 |
-| 美股收盘后 | `.github/workflows/00-daily-analysis.yml` | 工作日 22:30 UTC 运行完整分析；该时间在 EDT/EST 下均晚于美股常规交易时段收盘 |
+| 美股开盘 15 分钟后 | `.github/workflows/01-us-open-confirmation.yml` | 首选 09:45 ET；为应对 GitHub Actions 调度延迟，额外在 09:55、10:10、10:25、10:40、10:55、11:10 ET 设置轻量补偿候选，编排器复用已成功/进行中的同轮 V4/V6，只发送一轮最终邮件 |
+| 美股收盘后 | `.github/workflows/00-daily-analysis.yml` | 工作日 22:30 UTC 运行完整分析；该时间在 EDT/EST 下均晚于美股常规交易时段收盘。GitHub schedule 可能排队延迟，因此实际邮件到达时间可能晚于北京时间/台北时间 06:30 |
 
 开盘确认 workflow 不复制分析逻辑，而是 dispatch `00-daily-analysis.yml` 的完整模式。因此两次运行共用同一套：
 
@@ -47,10 +47,12 @@ EMAIL_SENDER_NAME
 
 历史数据不足时，技术指标会明确标记为 unavailable；MA60 只有在真实历史长度足够时才展示，不再使用 MA20 冒充长期均线。技术评分同时记录可用指标覆盖率，覆盖率不足时不生成积极买入结论。
 
-## 休市与 DST
+## 休市、DST 与调度延迟
 
-- `01-us-open-confirmation.yml` 使用 `America/New_York` offset gate 处理 EDT / EST，避免夏令时切换后固定 UTC cron 偏移一小时。
+- `01-us-open-confirmation.yml` 直接使用 `America/New_York` 时区，避免夏令时切换后固定 UTC cron 偏移一小时。
+- 开盘后多个候选只是调度补偿点，不代表要发送多封邮件；已成功或正在进行的同轮 V4/V6 会被复用。
 - 工作日 cron 只是候选触发。美国市场节假日仍由项目现有交易日检查决定是否实际分析；不要仅凭 `Mon-Fri` cron 判断当天一定开市。
+- GitHub Actions 的 schedule 不是硬实时调度器，可能因平台队列负载而延后执行；盘后 22:30 UTC 同样可能晚于目标时间启动。
 - 如需验证，可手动运行 `01-us-open-confirmation.yml` 的 `workflow_dispatch`，以及 `00-daily-analysis.yml` 的手动入口。
 
 ## 避免重复任务
