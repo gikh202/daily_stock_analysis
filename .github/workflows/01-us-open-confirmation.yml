@@ -3,7 +3,7 @@ name: 美股开盘确认
 on:
   # GitHub schedule 不是实时调度器，可能因 Actions 队列负载延迟。
   # 使用纽约时区 + 多个轻量候选点，并由单例编排器去重，只真正运行一次完整分析。
-  # 首选目标：美股常规交易开盘 15 分钟后（09:45 ET）。
+  # 首选目标：美股常规交易开盘 15 分钟后（09:45 ET）；补偿候选覆盖到 11:10 ET。
   schedule:
     - cron: '45 9 * * 1-5'
       timezone: 'America/New_York'
@@ -14,6 +14,10 @@ on:
     - cron: '25 10 * * 1-5'
       timezone: 'America/New_York'
     - cron: '40 10 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '55 10 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '10 11 * * 1-5'
       timezone: 'America/New_York'
 
   # 手动运行会强制启动一轮新的盘中确认链路，便于排障/补发。
@@ -71,8 +75,17 @@ jobs:
           assert summer.strftime('%H:%M %z') == '09:45 -0400', summer
           assert winter.strftime('%H:%M %z') == '09:45 -0500', winter
 
-          candidate_minutes = [9 * 60 + 45, 9 * 60 + 55, 10 * 60 + 10, 10 * 60 + 25, 10 * 60 + 40]
+          candidate_minutes = [
+              9 * 60 + 45,
+              9 * 60 + 55,
+              10 * 60 + 10,
+              10 * 60 + 25,
+              10 * 60 + 40,
+              10 * 60 + 55,
+              11 * 60 + 10,
+          ]
           assert candidate_minutes[0] == 9 * 60 + 45
+          assert candidate_minutes[-1] == 11 * 60 + 10
           assert all(9 * 60 + 45 <= minute <= 11 * 60 + 15 for minute in candidate_minutes)
           assert candidate_minutes == sorted(set(candidate_minutes))
 
