@@ -12,6 +12,11 @@ on:
         required: false
         default: true
         type: boolean
+      upstream_run_id:
+        description: '可选：绑定并下载指定 V4 workflow run 的 Artifact'
+        required: false
+        default: ''
+        type: string
       min_samples:
         description: '预测指标可衡量前所需的最小成熟样本数'
         required: false
@@ -63,17 +68,17 @@ jobs:
         run: mkdir -p data v6_data v6_reports upstream_v4
 
       - name: 下载本次上游 V4 分析 Artifact
-        if: ${{ github.event_name == 'workflow_run' }}
+        if: ${{ github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.upstream_run_id != '') }}
         uses: actions/download-artifact@v5
         with:
           pattern: analysis-reports-*
           path: upstream_v4
           merge-multiple: true
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.upstream_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 使用本次上游 Artifact 的生产数据库
-        if: ${{ github.event_name == 'workflow_run' }}
+        if: ${{ github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.upstream_run_id != '') }}
         shell: bash
         run: |
           mapfile -t SOURCE_DBS < <(find upstream_v4 -type f -path '*/data/stock_analysis.db' -print | sort)
@@ -86,7 +91,7 @@ jobs:
           echo "✅ 已绑定本次 V4 Artifact 数据库: ${SOURCE_DBS[0]}"
 
       - name: 手动运行时恢复最近有效生产数据库
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upstream_run_id == '' }}
         uses: actions/cache/restore@v5
         with:
           path: data/
@@ -159,6 +164,7 @@ jobs:
           LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
           REPORT_LANGUAGE: zh
           LOG_LEVEL: INFO
+          EXPECT_V4_ARTIFACT: ${{ (github.event_name == 'workflow_run' || inputs.upstream_run_id != '') && 'true' || 'false' }}
         shell: bash
         run: |
           EXTRA_ARGS=()
@@ -169,11 +175,11 @@ jobs:
           if [ -n "$V4_REPORT_PATH" ]; then
             echo "✅ 找到本次上游 V4 报告，将合并到最终中文日报: $V4_REPORT_PATH"
             EXTRA_ARGS+=(--v4-report "$V4_REPORT_PATH")
-          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
-            echo "::error::本次 V4 Artifact 缺少 reports/report_*.md，拒绝使用陈旧报告降级"
+          elif [ "$EXPECT_V4_ARTIFACT" = 'true' ]; then
+            echo "::error::已绑定 V4 workflow run，但其 Artifact 缺少 reports/report_*.md；拒绝使用陈旧报告降级"
             exit 2
           else
-            echo "⚠️ 手动 V6 未提供上游 V4 报告，将仅使用生产数据库中的 V4 结构化记录"
+            echo "⚠️ 手动 V6 未绑定上游 V4 run，将仅使用生产数据库中的 V4 结构化记录"
           fi
 
           # Production runtime remains the native normalized Stage 11 runner.
@@ -190,7 +196,7 @@ jobs:
         id: validate_v6
         shell: bash
         env:
-          EXPECT_V4_MERGED: ${{ github.event_name == 'workflow_run' && 'true' || 'false' }}
+          EXPECT_V4_MERGED: ${{ (github.event_name == 'workflow_run' || inputs.upstream_run_id != '') && 'true' || 'false' }}
         run: |
           python - <<'PY'
           import json
@@ -288,7 +294,7 @@ jobs:
           if unified.get('accuracy_layer') != 'v6.2' or run_payload.get('accuracy_layer') != 'v6.2':
               raise SystemExit('V6.2 accuracy layer metadata missing')
           if os.getenv('EXPECT_V4_MERGED') == 'true' and unified.get('v4_merged') is not True:
-              raise SystemExit('workflow_run expected same-run V4 structured data, but v4_merged is not true')
+              raise SystemExit('bound V4 Artifact expected same-run structured data, but v4_merged is not true')
 
           chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', report_text))
           heading_count = len(re.findall(r'(?m)^##\s+', report_text))
