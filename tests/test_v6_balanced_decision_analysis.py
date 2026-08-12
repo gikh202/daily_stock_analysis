@@ -145,7 +145,8 @@ def test_balanced_analysis_keeps_both_sides_and_original_opinion() -> None:
     assert "**是否值得买**：**条件式可买**" in email
     assert "**支持买入的证据**" in email
     assert "**支持等待/不买的证据**" in email
-    assert "投研摘要（原始观点）" in email
+    assert "上游投研摘要（仅解释，非执行）" in email
+    assert "投研摘要（原始观点）" not in email
     assert "建议逢回踩买入，仓位三成" in email
     assert "确定性风控计划为唯一执行价格口径" in email
     assert "最大仓位上限" in email

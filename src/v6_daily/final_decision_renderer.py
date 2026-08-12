@@ -15,6 +15,13 @@ _REPORT_DATE_RE = re.compile(
     r"(?m)^(# (?:AI )?美股(?:综合|决策)日报 · )\d{4}-\d{2}-\d{2}\s*$"
 )
 _DATA_LIMITATION_LINE_RE = re.compile(r"(?m)^- \*\*数据限制\*\*[:：].*$")
+_NEWS_LINE_RE = re.compile(r"(?m)^- \*\*舆情/新闻\*\*[:：].*$")
+_NEWS_EVIDENCE_UNAVAILABLE = (
+    "source-backed deterministic catalyst unavailable",
+    "无近期新闻",
+    "暂无已验证的近期证据",
+    "新闻证据缺失",
+)
 
 
 def _section_pattern(symbol: str) -> re.Pattern[str]:
@@ -43,14 +50,31 @@ def _execution_authorization_lines(packet: FinalDecisionPacket) -> list[str]:
     return lines
 
 
+def _news_evidence_unavailable(section: str) -> bool:
+    lowered = section.lower()
+    return any(marker.lower() in lowered for marker in _NEWS_EVIDENCE_UNAVAILABLE)
+
+
+def _normalize_news_presentation(section: str) -> str:
+    """Fail safe when current news evidence is unavailable.
+
+    Missing evidence cannot support claims such as "sentiment is neutral" or
+    "there is no catalyst". Keep the raw upstream research in artifacts, while
+    the final investor report states only the evidence limitation.
+    """
+    if not _news_evidence_unavailable(section):
+        return section
+    text = _NEWS_LINE_RE.sub(
+        "- **舆情/新闻**：近期新闻证据不足，无法可靠判断当前舆情方向或是否存在新增催化/利空。",
+        section,
+    )
+    return text.replace("暂无利好催化", "近期催化证据不足")
+
+
 def _data_availability_summary(section: str) -> str | None:
     lowered = section.lower()
     limitations: list[str] = []
-    if (
-        "source-backed deterministic catalyst unavailable" in lowered
-        or "无近期新闻" in section
-        or "暂无已验证的近期证据" in section
-    ):
+    if _news_evidence_unavailable(section):
         limitations.append("近期新闻/催化证据不足")
     if "盘中" in section and any(
         token in section for token in ("不可用", "缺失", "覆盖不可用")
@@ -80,7 +104,7 @@ def _normalize_section_presentation(
     authorization explicit and prevents upstream V4 guidance from being
     presented as the final execution instruction.
     """
-    text = section
+    text = _normalize_news_presentation(section)
 
     text = text.replace("**预测层 vs 执行层**", "**预测层 vs 上游投研层**")
     if packet.v4_operation:

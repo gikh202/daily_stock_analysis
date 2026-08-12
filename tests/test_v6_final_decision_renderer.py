@@ -4,7 +4,10 @@ import json
 
 import pytest
 
-from src.v6_daily.accuracy_report import build_investor_email_markdown
+from src.v6_daily.accuracy_report import (
+    _standardize_stock_cards,
+    build_investor_email_markdown,
+)
 from src.v6_daily.final_decision_renderer import (
     apply_final_decision_contract,
     assert_final_decision_report_consistency,
@@ -175,6 +178,11 @@ def test_final_contract_normalizes_unauthorized_conditional_plan_for_email() -> 
         v4_records=records,
         report_date="2026-08-12",
     )
+    raw_report = raw_report.replace(
+        "- **数据限制**：",
+        "- **舆情/新闻**：市场舆情平静，暂无重大催化或利空。\n- **数据限制**：",
+        1,
+    )
     packets = build_final_decision_packets(payload, v4_records=records)
 
     report = apply_final_decision_contract(raw_report, packets)
@@ -187,6 +195,8 @@ def test_final_contract_normalizes_unauthorized_conditional_plan_for_email() -> 
     assert "**V6 条件触发后最大仓位上限**" in report
     assert "当前执行 **观望**" not in report
     assert "上游投研动作 **观望**（非最终执行）" in report
+    assert "市场舆情平静，暂无重大催化或利空" not in report
+    assert "**舆情/新闻**：近期新闻证据不足，无法可靠判断当前舆情方向或是否存在新增催化/利空。" in report
     assert "**数据可用性**：近期新闻/催化证据不足；盘中技术数据不可用；实时行情存在降级/回退。" in report
 
     email = build_investor_email_markdown(report)
@@ -197,6 +207,26 @@ def test_final_contract_normalizes_unauthorized_conditional_plan_for_email() -> 
     assert "**保留入场区间（当前不可执行）**" in email
     assert "（条件参考，当前未获执行授权）" in email
     assert "当前执行 **观望**" not in email
+    assert "**上游投研摘要（仅解释，非执行）**" in email
+    assert "**投研摘要（原始观点）**" not in email
+    assert "市场舆情平静，暂无重大催化或利空" not in email
+
+
+def test_email_card_standardization_preserves_heading_boundaries() -> None:
+    source = (
+        "### 1. AAA · Alpha · 最终：观察 · 方向一致\n"
+        "- **数据限制**：quote: fallback\n"
+        "### 2. BBB · Beta · 最终：等待 · 部分一致\n"
+        "- **数据限制**：新闻证据缺失\n"
+        "## 4. 大模型与数据健康度\n"
+    )
+
+    normalized = _standardize_stock_cards(source)
+
+    assert "quote: fallback\n\n### 2. BBB" in normalized
+    assert "新闻证据缺失\n\n## 4. 大模型与数据健康度" in normalized
+    assert "fallback### 2." not in normalized
+    assert "新闻证据缺失## 4." not in normalized
 
 
 def test_upstream_reduce_never_masquerades_as_final_wait_execution() -> None:
