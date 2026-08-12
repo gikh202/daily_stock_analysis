@@ -22,6 +22,13 @@ _NEWS_EVIDENCE_UNAVAILABLE = (
     "暂无已验证的近期证据",
     "新闻证据缺失",
 )
+_US_PRICE_NUMBER = (
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    r"(?:\s*[-–—~～至]\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)?"
+)
+_US_PRICE_YUAN_RE = re.compile(rf"(?<![\d.,])\$?({_US_PRICE_NUMBER})\s*元")
+_NEXT_CHECK_LINE_RE = re.compile(r"^(?P<prefix>.*?下次检查)[:：].*$")
+_NEXT_CHECK_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
 
 def _section_pattern(symbol: str) -> re.Pattern[str]:
@@ -71,6 +78,42 @@ def _normalize_news_presentation(section: str) -> str:
     return text.replace("暂无利好催化", "近期催化证据不足")
 
 
+def _normalize_us_price_units(section: str) -> str:
+    """Render bare CNY-style stock price suffixes as USD in U.S. stock cards.
+
+    These sections are exclusively U.S. equities/ETFs. A bare numeric ``元``
+    attached directly to a technical/watch price is therefore a presentation
+    leak from the upstream Chinese template, not a valid currency conversion.
+    Amounts such as ``900亿美元`` are unaffected because ``元`` is not directly
+    attached to the numeric token.
+    """
+    return _US_PRICE_YUAN_RE.sub(r"$\1", section)
+
+
+def _normalize_next_check_presentation(section: str) -> str:
+    """Canonicalize the next live confirmation checkpoint to the 09:45 ET run.
+
+    The production workflow's confirmation run is 15 minutes after the regular
+    U.S. open. Upstream research text may say 09:30, "open +30", or emit an ISO
+    timestamp. Preserve the upstream trading date, but present one deterministic
+    checkpoint in the final report.
+    """
+    normalized: list[str] = []
+    for line in section.splitlines():
+        if "下次检查" not in line:
+            normalized.append(line)
+            continue
+        date_match = _NEXT_CHECK_DATE_RE.search(line)
+        line_match = _NEXT_CHECK_LINE_RE.match(line)
+        if not date_match or not line_match:
+            normalized.append(line)
+            continue
+        normalized.append(
+            f"{line_match.group('prefix')}：**{date_match.group(0)} 09:45 ET（开盘后15分钟）**"
+        )
+    return "\n".join(normalized)
+
+
 def _data_availability_summary(section: str) -> str | None:
     lowered = section.lower()
     limitations: list[str] = []
@@ -105,6 +148,8 @@ def _normalize_section_presentation(
     presented as the final execution instruction.
     """
     text = _normalize_news_presentation(section)
+    text = _normalize_us_price_units(text)
+    text = _normalize_next_check_presentation(text)
 
     text = text.replace("**预测层 vs 执行层**", "**预测层 vs 上游投研层**")
     if packet.v4_operation:
