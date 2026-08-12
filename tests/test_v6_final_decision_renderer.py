@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from src.v6_daily.accuracy_report import build_investor_email_markdown
 from src.v6_daily.final_decision_renderer import (
     apply_final_decision_contract,
     assert_final_decision_report_consistency,
@@ -19,7 +20,7 @@ from src.v6_daily.unified_report import render_integrated_chinese_report
 def _payload() -> dict:
     return {
         "version": "v6-cutover-test",
-        "generated_at": "2026-08-11T00:00:00Z",
+        "generated_at": "2026-08-12T03:00:00Z",
         "market_pulse": {
             "regime": "risk_on",
             "breadth": "neutral",
@@ -31,6 +32,7 @@ def _payload() -> dict:
             {
                 "code": "MSFT",
                 "instrument_type": "STOCK",
+                "effective_trade_date": "2026-08-11",
                 "decision": "WATCH",
                 "direction": "bullish",
                 "forecast_score": 83.5,
@@ -50,7 +52,11 @@ def _payload() -> dict:
                 },
                 "catalysts": ["量化层趋势与相对强弱仍偏多"],
                 "risks": ["量化层风险分仍需约束仓位"],
-                "limitations": [],
+                "limitations": [
+                    "source-backed deterministic catalyst unavailable",
+                    "盘中技术覆盖不可用",
+                    "quote: fallback",
+                ],
             }
         ],
         "deltas": [],
@@ -89,7 +95,7 @@ def _record() -> dict:
             "battle_plan": {},
             "phase_decision": {
                 "watch_conditions": ["回踩后能否获得支撑", "上涨时量能是否放大"],
-                "phase_context": {"phase": "premarket", "is_trading_day": True},
+                "phase_context": {"phase": "postmarket", "is_trading_day": True},
             },
             "signal_attribution": {
                 "strongest_bullish_signal": "多头排列且相对强弱领先",
@@ -103,6 +109,44 @@ def _record() -> dict:
         "code": "MSFT",
         "raw_result": json.dumps(raw, ensure_ascii=False),
     }
+
+
+def _googl_wait_case() -> tuple[dict, dict]:
+    payload = _payload()
+    item = payload["board"][0]
+    item.update(
+        {
+            "code": "GOOGL",
+            "decision": "WAIT",
+            "direction": "neutral",
+            "forecast_score": 40.3,
+            "opportunity_score": 47.2,
+            "quality_score": 61.2,
+            "risk_score": 45.7,
+            "trade_plan": {
+                "action": "WAIT",
+                "entry_zone": [],
+                "stop_loss": None,
+                "targets": [],
+                "risk_reward": None,
+                "max_position_pct": 0.0,
+            },
+        }
+    )
+    record = _record()
+    record["code"] = "GOOGL"
+    raw = json.loads(record["raw_result"])
+    raw["name"] = "Alphabet Inc."
+    raw["forecast"]["horizons"]["10d"].update(
+        {
+            "direction": "bearish",
+            "expected_return_pct": -3.0,
+            "rationale": "短期技术结构仍偏弱。",
+        }
+    )
+    raw["execution"] = {"operation_advice": "减仓", "action": "reduce"}
+    record["raw_result"] = json.dumps(raw, ensure_ascii=False)
+    return payload, record
 
 
 def test_machine_readable_payload_contains_final_decision_contract() -> None:
@@ -123,29 +167,65 @@ def test_machine_readable_payload_contains_final_decision_contract() -> None:
     assert packet["execution"]["max_position_pct"] == 0.05
 
 
-def test_typed_renderer_is_already_consistent_and_shim_is_noop() -> None:
+def test_final_contract_normalizes_unauthorized_conditional_plan_for_email() -> None:
     payload = _payload()
     records = [_record()]
-    report = render_integrated_chinese_report(
+    raw_report = render_integrated_chinese_report(
         payload,
         v4_records=records,
-        report_date="2026-08-11",
+        report_date="2026-08-12",
     )
     packets = build_final_decision_packets(payload, v4_records=records)
 
-    assert "**是否值得买**：**条件式可买**" in report
-    assert "| 1 | MSFT | 观察 | 方向一致 |" in report
-    assert apply_final_decision_contract(report, packets) == report
+    report = apply_final_decision_contract(raw_report, packets)
+    assert_final_decision_report_consistency(report, packets)
+
+    assert "# AI 美股综合日报 · 2026-08-11" in report
+    assert "**当前执行授权**：**否**" in report
+    assert "**当前可执行仓位上限**：**0.0%**" in report
+    assert "**条件触发后最大仓位上限**：**5.0%**" in report
+    assert "**V6 条件触发后最大仓位上限**" in report
+    assert "当前执行 **观望**" not in report
+    assert "上游投研动作 **观望**（非最终执行）" in report
+    assert "**数据可用性**：近期新闻/催化证据不足；盘中技术数据不可用；实时行情存在降级/回退。" in report
+
+    email = build_investor_email_markdown(report)
+    assert "# 美股决策日报 · 2026-08-11" in email
+    assert "**当前执行授权**：**否**" in email
+    assert "**当前可执行仓位上限**：**0.0%**" in email
+    assert "**条件触发后最大仓位上限**：**5.0%**" in email
+    assert "**保留入场区间（当前不可执行）**" in email
+    assert "（条件参考，当前未获执行授权）" in email
+    assert "当前执行 **观望**" not in email
+
+
+def test_upstream_reduce_never_masquerades_as_final_wait_execution() -> None:
+    payload, record = _googl_wait_case()
+    raw_report = render_integrated_chinese_report(
+        payload,
+        v4_records=[record],
+        report_date="2026-08-12",
+    )
+    packets = build_final_decision_packets(payload, v4_records=[record])
+
+    report = apply_final_decision_contract(raw_report, packets)
+
+    assert "最终：等待" in report
+    assert "**是否值得买**：**暂不买，等待确认**" in report
+    assert "当前执行 **减仓**" not in report
+    assert "上游投研动作 **减仓**（非最终执行）" in report
+    assert "**当前执行授权**：**否**" in report
+    assert "**当前可执行仓位上限**：**0.0%**" in report
     assert_final_decision_report_consistency(report, packets)
 
 
-def test_stale_markdown_fails_closed_instead_of_being_repaired() -> None:
+def test_stale_final_business_verdict_still_fails_closed() -> None:
     payload = _payload()
     records = [_record()]
     report = render_integrated_chinese_report(
         payload,
         v4_records=records,
-        report_date="2026-08-11",
+        report_date="2026-08-12",
     )
     stale = report.replace(
         "**是否值得买**：**条件式可买**",
@@ -156,21 +236,35 @@ def test_stale_markdown_fails_closed_instead_of_being_repaired() -> None:
 
     with pytest.raises(ValueError, match="final verdict drift"):
         apply_final_decision_contract(stale, packets)
-    with pytest.raises(ValueError, match="final verdict drift"):
-        assert_final_decision_report_consistency(stale, packets)
 
 
-def test_missing_v4_gets_explicit_non_final_decision_block() -> None:
+def test_raw_unstandardized_report_fails_contract_validation() -> None:
     payload = _payload()
+    records = [_record()]
     report = render_integrated_chinese_report(
         payload,
+        v4_records=records,
+        report_date="2026-08-12",
+    )
+    packets = build_final_decision_packets(payload, v4_records=records)
+
+    with pytest.raises(ValueError, match="effective trade date drift|execution authorization drift"):
+        assert_final_decision_report_consistency(report, packets)
+
+
+def test_missing_v4_gets_explicit_non_final_and_zero_execution() -> None:
+    payload = _payload()
+    raw_report = render_integrated_chinese_report(
+        payload,
         v4_records=[],
-        report_date="2026-08-11",
+        report_date="2026-08-12",
     )
     packets = build_final_decision_packets(payload, v4_records=[])
+    report = apply_final_decision_contract(raw_report, packets)
 
     assert "**是否值得买**：**数据不足，不能形成最终买入判断**" in report
     assert "V4结构化投研缺失" in report
     assert "| 1 | MSFT | 等待（V4缺失） | V4结构化数据缺失 |" in report
-    assert apply_final_decision_contract(report, packets) == report
+    assert "**当前执行授权**：**否**" in report
+    assert "**当前可执行仓位上限**：**0.0%**" in report
     assert_final_decision_report_consistency(report, packets)
