@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scripts.live_provider_smoke import (
     ProbeResult,
+    _llm_smoke_max_tokens,
     _redact,
     _required_failures,
     _run_probe,
@@ -20,6 +21,23 @@ def test_redact_hides_configured_provider_secrets(monkeypatch) -> None:
 
     assert "secret-key-123" not in text
     assert "***" in text
+
+
+def test_llm_smoke_max_tokens_has_reasoning_safe_default(monkeypatch) -> None:
+    monkeypatch.delenv("LIVE_SMOKE_LLM_MAX_TOKENS", raising=False)
+
+    assert _llm_smoke_max_tokens() == 512
+
+
+def test_llm_smoke_max_tokens_allows_override_and_enforces_floor(monkeypatch) -> None:
+    monkeypatch.setenv("LIVE_SMOKE_LLM_MAX_TOKENS", "1024")
+    assert _llm_smoke_max_tokens() == 1024
+
+    monkeypatch.setenv("LIVE_SMOKE_LLM_MAX_TOKENS", "8")
+    assert _llm_smoke_max_tokens() == 64
+
+    monkeypatch.setenv("LIVE_SMOKE_LLM_MAX_TOKENS", "not-an-int")
+    assert _llm_smoke_max_tokens() == 512
 
 
 def test_run_probe_records_failure_without_raising() -> None:

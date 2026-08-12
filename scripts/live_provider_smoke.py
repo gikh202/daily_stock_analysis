@@ -167,6 +167,23 @@ def _flag_enabled(name: str, *, default: bool) -> bool:
     return raw not in {"0", "false", "no", "off", "disabled"}
 
 
+def _llm_smoke_max_tokens() -> int:
+    """Return a safe output budget for both reasoning and non-reasoning models.
+
+    Reasoning models such as DeepSeek V4 can spend part of ``max_tokens`` on
+    reasoning_content before producing the final ``content``. The historical
+    value of 8 tokens was therefore too small and could make a healthy provider
+    look broken. Keep a conservative floor while allowing repository variables
+    to raise the budget when providers change behavior.
+    """
+    raw = str(os.getenv("LIVE_SMOKE_LLM_MAX_TOKENS", "512") or "512").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 512
+    return max(64, value)
+
+
 def _llm_configuration_present() -> bool:
     return any(str(os.getenv(name, "") or "").strip() for name in _LLM_CONFIG_ENV_NAMES)
 
@@ -178,19 +195,26 @@ def _probe_llm() -> str:
     if not adapter.is_available:
         raise RuntimeError("LLM configuration is present but Agent LiteLLM route is unavailable")
 
+    max_tokens = _llm_smoke_max_tokens()
     response = adapter.call_text(
         [
             {"role": "system", "content": "Provider health probe. Reply with a short acknowledgement."},
             {"role": "user", "content": "Reply with exactly OK."},
         ],
         temperature=0,
-        max_tokens=8,
+        max_tokens=max_tokens,
         timeout=20,
     )
     if response.provider == "error":
         raise RuntimeError(response.content or "LLM adapter returned provider=error")
     content = str(response.content or "").strip()
     if not content:
+        reasoning = str(response.reasoning_content or "").strip()
+        if reasoning:
+            raise RuntimeError(
+                "LLM adapter returned reasoning but no final text response "
+                f"(model={response.model or 'unknown'}, max_tokens={max_tokens})"
+            )
         raise RuntimeError("LLM adapter returned an empty text response")
     return f"provider={response.provider or 'unknown'} model={response.model or 'unknown'} response={content[:40]}"
 
