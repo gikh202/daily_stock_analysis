@@ -1,17 +1,25 @@
 name: 美股开盘确认
 
 on:
-  # GitHub Actions cron 固定使用 UTC。美东夏令时/冬令时各保留一个候选时间，
-  # 运行时再根据 America/New_York 的实际 UTC offset 只放行其中一个。
-  # 目标：美股常规交易开盘 15 分钟后（09:45 ET）重新运行完整分析。
+  # GitHub schedule 不是实时调度器，可能因 Actions 队列负载延迟。
+  # 使用纽约时区 + 多个轻量候选点，并由单例编排器去重，只真正运行一次完整分析。
+  # 首选目标：美股常规交易开盘 15 分钟后（09:45 ET）。
   schedule:
-    - cron: '45 13 * * 1-5' # 09:45 ET (EDT, UTC-4)
-    - cron: '45 14 * * 1-5' # 09:45 ET (EST, UTC-5)
+    - cron: '45 9 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '55 9 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '10 10 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '25 10 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '40 10 * * 1-5'
+      timezone: 'America/New_York'
 
-  # 允许手动验证触发链路。
+  # 手动运行会强制启动一轮新的盘中确认链路，便于排障/补发。
   workflow_dispatch:
 
-  # PR 阶段执行调度回测与阶段护栏回归测试；合并后不会触发主分析。
+  # PR 阶段执行调度设计与阶段护栏回归测试；不会触发真实分析/邮件。
   pull_request:
     paths:
       - '.github/workflows/01-us-open-confirmation.yml'
@@ -22,6 +30,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: us-open-confirmation-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   validate-confirmation-design:
@@ -45,42 +57,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
 
-      - name: 调度回测（覆盖夏令时/冬令时）
+      - name: 调度窗口回测（覆盖夏令时/冬令时）
         shell: bash
         run: |
           python - <<'PY'
-          from datetime import date, datetime, time, timedelta, timezone
+          from datetime import datetime
           from zoneinfo import ZoneInfo
 
           ny = ZoneInfo('America/New_York')
-          start = date(2024, 1, 1)
-          end = date(2030, 12, 31)
-          day = start
-          checked = 0
+          summer = datetime(2026, 8, 11, 9, 45, tzinfo=ny)
+          winter = datetime(2026, 12, 11, 9, 45, tzinfo=ny)
 
-          while day <= end:
-              if day.weekday() < 5:
-                  candidates = [
-                      datetime.combine(day, time(13, 45), tzinfo=timezone.utc),
-                      datetime.combine(day, time(14, 45), tzinfo=timezone.utc),
-                  ]
-                  matches = [dt for dt in candidates if dt.astimezone(ny).strftime('%H:%M') == '09:45']
-                  if len(matches) != 1:
-                      raise AssertionError(
-                          f'{day}: expected exactly one UTC candidate for 09:45 ET, got '
-                          + ', '.join(dt.astimezone(ny).isoformat() for dt in candidates)
-                      )
-                  checked += 1
-              day += timedelta(days=1)
-
-          summer = datetime(2026, 8, 11, 13, 45, tzinfo=timezone.utc).astimezone(ny)
-          winter = datetime(2026, 12, 11, 14, 45, tzinfo=timezone.utc).astimezone(ny)
           assert summer.strftime('%H:%M %z') == '09:45 -0400', summer
           assert winter.strftime('%H:%M %z') == '09:45 -0500', winter
 
-          print(f'OK: backtested {checked} weekdays from {start} through {end}')
+          candidate_minutes = [9 * 60 + 45, 9 * 60 + 55, 10 * 60 + 10, 10 * 60 + 25, 10 * 60 + 40]
+          assert candidate_minutes[0] == 9 * 60 + 45
+          assert all(9 * 60 + 45 <= minute <= 11 * 60 + 15 for minute in candidate_minutes)
+          assert candidate_minutes == sorted(set(candidate_minutes))
+
           print('summer mapping:', summer.isoformat())
           print('winter mapping:', winter.isoformat())
+          print('candidate minutes:', candidate_minutes)
           PY
 
       - name: 阶段护栏与交易日回归测试
@@ -94,64 +92,176 @@ jobs:
     name: dispatch-open-confirmation
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 45
     permissions:
       actions: write
       contents: read
 
     steps:
-      - name: 判断当前候选是否对应 09:45 ET
+      - name: 判断是否位于盘中确认补偿窗口
         id: gate
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           set -euo pipefail
 
           NY_NOW="$(TZ='America/New_York' date '+%Y-%m-%d %H:%M:%S %z')"
-          NY_OFFSET="$(TZ='America/New_York' date '+%z')"
+          NY_HM="$(TZ='America/New_York' date '+%H%M')"
+          NY_WEEKDAY="$(TZ='America/New_York' date '+%u')"
           SHOULD_RUN=false
-          REASON='non_matching_candidate'
+          REASON='outside_confirmation_window'
 
           if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
             SHOULD_RUN=true
             REASON='manual_dispatch'
-          elif [ "$EVENT_SCHEDULE" = '45 13 * * 1-5' ] && [ "$NY_OFFSET" = '-0400' ]; then
-            SHOULD_RUN=true
-            REASON='edt_open_confirmation'
-          elif [ "$EVENT_SCHEDULE" = '45 14 * * 1-5' ] && [ "$NY_OFFSET" = '-0500' ]; then
-            SHOULD_RUN=true
-            REASON='est_open_confirmation'
+          else
+            HM=$((10#$NY_HM))
+            if [ "$NY_WEEKDAY" -ge 1 ] && [ "$NY_WEEKDAY" -le 5 ] && [ "$HM" -ge 945 ] && [ "$HM" -le 1115 ]; then
+              SHOULD_RUN=true
+              REASON='scheduled_confirmation_window'
+            fi
           fi
 
           echo "New York time: $NY_NOW"
-          echo "schedule: ${EVENT_SCHEDULE:-manual}"
           echo "should_run=$SHOULD_RUN"
           echo "reason=$REASON"
           echo "should_run=$SHOULD_RUN" >> "$GITHUB_OUTPUT"
           echo "reason=$REASON" >> "$GITHUB_OUTPUT"
 
-      - name: 触发完整盘中确认分析
+      - name: 编排 V4 分析与 V6 最终邮件
         if: ${{ steps.gate.outputs.should_run == 'true' }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const response = await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: '00-daily-analysis.yml',
-              ref: 'main',
-              inputs: {
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const manual = context.eventName === 'workflow_dispatch';
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const BOT_LOGIN = 'github-actions[bot]';
+
+            async function listRuns(workflowId) {
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id: workflowId,
+                event: 'workflow_dispatch',
+                branch: 'main',
+                per_page: 50,
+              });
+              return response.data.workflow_runs || [];
+            }
+
+            function isUsable(run) {
+              if (!run) return false;
+              if (run.actor?.login !== BOT_LOGIN) return false;
+              if (run.status !== 'completed') return true;
+              return run.conclusion === 'success';
+            }
+
+            async function waitForDispatchedRun(workflowId, dispatchedAtMs) {
+              const earliest = dispatchedAtMs - 30_000;
+              for (let attempt = 0; attempt < 60; attempt += 1) {
+                const runs = await listRuns(workflowId);
+                const match = runs.find((run) =>
+                  run.actor?.login === BOT_LOGIN &&
+                  new Date(run.created_at).getTime() >= earliest
+                );
+                if (match) return match;
+                await sleep(5_000);
+              }
+              throw new Error(`Timed out waiting for ${workflowId} run to appear`);
+            }
+
+            async function waitForCompletion(run) {
+              let current = run;
+              for (let attempt = 0; attempt < 180; attempt += 1) {
+                if (current.status === 'completed') return current;
+                await sleep(10_000);
+                const response = await github.rest.actions.getWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: current.id,
+                });
+                current = response.data;
+              }
+              throw new Error(`Timed out waiting for run ${current.id} (${current.name})`);
+            }
+
+            async function dispatchWorkflow(workflowId, inputs = {}) {
+              const dispatchedAt = Date.now();
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: workflowId,
+                ref: 'main',
+                inputs,
+              });
+              core.info(`Dispatched ${workflowId}`);
+              return waitForDispatchedRun(workflowId, dispatchedAt);
+            }
+
+            // Scheduled retries reuse a recent successful/in-flight bot-dispatched V4 run.
+            // Manual runs intentionally force a fresh analysis.
+            let analysisRun = null;
+            if (!manual) {
+              const cutoff = Date.now() - 4 * 60 * 60 * 1000;
+              const analysisRuns = await listRuns('00-daily-analysis.yml');
+              analysisRun = analysisRuns.find((run) =>
+                isUsable(run) && new Date(run.created_at).getTime() >= cutoff
+              ) || null;
+              if (analysisRun) {
+                core.info(`Reusing recent V4 analysis run ${analysisRun.id} status=${analysisRun.status}`);
+              }
+            }
+
+            if (!analysisRun) {
+              analysisRun = await dispatchWorkflow('00-daily-analysis.yml', {
                 mode: 'full',
                 force_run: 'false',
-                restore_cache_key: ''
-              }
-            });
-            core.info(`Dispatched 00-daily-analysis.yml for 09:45 ET confirmation; status=${response.status}`);
+                restore_cache_key: '',
+              });
+            }
 
-      - name: 跳过非当前时区候选
+            analysisRun = await waitForCompletion(analysisRun);
+            if (analysisRun.conclusion !== 'success') {
+              throw new Error(`V4 analysis run ${analysisRun.id} ended with ${analysisRun.conclusion}`);
+            }
+            core.info(`V4 analysis completed successfully: run=${analysisRun.id}`);
+
+            // GITHUB_TOKEN-created workflow_dispatch runs do not emit a follow-up workflow_run
+            // that can safely be relied on for chaining. Explicitly dispatch V6 after V4 success.
+            const v6Cutoff = new Date(analysisRun.updated_at || analysisRun.created_at).getTime() - 60_000;
+            const v6Runs = await listRuns('03-v6-daily.yml');
+            let v6Run = v6Runs.find((run) =>
+              isUsable(run) && new Date(run.created_at).getTime() >= v6Cutoff
+            ) || null;
+
+            if (v6Run) {
+              core.info(`Reusing recent V6 run ${v6Run.id} status=${v6Run.status}`);
+            } else {
+              v6Run = await dispatchWorkflow('03-v6-daily.yml', {
+                notify: 'true',
+              });
+            }
+
+            v6Run = await waitForCompletion(v6Run);
+            if (v6Run.conclusion !== 'success') {
+              throw new Error(`V6 final report run ${v6Run.id} ended with ${v6Run.conclusion}`);
+            }
+
+            core.info(`US open confirmation chain completed: V4=${analysisRun.id}, V6=${v6Run.id}`);
+            await core.summary
+              .addHeading('US Open Confirmation')
+              .addTable([
+                [{data: 'Stage', header: true}, {data: 'Run', header: true}, {data: 'Result', header: true}],
+                ['V4 analysis', String(analysisRun.id), analysisRun.conclusion],
+                ['V6 final email', String(v6Run.id), v6Run.conclusion],
+              ])
+              .write();
+
+      - name: 跳过窗口外候选
         if: ${{ steps.gate.outputs.should_run != 'true' }}
         run: |
-          echo '当前 UTC 候选不对应纽约 09:45，跳过，避免夏令时/冬令时重复运行。'
+          echo '当前不在纽约 09:45-11:15 补偿窗口，跳过。'
