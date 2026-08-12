@@ -23,6 +23,7 @@ from src.schemas.decision_scale import (
     score_band_metadata,
 )
 from src.services.decision_signal_data_quality import normalize_decision_signal_data_quality
+from src.services.initial_decision_profile_policy import apply_initial_decision_profile_policy
 from src.services.decision_signal_service import DecisionSignalService
 from src.services.portfolio_service import VALID_MARKETS
 from src.utils.sniper_points import extract_sniper_points
@@ -92,22 +93,46 @@ def build_decision_signal_payload_from_report(
         return None
 
     data_quality_summary = _extract_data_quality(context_snapshot, result)
-    guardrail_data_quality = _extract_snapshot_data_quality(context_snapshot)
-    (
-        action,
-        action_label,
-        data_quality_level,
-        data_quality_guardrail_reason,
-    ) = _apply_auto_data_quality_guardrail(
-        action=canonical_action,
-        action_label=action_fields.get("action_label"),
-        data_quality_summary=guardrail_data_quality,
+    policy_outcome = apply_initial_decision_profile_policy(
+        result,
+        context_snapshot=context_snapshot,
+        source_report_id=source_report_id,
+        canonical_action=canonical_action,
+        score=score,
         report_language=getattr(result, "report_language", None),
         profile_source=profile_source,
-        quality_contract_required=(
-            profile_source == "auto_default" and context_snapshot is not None
-        ),
     )
+    if policy_outcome is not None:
+        if policy_outcome.blocked:
+            logger.warning(
+                "Skip fresh DecisionSignal persistence: shared profile policy blocked "
+                "stock_code=%s source_report_id=%s reason=%s",
+                getattr(result, "code", None),
+                source_report_id,
+                policy_outcome.blocked_reason,
+            )
+            return None
+        action = policy_outcome.action
+        action_label = policy_outcome.action_label
+        data_quality_level = policy_outcome.data_quality_level
+        data_quality_guardrail_reason = policy_outcome.data_quality_guardrail_reason
+    else:
+        guardrail_data_quality = _extract_snapshot_data_quality(context_snapshot)
+        (
+            action,
+            action_label,
+            data_quality_level,
+            data_quality_guardrail_reason,
+        ) = _apply_auto_data_quality_guardrail(
+            action=canonical_action,
+            action_label=action_fields.get("action_label"),
+            data_quality_summary=guardrail_data_quality,
+            report_language=getattr(result, "report_language", None),
+            profile_source=profile_source,
+            quality_contract_required=(
+                profile_source == "auto_default" and context_snapshot is not None
+            ),
+        )
 
     raw_code = str(getattr(result, "code", "") or "").strip()
     market = get_market_for_stock(normalize_stock_code(raw_code))
@@ -135,12 +160,26 @@ def build_decision_signal_payload_from_report(
         "report_language": getattr(result, "report_language", None),
         "decision_profile": "balanced",
         "profile_source": profile_source,
-        "profile_policy_version": "decision-profile-v1",
-        "signal_generation_version": "legacy-report-extractor-v1",
+        "profile_policy_version": (
+            policy_outcome.profile_policy_version
+            if policy_outcome is not None
+            else "decision-profile-v1"
+        ),
+        "signal_generation_version": (
+            policy_outcome.signal_generation_version
+            if policy_outcome is not None
+            else "legacy-report-extractor-v1"
+        ),
         "decision_signal_metadata_version": "decision-signal-metadata-v1",
         "canonical_decision_scale_version": CANONICAL_DECISION_SCALE_VERSION,
         "data_quality_level": data_quality_level,
     }
+    if policy_outcome is not None:
+        metadata["guardrail_result"] = policy_outcome.guardrail_result
+        metadata["scoring_breakdown"] = policy_outcome.scoring_breakdown
+        if policy_outcome.warnings:
+            metadata["policy_warnings"] = policy_outcome.warnings
+
     score_metadata = score_band_metadata(score)
     if score_metadata:
         metadata["score_scale"] = score_metadata
@@ -161,8 +200,17 @@ def build_decision_signal_payload_from_report(
             metadata["action_adjustment_reason"] = "canonical_score_alignment"
         if canonical_action != action:
             metadata["canonical_action"] = canonical_action
-            metadata["action_adjustment_reason"] = "data_quality_guardrail"
-    effective_guardrail_reason = guardrail_reason or data_quality_guardrail_reason
+            metadata["action_adjustment_reason"] = (
+                "data_quality_guardrail"
+                if policy_outcome is None or data_quality_guardrail_reason
+                else "decision_profile_policy"
+            )
+    policy_guardrail_reason = (
+        policy_outcome.guardrail_reason if policy_outcome is not None else None
+    )
+    effective_guardrail_reason = (
+        guardrail_reason or policy_guardrail_reason or data_quality_guardrail_reason
+    )
     if effective_guardrail_reason:
         metadata["guardrail_reason"] = effective_guardrail_reason
     if data_quality_guardrail_reason:

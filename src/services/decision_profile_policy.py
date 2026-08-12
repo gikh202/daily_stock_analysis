@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Minimal deterministic decision-profile policy for reassessment."""
+"""Shared deterministic decision-profile policy for initial persistence and reassessment."""
 
 from __future__ import annotations
 
