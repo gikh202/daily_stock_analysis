@@ -2,23 +2,24 @@ name: 美股开盘确认
 
 on:
   # GitHub schedule 不是实时调度器，可能因 Actions 队列负载延迟。
-  # 使用纽约时区 + 多个轻量候选点，并由单例编排器去重，只真正运行一次完整分析。
+  # 使用标准 UTC cron 覆盖 EDT/EST，再由纽约当地时间与 UTC offset 二次门控。
   # 首选目标：美股常规交易开盘 15 分钟后（09:45 ET）；补偿候选覆盖到 11:10 ET。
   schedule:
-    - cron: '45 9 * * 1-5'
-      timezone: 'America/New_York'
-    - cron: '55 9 * * 1-5'
-      timezone: 'America/New_York'
-    - cron: '10 10 * * 1-5'
-      timezone: 'America/New_York'
-    - cron: '25 10 * * 1-5'
-      timezone: 'America/New_York'
-    - cron: '40 10 * * 1-5'
-      timezone: 'America/New_York'
-    - cron: '55 10 * * 1-5'
-      timezone: 'America/New_York'
-    - cron: '10 11 * * 1-5'
-      timezone: 'America/New_York'
+    # EDT (-04:00): 09:45 / 09:55 / 10:10 / 10:25 / 10:40 / 10:55 / 11:10 ET
+    - cron: '45 13 * * 1-5'
+    - cron: '55 13 * * 1-5'
+    - cron: '10 14 * * 1-5'
+    - cron: '25 14 * * 1-5'
+    - cron: '40 14 * * 1-5'
+    # 14:55 UTC / 15:10 UTC 同时也是 EST 候选点，因此只声明一次。
+    - cron: '55 14 * * 1-5'
+    - cron: '10 15 * * 1-5'
+    # EST (-05:00): 09:45 / 09:55 / 10:10 / 10:25 / 10:40 / 10:55 / 11:10 ET
+    - cron: '45 14 * * 1-5'
+    - cron: '25 15 * * 1-5'
+    - cron: '40 15 * * 1-5'
+    - cron: '55 15 * * 1-5'
+    - cron: '10 16 * * 1-5'
 
   # 手动运行会强制启动一轮新的盘中确认链路，便于排障/补发。
   workflow_dispatch:
@@ -65,7 +66,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          from datetime import datetime
+          from datetime import datetime, timezone
           from zoneinfo import ZoneInfo
 
           ny = ZoneInfo('America/New_York')
@@ -74,24 +75,28 @@ jobs:
 
           assert summer.strftime('%H:%M %z') == '09:45 -0400', summer
           assert winter.strftime('%H:%M %z') == '09:45 -0500', winter
+          assert summer.astimezone(timezone.utc).strftime('%H:%M') == '13:45'
+          assert winter.astimezone(timezone.utc).strftime('%H:%M') == '14:45'
 
-          candidate_minutes = [
-              9 * 60 + 45,
-              9 * 60 + 55,
-              10 * 60 + 10,
-              10 * 60 + 25,
-              10 * 60 + 40,
-              10 * 60 + 55,
-              11 * 60 + 10,
-          ]
-          assert candidate_minutes[0] == 9 * 60 + 45
-          assert candidate_minutes[-1] == 11 * 60 + 10
-          assert all(9 * 60 + 45 <= minute <= 11 * 60 + 15 for minute in candidate_minutes)
-          assert candidate_minutes == sorted(set(candidate_minutes))
+          local_candidates = ['09:45', '09:55', '10:10', '10:25', '10:40', '10:55', '11:10']
+          edt_crons = {
+              '45 13 * * 1-5', '55 13 * * 1-5', '10 14 * * 1-5',
+              '25 14 * * 1-5', '40 14 * * 1-5', '55 14 * * 1-5',
+              '10 15 * * 1-5',
+          }
+          est_crons = {
+              '45 14 * * 1-5', '55 14 * * 1-5', '10 15 * * 1-5',
+              '25 15 * * 1-5', '40 15 * * 1-5', '55 15 * * 1-5',
+              '10 16 * * 1-5',
+          }
+          assert len(local_candidates) == 7
+          assert len(edt_crons) == 7
+          assert len(est_crons) == 7
+          assert {'55 14 * * 1-5', '10 15 * * 1-5'} == edt_crons & est_crons
 
           print('summer mapping:', summer.isoformat())
           print('winter mapping:', winter.isoformat())
-          print('candidate minutes:', candidate_minutes)
+          print('local candidates:', local_candidates)
           PY
 
       - name: 阶段护栏与交易日回归测试
@@ -116,27 +121,48 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           set -euo pipefail
 
           NY_NOW="$(TZ='America/New_York' date '+%Y-%m-%d %H:%M:%S %z')"
           NY_HM="$(TZ='America/New_York' date '+%H%M')"
           NY_WEEKDAY="$(TZ='America/New_York' date '+%u')"
+          NY_OFFSET="$(TZ='America/New_York' date '+%z')"
           SHOULD_RUN=false
           REASON='outside_confirmation_window'
+          SCHEDULE_FAMILY_OK=false
 
           if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
             SHOULD_RUN=true
             REASON='manual_dispatch'
           else
+            if [ "$NY_OFFSET" = '-0400' ]; then
+              case "$EVENT_SCHEDULE" in
+                '45 13 * * 1-5'|'55 13 * * 1-5'|'10 14 * * 1-5'|'25 14 * * 1-5'|'40 14 * * 1-5'|'55 14 * * 1-5'|'10 15 * * 1-5')
+                  SCHEDULE_FAMILY_OK=true
+                  ;;
+              esac
+            elif [ "$NY_OFFSET" = '-0500' ]; then
+              case "$EVENT_SCHEDULE" in
+                '45 14 * * 1-5'|'55 14 * * 1-5'|'10 15 * * 1-5'|'25 15 * * 1-5'|'40 15 * * 1-5'|'55 15 * * 1-5'|'10 16 * * 1-5')
+                  SCHEDULE_FAMILY_OK=true
+                  ;;
+              esac
+            fi
+
             HM=$((10#$NY_HM))
-            if [ "$NY_WEEKDAY" -ge 1 ] && [ "$NY_WEEKDAY" -le 5 ] && [ "$HM" -ge 945 ] && [ "$HM" -le 1115 ]; then
+            if [ "$NY_WEEKDAY" -ge 1 ] && [ "$NY_WEEKDAY" -le 5 ] && [ "$HM" -ge 945 ] && [ "$HM" -le 1115 ] && [ "$SCHEDULE_FAMILY_OK" = 'true' ]; then
               SHOULD_RUN=true
               REASON='scheduled_confirmation_window'
+            elif [ "$SCHEDULE_FAMILY_OK" != 'true' ]; then
+              REASON='inactive_dst_schedule_family'
             fi
           fi
 
           echo "New York time: $NY_NOW"
+          echo "schedule: ${EVENT_SCHEDULE:-manual}"
+          echo "schedule_family_ok=$SCHEDULE_FAMILY_OK"
           echo "should_run=$SHOULD_RUN"
           echo "reason=$REASON"
           echo "should_run=$SHOULD_RUN" >> "$GITHUB_OUTPUT"
@@ -243,8 +269,8 @@ jobs:
             }
             core.info(`V4 analysis completed successfully: run=${analysisRun.id}`);
 
-            // GITHUB_TOKEN-created workflow_dispatch runs do not emit a follow-up workflow_run
-            // that can safely be relied on for chaining. Explicitly dispatch V6 after V4 success.
+            // GITHUB_TOKEN-created workflow_dispatch runs do not可靠地产生可用于串联的 workflow_run。
+            // 因此显式 dispatch V6，并把准确的 V4 run id 传入，确保 V6 下载同一轮 Artifact。
             const v6Cutoff = new Date(analysisRun.updated_at || analysisRun.created_at).getTime() - 60_000;
             const v6Runs = await listRuns('03-v6-daily.yml');
             let v6Run = v6Runs.find((run) =>
@@ -256,6 +282,7 @@ jobs:
             } else {
               v6Run = await dispatchWorkflow('03-v6-daily.yml', {
                 notify: 'true',
+                upstream_run_id: String(analysisRun.id),
               });
             }
 
@@ -277,4 +304,4 @@ jobs:
       - name: 跳过窗口外候选
         if: ${{ steps.gate.outputs.should_run != 'true' }}
         run: |
-          echo '当前不在纽约 09:45-11:15 补偿窗口，跳过。'
+          echo '当前不在纽约 09:45-11:15 的有效 EDT/EST 补偿窗口，跳过。'
