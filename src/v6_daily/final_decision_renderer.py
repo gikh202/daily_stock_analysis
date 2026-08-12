@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from .fusion_contracts import (
     FinalDecisionPacket,
@@ -11,6 +11,12 @@ from .fusion_contracts import (
 )
 
 
+_REPORT_DATE_RE = re.compile(
+    r"(?m)^(# (?:AI )?美股(?:综合|决策)日报 · )\d{4}-\d{2}-\d{2}\s*$"
+)
+_DATA_LIMITATION_LINE_RE = re.compile(r"(?m)^- \*\*数据限制\*\*[:：].*$")
+
+
 def _section_pattern(symbol: str) -> re.Pattern[str]:
     return re.compile(
         rf"(?ms)^(?P<header>### \d+\. {re.escape(symbol)}(?: · .*?)? · 最终：[^\n]+)\n"
@@ -18,19 +24,171 @@ def _section_pattern(symbol: str) -> re.Pattern[str]:
     )
 
 
+def _execution_position_pct(packet: FinalDecisionPacket) -> float:
+    if not packet.assessment.execution_authorized or not packet.execution.has_active_plan:
+        return 0.0
+    return 100.0 * float(packet.execution.max_position_pct)
+
+
+def _execution_authorization_lines(packet: FinalDecisionPacket) -> list[str]:
+    authorized = bool(packet.assessment.execution_authorized)
+    lines = [
+        f"- **当前执行授权**：**{'是' if authorized else '否'}**",
+        f"- **当前可执行仓位上限**：**{_execution_position_pct(packet):.1f}%**",
+    ]
+    if packet.execution.has_active_plan and not authorized:
+        lines.append(
+            f"- **条件触发后最大仓位上限**：**{100.0 * float(packet.execution.max_position_pct):.1f}%**"
+        )
+    return lines
+
+
+def _data_availability_summary(section: str) -> str | None:
+    lowered = section.lower()
+    limitations: list[str] = []
+    if (
+        "source-backed deterministic catalyst unavailable" in lowered
+        or "无近期新闻" in section
+        or "暂无已验证的近期证据" in section
+    ):
+        limitations.append("近期新闻/催化证据不足")
+    if "盘中" in section and any(
+        token in section for token in ("不可用", "缺失", "覆盖不可用")
+    ):
+        limitations.append("盘中技术数据不可用")
+    if any(
+        token in lowered
+        for token in (
+            "quote: fallback",
+            "行情实时数据降级",
+            "行情数据源为yfinance降级备份",
+        )
+    ):
+        limitations.append("实时行情存在降级/回退")
+    if not limitations:
+        return None
+    return "- **数据可用性**：" + "；".join(dict.fromkeys(limitations)) + "。"
+
+
+def _normalize_section_presentation(
+    section: str,
+    packet: FinalDecisionPacket,
+) -> str:
+    """Normalize presentation from the already-authoritative final packet.
+
+    No business decision is derived here. The function only makes execution
+    authorization explicit and prevents upstream V4 guidance from being
+    presented as the final execution instruction.
+    """
+    text = section
+
+    text = text.replace("**预测层 vs 执行层**", "**预测层 vs 上游投研层**")
+    if packet.v4_operation:
+        text = re.sub(
+            r"当前执行\s+\*\*[^*\n]+\*\*",
+            f"上游投研动作 **{packet.v4_operation}**（非最终执行）",
+            text,
+        )
+    else:
+        text = re.sub(
+            r"当前执行\s+\*\*[^*\n]+\*\*",
+            "上游投研动作 **未知**（非最终执行）",
+            text,
+        )
+
+    authorized = bool(packet.assessment.execution_authorized)
+    if packet.execution.has_active_plan and not authorized:
+        text = text.replace(
+            "**V6 最大仓位上限**",
+            "**V6 条件触发后最大仓位上限**",
+        )
+        text = text.replace(
+            "（优先采用 V6 确定性风控计划）",
+            "（条件参考，当前未获执行授权）",
+        )
+        cap = 100.0 * float(packet.execution.max_position_pct)
+        text = text.replace(
+            f"最大仓位上限 {cap:.1f}%",
+            f"条件触发后最大仓位上限 {cap:.1f}%",
+        )
+
+    auth_lines = _execution_authorization_lines(packet)
+    if "**当前执行授权**" not in text:
+        lines = text.splitlines()
+        insertion = next(
+            (
+                index + 1
+                for index, line in enumerate(lines)
+                if line.startswith("- **是否值得买**")
+            ),
+            1,
+        )
+        lines[insertion:insertion] = auth_lines
+        text = "\n".join(lines)
+
+    availability = _data_availability_summary(text)
+    if availability and "**数据可用性**" not in text:
+        match = _DATA_LIMITATION_LINE_RE.search(text)
+        if match:
+            text = text[: match.start()] + availability + "\n" + text[match.start() :]
+        else:
+            text = text.rstrip() + "\n" + availability + "\n"
+
+    return text
+
+
+def _effective_report_date(packets: Sequence[FinalDecisionPacket]) -> str | None:
+    dates = sorted(
+        {
+            str(packet.effective_trade_date or "").strip()
+            for packet in packets
+            if re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}",
+                str(packet.effective_trade_date or "").strip(),
+            )
+        }
+    )
+    return dates[-1] if dates else None
+
+
+def _normalize_report_presentation(
+    report: str,
+    packets: Sequence[FinalDecisionPacket],
+) -> str:
+    text = str(report or "")
+    effective_date = _effective_report_date(packets)
+    if effective_date:
+        text = _REPORT_DATE_RE.sub(rf"\g<1>{effective_date}", text, count=1)
+
+    for packet in packets:
+        if not packet.symbol:
+            continue
+        pattern = _section_pattern(packet.symbol)
+        match = pattern.search(text)
+        if not match:
+            continue
+        normalized = _normalize_section_presentation(match.group(0), packet)
+        text = text[: match.start()] + normalized + text[match.end() :]
+    return text
+
+
 def assert_final_decision_report_consistency(
     report: str,
     packets: Iterable[FinalDecisionPacket],
 ) -> None:
-    """Fail closed if presentation drifts from the typed final contract.
-
-    This module deliberately performs validation only. It must never repair or
-    re-derive a business decision from Markdown because FinalDecisionPacket is
-    already the single source used by unified_report to render the decision.
-    """
+    """Fail closed if presentation drifts from the typed final contract."""
+    packet_list = list(packets)
     text = str(report or "")
     errors: list[str] = []
-    for packet in packets:
+
+    effective_date = _effective_report_date(packet_list)
+    if effective_date and not re.search(
+        rf"(?m)^# (?:AI )?美股(?:综合|决策)日报 · {re.escape(effective_date)}\s*$",
+        text,
+    ):
+        errors.append(f"report: effective trade date drift expected={effective_date}")
+
+    for packet in packet_list:
         if not packet.symbol:
             continue
         match = _section_pattern(packet.symbol).search(text)
@@ -41,12 +199,33 @@ def assert_final_decision_report_consistency(
         expected_verdict = f"**是否值得买**：**{verdict_label_zh(packet)}**"
         expected_action = f"最终：{action_label_zh(packet)}"
         expected_agreement = agreement_label_zh(packet)
+        expected_authorized = (
+            f"**当前执行授权**：**{'是' if packet.assessment.execution_authorized else '否'}**"
+        )
+        expected_position = (
+            f"**当前可执行仓位上限**：**{_execution_position_pct(packet):.1f}%**"
+        )
         if expected_verdict not in section:
             errors.append(f"{packet.symbol}: final verdict drift")
         if expected_action not in section:
             errors.append(f"{packet.symbol}: final action drift")
         if expected_agreement not in section:
             errors.append(f"{packet.symbol}: fusion agreement drift")
+        if expected_authorized not in section:
+            errors.append(f"{packet.symbol}: execution authorization drift")
+        if expected_position not in section:
+            errors.append(f"{packet.symbol}: executable position drift")
+        if "当前执行 **" in section:
+            errors.append(f"{packet.symbol}: upstream V4 action masquerades as final execution")
+        if packet.execution.has_active_plan and not packet.assessment.execution_authorized:
+            conditional = (
+                f"**条件触发后最大仓位上限**：**"
+                f"{100.0 * float(packet.execution.max_position_pct):.1f}%**"
+            )
+            if conditional not in section:
+                errors.append(f"{packet.symbol}: conditional position cap missing")
+            if "**V6 最大仓位上限**" in section:
+                errors.append(f"{packet.symbol}: unauthorized plan rendered as active")
     if errors:
         raise ValueError("FinalDecisionPacket/report mismatch: " + "; ".join(errors))
 
@@ -55,12 +234,13 @@ def apply_final_decision_contract(
     report: str,
     packets: Iterable[FinalDecisionPacket],
 ) -> str:
-    """Compatibility shim: validate typed rendering and return it unchanged.
+    """Normalize presentation from FinalDecisionPacket and validate it.
 
-    Before the single-source cutover this function rewrote stale legacy
-    decisions in Markdown. Rewriting is intentionally removed: a mismatch now
-    fails closed instead of silently mutating presentation text.
+    Business decisions are never repaired or re-derived from Markdown. Only
+    presentation fields that must mirror the authoritative packet are
+    normalized, then the report is validated fail-closed.
     """
-    text = str(report or "")
-    assert_final_decision_report_consistency(text, packets)
+    packet_list = list(packets)
+    text = _normalize_report_presentation(str(report or ""), packet_list)
+    assert_final_decision_report_consistency(text, packet_list)
     return text
