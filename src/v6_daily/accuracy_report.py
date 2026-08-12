@@ -437,6 +437,13 @@ def _standardize_stock_card(section: str) -> str:
             else:
                 price_block = None
 
+        # Keep upstream narrative auditable, but make it impossible to mistake
+        # the raw research summary for the FinalDecisionPacket execution view.
+        line = line.replace(
+            "**投研摘要（原始观点）**",
+            "**上游投研摘要（仅解释，非执行）**",
+        )
+
         # Uncalibrated model probability is useful in raw research artifacts but
         # must not look like a live win probability in the investor inbox.
         line = re.sub(
@@ -519,7 +526,14 @@ def _standardize_stock_cards(text: str) -> str:
     pattern = re.compile(
         r"(?ms)^### \d+\. .*?(?=^### \d+\.|^## \d+\.|^## 预测可信度|\Z)"
     )
-    return pattern.sub(lambda match: _standardize_stock_card(match.group(0)), text)
+
+    def replace_card(match: re.Match[str]) -> str:
+        # splitlines()/join() intentionally strips a card's terminal newline.
+        # Restore a Markdown paragraph boundary so the next ###/## heading can
+        # never concatenate onto the final limitation line in email output.
+        return _standardize_stock_card(match.group(0)).rstrip() + "\n\n"
+
+    return pattern.sub(replace_card, text)
 
 
 def build_investor_email_markdown(report: str) -> str:
