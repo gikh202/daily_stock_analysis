@@ -1,0 +1,44 @@
+name: Temporary PR35 shard1 contract patch
+
+on:
+  push:
+    branches:
+      - agent/unified-signal-policy-live-smoke
+
+permissions:
+  contents: write
+
+jobs:
+  patch-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: agent/unified-signal-policy-live-smoke
+          fetch-depth: 0
+
+      - name: Update extractor Initial v2 metadata expectation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/test_decision_signal_extractor.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    assert persisted["metadata"]["signal_generation_version"] == "legacy-report-extractor-v1"\n    assert persisted["metadata"]["decision_signal_metadata_version"] == "decision-signal-metadata-v1"\n    assert "scoring_version" not in persisted["metadata"]\n    assert "scoring_breakdown" not in persisted["metadata"]\n'''
+          new = '''    assert persisted["metadata"]["signal_generation_version"] == "decision-profile-initial-v2"\n    assert persisted["metadata"]["decision_signal_metadata_version"] == "decision-signal-metadata-v1"\n    assert "scoring_version" not in persisted["metadata"]\n    assert persisted["metadata"]["scoring_breakdown"]\n    assert persisted["metadata"]["guardrail_result"]\n'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"Expected exactly 1 stale extractor metadata block, found {count}")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+          git diff --check
+
+      - name: Commit patch and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/zz-fix-pr35-shard1-contract.yml
+          git add tests/test_decision_signal_extractor.py
+          git diff --cached --check
+          git commit -m "test: align extractor persistence metadata with initial v2"
+          git push origin HEAD:agent/unified-signal-policy-live-smoke
