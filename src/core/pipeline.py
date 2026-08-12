@@ -62,6 +62,7 @@ from src.agent.final_explanation import (
 )
 from src.formatters import strip_hidden_markdown_metadata
 from src.phase_decision_guardrail import apply_phase_decision_guardrails
+from src.data_quality_decision_guardrail import apply_data_quality_decision_guardrail
 from src.services.daily_market_context import (
     DailyMarketContext,
     DailyMarketContextService,
@@ -391,7 +392,7 @@ class StockAnalysisPipeline:
 
             # 从数据源获取数据
             logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
-            df, source_name = self.fetcher_manager.get_daily_data(code, days=30)
+            df, source_name = self.fetcher_manager.get_daily_data(code, days=60)
 
             if df is None or df.empty:
                 return False, "获取数据为空"
@@ -1010,6 +1011,28 @@ class StockAnalysisPipeline:
                         "[daily_market_context_guardrail] Applied adjustments for %s: %s",
                         code,
                         market_context_adjustments,
+                    )
+
+                before_data_quality = self._decision_state_snapshot(result)
+                data_quality_adjustments = apply_data_quality_decision_guardrail(
+                    result,
+                    analysis_context_pack_overview=analysis_context_pack_overview,
+                    report_language=getattr(result, "report_language", None)
+                    or getattr(self.config, "report_language", "zh"),
+                )
+                after_data_quality = self._decision_state_snapshot(result)
+                self._append_guardrail_trace(
+                    trace,
+                    name="data_quality",
+                    before=before_data_quality,
+                    after=after_data_quality,
+                    adjustments=data_quality_adjustments,
+                )
+                if data_quality_adjustments:
+                    logger.info(
+                        "[data_quality_decision_guardrail] Applied adjustments for %s: %s",
+                        code,
+                        data_quality_adjustments,
                     )
 
                 if isinstance(fundamental_context, dict):
@@ -2243,6 +2266,39 @@ class StockAnalysisPipeline:
                     )
                 else:
                     action_chain_valid = False
+
+                action_before_guardrail = getattr(result, "action", None)
+                advice_before_guardrail = getattr(result, "operation_advice", None)
+                data_quality_adjustments = apply_data_quality_decision_guardrail(
+                    result,
+                    analysis_context_pack_overview=analysis_context_pack_overview,
+                    report_language=getattr(result, "report_language", None)
+                    or getattr(self.config, "report_language", "zh"),
+                )
+                if data_quality_adjustments:
+                    logger.info(
+                        "[data_quality_decision_guardrail] Applied agent adjustments for %s: %s",
+                        code,
+                        data_quality_adjustments,
+                    )
+                self._refresh_decision_action_for_final_result(
+                    result,
+                    report_type=report_type.value,
+                    previous_operation_advice=advice_before_guardrail,
+                )
+                action_after_guardrail = normalize_decision_action(
+                    getattr(result, "action", None)
+                )
+                if action_chain_valid and action_after_guardrail is not None:
+                    capture_pipeline_action_adjustment(
+                        pipeline_adjustments,
+                        source="data_quality",
+                        before=action_before_guardrail,
+                        after=action_after_guardrail,
+                    )
+                else:
+                    action_chain_valid = False
+
                 if isinstance(fundamental_context, dict):
                     result.fundamental_context = fundamental_context
                 if isinstance(market_structure_context, dict):

@@ -11,13 +11,18 @@ from data_provider.base import normalize_stock_code
 
 from src.analyzer import AnalysisResult
 from src.core.trading_calendar import get_market_for_stock
-from src.schemas.decision_action import build_action_fields, normalize_decision_action
+from src.schemas.decision_action import (
+    build_action_fields,
+    localize_action_label,
+    normalize_decision_action,
+)
 from src.schemas.decision_scale import (
     CANONICAL_DECISION_SCALE_VERSION,
     action_for_score,
     score_action_conflicts_without_guardrail,
     score_band_metadata,
 )
+from src.services.decision_signal_data_quality import normalize_decision_signal_data_quality
 from src.services.decision_signal_service import DecisionSignalService
 from src.services.portfolio_service import VALID_MARKETS
 from src.utils.sniper_points import extract_sniper_points
@@ -39,6 +44,8 @@ _CONFIDENCE_MAP = {
     "low": 0.4,
 }
 
+_ACTIONABLE_ACTIONS = frozenset({"buy", "add"})
+
 
 def build_decision_signal_payload_from_report(
     result: AnalysisResult,
@@ -51,7 +58,15 @@ def build_decision_signal_payload_from_report(
     report_type: str,
     profile_source: ProfileSource,
 ) -> Dict[str, Any] | None:
-    """Build a DecisionSignal payload from a completed stock analysis report."""
+    """Build a DecisionSignal payload from a completed stock analysis report.
+
+    The automatic write path applies the same core data-quality safety
+    principle used by decision-profile reassessment. Explicitly poor evidence
+    must not produce a fresh actionable signal. When the current pipeline
+    supplies a context snapshot, a missing quality contract is also treated as
+    unsafe. Standalone helper calls without a snapshot remain backward
+    compatible, while legacy/backfill records remain reproducible.
+    """
 
     if result is None or not getattr(result, "success", True):
         return None
@@ -65,11 +80,34 @@ def build_decision_signal_payload_from_report(
         score_calibration,
     )
     raw_action = _raw_action_from_report(result)
-    guardrail_reason = _extract_guardrail_reason(result, dashboard, score=score, raw_action=raw_action)
+    guardrail_reason = _extract_guardrail_reason(
+        result,
+        dashboard,
+        score=score,
+        raw_action=raw_action,
+    )
     action_fields = resolve_decision_signal_action_fields(result, report_type=report_type)
-    action = action_fields.get("action")
-    if not action:
+    canonical_action = action_fields.get("action")
+    if not canonical_action:
         return None
+
+    data_quality_summary = _extract_data_quality(context_snapshot, result)
+    guardrail_data_quality = _extract_snapshot_data_quality(context_snapshot)
+    (
+        action,
+        action_label,
+        data_quality_level,
+        data_quality_guardrail_reason,
+    ) = _apply_auto_data_quality_guardrail(
+        action=canonical_action,
+        action_label=action_fields.get("action_label"),
+        data_quality_summary=guardrail_data_quality,
+        report_language=getattr(result, "report_language", None),
+        profile_source=profile_source,
+        quality_contract_required=(
+            profile_source == "auto_default" and context_snapshot is not None
+        ),
+    )
 
     raw_code = str(getattr(result, "code", "") or "").strip()
     market = get_market_for_stock(normalize_stock_code(raw_code))
@@ -77,10 +115,6 @@ def build_decision_signal_payload_from_report(
         logger.warning("Skip decision signal extraction: unrecognized market stock_code=%s", raw_code)
         return None
     if market not in VALID_MARKETS:
-        # A market the data layer recognizes but the decision-signal service
-        # layer does not accept (e.g. a market added to detection ahead of
-        # VALID_MARKETS). Skip gracefully instead of letting create_signal
-        # raise a swallowed ValueError + noisy traceback.
         logger.info(
             "Skip decision signal extraction: market=%s not yet wired for signals stock_code=%s",
             market,
@@ -105,6 +139,7 @@ def build_decision_signal_payload_from_report(
         "signal_generation_version": "legacy-report-extractor-v1",
         "decision_signal_metadata_version": "decision-signal-metadata-v1",
         "canonical_decision_scale_version": CANONICAL_DECISION_SCALE_VERSION,
+        "data_quality_level": data_quality_level,
     }
     score_metadata = score_band_metadata(score)
     if score_metadata:
@@ -122,10 +157,17 @@ def build_decision_signal_payload_from_report(
         metadata["final_action"] = action
         if raw_action:
             metadata["raw_action"] = raw_action
-        if raw_action and raw_action != action:
+        if raw_action and raw_action != canonical_action:
             metadata["action_adjustment_reason"] = "canonical_score_alignment"
-    if guardrail_reason:
-        metadata["guardrail_reason"] = guardrail_reason
+        if canonical_action != action:
+            metadata["canonical_action"] = canonical_action
+            metadata["action_adjustment_reason"] = "data_quality_guardrail"
+    effective_guardrail_reason = guardrail_reason or data_quality_guardrail_reason
+    if effective_guardrail_reason:
+        metadata["guardrail_reason"] = effective_guardrail_reason
+    if data_quality_guardrail_reason:
+        metadata["data_quality_guardrail_reason"] = data_quality_guardrail_reason
+
     market_phase_summary = _extract_market_phase_summary(context_snapshot, result)
     if market_phase_summary:
         metadata["market_phase_summary"] = market_phase_summary
@@ -145,7 +187,7 @@ def build_decision_signal_payload_from_report(
         "market_phase": _extract_market_phase(context_snapshot, result),
         "trigger_source": str(query_source or "").strip() or "system",
         "action": action,
-        "action_label": action_fields.get("action_label"),
+        "action_label": action_label,
         "confidence": _confidence_from_level(getattr(result, "confidence_level", None)),
         "score": score,
         "entry_low": entry_low,
@@ -161,7 +203,7 @@ def build_decision_signal_payload_from_report(
         "catalyst_summary": _catalyst_summary(dashboard),
         "watch_conditions": _watch_conditions(dashboard),
         "evidence": _evidence(result, sniper_points),
-        "data_quality_summary": _extract_data_quality(context_snapshot, result),
+        "data_quality_summary": data_quality_summary,
         "metadata": metadata,
         "report_language": getattr(result, "report_language", None),
     }
@@ -174,6 +216,7 @@ def resolve_decision_signal_action_fields(
     report_type: str,
 ) -> Dict[str, Optional[str]]:
     """Resolve the canonical public action shared by reports and DecisionSignal."""
+
     dashboard = _as_mapping(getattr(result, "dashboard", None))
     score_calibration = _as_mapping(dashboard.get("decision_score_calibration"))
     score = _effective_signal_score(
@@ -236,6 +279,45 @@ def extract_and_persist_from_analysis_result(
             exc_info=True,
         )
         return None
+
+
+def _apply_auto_data_quality_guardrail(
+    *,
+    action: str,
+    action_label: Optional[str],
+    data_quality_summary: Any,
+    report_language: Optional[str],
+    profile_source: ProfileSource,
+    quality_contract_required: bool,
+) -> tuple[str, Optional[str], str, Optional[str]]:
+    """Downgrade unsafe fresh buy/add signals when evidence quality is insufficient.
+
+    Explicit ``poor`` quality is unsafe for every path. The current automatic
+    persistence path also fails closed when it supplies a context snapshot but
+    the snapshot is missing its quality contract. Standalone helper calls and
+    legacy/backfill paths do not invent a quality failure from missing context.
+    """
+
+    quality_level = normalize_decision_signal_data_quality(data_quality_summary)
+    quality_blocks_action = quality_level == "poor" or (
+        quality_level == "unknown" and quality_contract_required
+    )
+    if action not in _ACTIONABLE_ACTIONS or not quality_blocks_action:
+        return action, action_label, quality_level, None
+
+    reason = f"insufficient_data_quality:{quality_level}"
+    logger.warning(
+        "DecisionSignal actionable action downgraded by data-quality guardrail: action=%s quality=%s profile_source=%s",
+        action,
+        quality_level,
+        profile_source,
+    )
+    return (
+        "watch",
+        localize_action_label("watch", report_language),
+        quality_level,
+        reason,
+    )
 
 
 def _as_mapping(value: Any) -> Dict[str, Any]:
@@ -357,7 +439,10 @@ def _confidence_from_level(value: Any) -> Optional[float]:
     return _CONFIDENCE_MAP.get(key)
 
 
-def _entry_range(ideal_buy: Optional[float], secondary_buy: Optional[float]) -> tuple[Optional[float], Optional[float]]:
+def _entry_range(
+    ideal_buy: Optional[float],
+    secondary_buy: Optional[float],
+) -> tuple[Optional[float], Optional[float]]:
     """Return numeric entry bounds while preserving single-value source semantics."""
 
     low = ideal_buy if ideal_buy is not None and math.isfinite(ideal_buy) and ideal_buy > 0 else None
@@ -367,7 +452,10 @@ def _entry_range(ideal_buy: Optional[float], secondary_buy: Optional[float]) -> 
     return low, high
 
 
-def _extract_market_phase(context_snapshot: Optional[Mapping[str, Any]], result: AnalysisResult) -> Optional[str]:
+def _extract_market_phase(
+    context_snapshot: Optional[Mapping[str, Any]],
+    result: AnalysisResult,
+) -> Optional[str]:
     snapshot_phase = _as_mapping(_as_mapping(context_snapshot).get("market_phase_summary")).get("phase")
     if snapshot_phase:
         return str(snapshot_phase)
@@ -429,10 +517,19 @@ def _extract_market_structure_summary(
     return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
 
 
-def _extract_data_quality(context_snapshot: Optional[Mapping[str, Any]], result: AnalysisResult) -> Optional[Any]:
-    snapshot_quality = _as_mapping(
+def _extract_snapshot_data_quality(
+    context_snapshot: Optional[Mapping[str, Any]],
+) -> Optional[Any]:
+    return _as_mapping(
         _as_mapping(context_snapshot).get("analysis_context_pack_overview")
     ).get("data_quality")
+
+
+def _extract_data_quality(
+    context_snapshot: Optional[Mapping[str, Any]],
+    result: AnalysisResult,
+) -> Optional[Any]:
+    snapshot_quality = _extract_snapshot_data_quality(context_snapshot)
     if snapshot_quality:
         return snapshot_quality
     return _as_mapping(getattr(result, "analysis_context_pack_overview", None)).get("data_quality")

@@ -1690,8 +1690,8 @@ class TestPipelineRouting(unittest.TestCase):
 class TestAnalyzeWithAgentStockName(unittest.TestCase):
     """Test stock-name handling in _analyze_with_agent."""
 
-    def test_analyze_with_agent_keeps_high_score_hold_action_consistent_across_outputs(self):
-        """A high-score hold may align to buy, and every public output must use that action."""
+    def test_analyze_with_agent_poor_context_downgrades_high_score_buy_consistently(self):
+        """Poor core evidence must downgrade the final execution action everywhere."""
         with patch('src.core.pipeline.get_config') as mock_config, \
              patch('src.core.pipeline.get_db'), \
              patch('src.core.pipeline.DataFetcherManager'), \
@@ -1769,21 +1769,25 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
 
             self.assertIsNotNone(result)
             self.assertEqual(result.decision_type, "hold")
-            self.assertEqual(result.action, "buy")
-            self.assertEqual(result.action_label, "买入")
+            self.assertEqual(result.action, "watch")
+            self.assertEqual(result.action_label, "观望")
 
             explanation = result.dashboard["agent_disagreement_explanation"]
             self.assertNotIn("final_signal", explanation)
             self.assertEqual(explanation["pipeline_start_action"], "buy")
-            self.assertEqual(explanation["final_adjustments"], [])
-            self.assertEqual(explanation["final_action"], "buy")
+            self.assertTrue(explanation["final_adjustments"])
+            self.assertEqual(explanation["final_action"], "watch")
+            self.assertEqual(
+                result.dashboard["decision_stability"]["data_quality_guardrail"]["reason"],
+                "insufficient_data_quality:poor",
+            )
 
             saved_result = pipeline.db.save_analysis_history.call_args.kwargs["result"]
             self.assertIs(saved_result, result)
-            self.assertEqual(saved_result.action, "buy")
+            self.assertEqual(saved_result.action, "watch")
             self.assertEqual(
                 saved_result.dashboard["agent_disagreement_explanation"]["final_action"],
-                "buy",
+                "watch",
             )
 
             signal_result = (
@@ -1799,7 +1803,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
                 profile_source="auto_default",
             )
             self.assertIsNotNone(signal_payload)
-            self.assertEqual(signal_payload["action"], "buy")
+            self.assertEqual(signal_payload["action"], "watch")
             self.assertEqual(signal_payload["metadata"]["decision_type"], "hold")
 
     def test_analyze_with_agent_keeps_ambiguous_action_fail_closed_across_outputs(self):
@@ -2243,6 +2247,16 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
              patch('src.core.pipeline.GeminiAnalyzer'), \
              patch('src.core.pipeline.NotificationService'), \
              patch('src.core.pipeline.SearchService'), \
+             patch(
+                 'src.core.pipeline.render_analysis_context_pack_overview',
+                 return_value={
+                     'data_quality': {
+                         'overall_score': 95,
+                         'level': 'good',
+                         'limitations': [],
+                     }
+                 },
+             ), \
              patch('src.core.pipeline.stabilize_decision_with_structure'), \
              patch('src.agent.factory.build_agent_executor') as mock_build_executor:
 
