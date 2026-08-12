@@ -6,8 +6,8 @@ GitHub Actions uses two complementary analysis checkpoints instead of forcing in
 
 | Checkpoint | Workflow | Trigger semantics |
 | --- | --- | --- |
-| 15 minutes after the US open | `.github/workflows/01-us-open-confirmation.yml` | Uses 13:45 UTC / 14:45 UTC candidate cron entries, then validates the current `America/New_York` UTC offset so only the true 09:45 ET candidate dispatches the full analysis |
-| After the US close | `.github/workflows/00-daily-analysis.yml` | Runs the full analysis at 22:30 UTC on weekdays; this remains after the regular US session close under both EDT and EST |
+| 15 minutes after the US open | `.github/workflows/01-us-open-confirmation.yml` | Targets 09:45 ET. To tolerate GitHub Actions scheduling delays, lightweight compensation candidates also run at 09:55, 10:10, 10:25, 10:40, 10:55, and 11:10 ET. The orchestrator reuses the successful/in-flight V4/V6 chain so the candidates do not intentionally send duplicate final emails. |
+| After the US close | `.github/workflows/00-daily-analysis.yml` | Runs the full analysis at 22:30 UTC on weekdays. GitHub scheduled jobs may queue and start later, so the actual email can arrive after the nominal 06:30 Taipei/Beijing time. |
 
 The open-confirmation workflow dispatches the existing full daily-analysis workflow rather than duplicating analysis logic. Both checkpoints therefore share the same stock list, market-phase handling, data/LLM configuration, report and DecisionSignal guardrails, notification channels, trading-day checks, and report artifacts.
 
@@ -37,10 +37,12 @@ The final email, analysis history, and automatic DecisionSignal use the same fin
 
 Insufficient technical history is represented as unavailable rather than inferred from placeholder values. MA60 is exposed only when enough real history exists, and technical-score coverage records which indicator groups are actually available before an active buy conclusion can be produced.
 
-## Market holidays and DST
+## Market holidays, DST, and scheduling delay
 
-- `01-us-open-confirmation.yml` uses an `America/New_York` offset gate to cover EDT / EST without a one-hour drift at daylight-saving transitions.
+- `01-us-open-confirmation.yml` uses the `America/New_York` timezone directly, so daylight-saving transitions do not shift the target by an hour.
+- The multiple open candidates are compensation triggers, not an instruction to send multiple emails. A successful or in-flight V4/V6 chain is reused by later scheduled candidates.
 - Weekday cron expressions are only candidate triggers. Existing trading-day checks still decide whether analysis should actually run on US market holidays.
+- GitHub Actions scheduling is not a hard real-time scheduler and may run late when the platform queue is busy; the 22:30 UTC post-close schedule can be delayed as well.
 - For validation, use the manual `workflow_dispatch` entry on the open-confirmation workflow and the manual entry on the daily-analysis workflow.
 
 ## Avoid duplicate schedules
