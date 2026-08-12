@@ -55,19 +55,30 @@ def apply_initial_decision_profile_policy(
     result: Any,
     *,
     context_snapshot: Optional[Mapping[str, Any]],
+    source_report_id: Optional[int],
     canonical_action: Any,
     score: Optional[int],
     report_language: Optional[str],
     profile_source: str,
 ) -> Optional[InitialDecisionProfilePolicyOutcome]:
-    """Apply the same policy used by reassessment to fresh production signals.
+    """Apply the same policy used by reassessment to fresh persisted signals.
 
-    Only the authoritative fresh persistence path (``auto_default`` with a
-    context snapshot) is migrated. Standalone helpers and legacy/backfill paths
-    keep their historical behavior so old records remain reproducible.
+    Only the authoritative persistence path (``auto_default`` with a saved
+    source report and context snapshot) is migrated. Standalone helpers and
+    legacy/backfill paths keep their historical behavior so old records remain
+    reproducible.
     """
 
-    if profile_source != "auto_default" or context_snapshot is None:
+    valid_source_report_id = (
+        isinstance(source_report_id, int)
+        and not isinstance(source_report_id, bool)
+        and source_report_id > 0
+    )
+    if (
+        profile_source != "auto_default"
+        or context_snapshot is None
+        or not valid_source_report_id
+    ):
         return None
 
     action = normalize_decision_action(canonical_action)
