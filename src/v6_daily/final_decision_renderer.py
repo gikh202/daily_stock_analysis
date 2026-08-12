@@ -97,21 +97,30 @@ def _normalize_next_check_presentation(section: str) -> str:
     U.S. open. Upstream research text may say 09:30, "open +30", or emit an ISO
     timestamp. Preserve the upstream trading date, but present one deterministic
     checkpoint in the final report.
+
+    Keep the original line endings. ``_normalize_report_presentation`` replaces
+    one matched symbol section at a time; dropping the trailing newline here can
+    glue the next ``### N. SYMBOL`` heading onto the previous line. The validator
+    then treats the following symbol as missing and may accidentally validate its
+    content as part of the previous symbol.
     """
     normalized: list[str] = []
-    for line in section.splitlines():
+    for raw_line in section.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        ending = raw_line[len(line) :]
         if "下次检查" not in line:
-            normalized.append(line)
+            normalized.append(raw_line)
             continue
         date_match = _NEXT_CHECK_DATE_RE.search(line)
         line_match = _NEXT_CHECK_LINE_RE.match(line)
         if not date_match or not line_match:
-            normalized.append(line)
+            normalized.append(raw_line)
             continue
         normalized.append(
             f"{line_match.group('prefix')}：**{date_match.group(0)} 09:45 ET（开盘后15分钟）**"
+            f"{ending}"
         )
-    return "\n".join(normalized)
+    return "".join(normalized)
 
 
 def _data_availability_summary(section: str) -> str | None:
