@@ -519,10 +519,11 @@ def test_extract_and_persist_reuses_service_dedup_and_sanitization(isolated_db) 
     assert persisted["metadata"]["decision_profile"] == "balanced"
     assert persisted["metadata"]["profile_source"] == "auto_default"
     assert persisted["metadata"]["profile_policy_version"] == "decision-profile-v1"
-    assert persisted["metadata"]["signal_generation_version"] == "legacy-report-extractor-v1"
+    assert persisted["metadata"]["signal_generation_version"] == "decision-profile-initial-v2"
     assert persisted["metadata"]["decision_signal_metadata_version"] == "decision-signal-metadata-v1"
     assert "scoring_version" not in persisted["metadata"]
-    assert "scoring_breakdown" not in persisted["metadata"]
+    assert persisted["metadata"]["scoring_breakdown"]
+    assert persisted["metadata"]["guardrail_result"]
     assert persisted["reason"] == "趋势确认 token=[REDACTED]"
     assert persisted["entry_low"] == 1690.0
     assert persisted["entry_high"] == 1700.0

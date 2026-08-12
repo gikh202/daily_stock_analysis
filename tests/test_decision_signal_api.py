@@ -1984,8 +1984,9 @@ def test_reassess_balanced_persist_reuses_actual_auto_generated_signal(client_an
     assert payload["item"]["source_agent"] == auto_item["source_agent"]
     assert payload["item"]["trigger_source"] == "api"
     assert payload["item"]["metadata"]["profile_source"] == "auto_default"
-    assert payload["item"]["metadata"]["signal_generation_version"] == "legacy-report-extractor-v1"
-    assert "scoring_breakdown" not in payload["item"]["metadata"]
+    assert payload["item"]["metadata"]["signal_generation_version"] == "decision-profile-initial-v2"
+    assert payload["item"]["metadata"]["scoring_breakdown"]
+    assert payload["item"]["metadata"]["guardrail_result"]
     assert _decision_signal_count(db) == 1
 
 
@@ -2059,8 +2060,9 @@ def test_reassess_balanced_persist_reports_relaxed_phase_fill_without_overwritin
     assert payload["item"]["source_agent"] == auto_item["source_agent"]
     assert payload["item"]["trigger_source"] == "api"
     assert payload["item"]["metadata"]["profile_source"] == "auto_default"
-    assert payload["item"]["metadata"]["signal_generation_version"] == "legacy-report-extractor-v1"
-    assert "scoring_breakdown" not in payload["item"]["metadata"]
+    assert payload["item"]["metadata"]["signal_generation_version"] == "decision-profile-initial-v2"
+    assert payload["item"]["metadata"]["scoring_breakdown"]
+    assert payload["item"]["metadata"]["guardrail_result"]
     assert _decision_signal_count(db) == 1
 
 
