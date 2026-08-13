@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ===================================
-# A股自选股智能分析系统 - Docker 镜像
+# 多市场股票智能分析系统 - Docker 镜像
 # ===================================
 # 多阶段构建：前端打包 + 后端运行
 
@@ -43,8 +43,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -g 1000 dsa && \
     useradd -u 1000 -g dsa -m dsa
 
-# 复制依赖文件
-COPY requirements.txt .
+# 复制兼容范围与生产锁定文件。requirements.txt 会读取 constraints-production.txt，
+# 因此两者必须在 pip 解析依赖前同时存在于镜像中。
+COPY requirements.txt constraints-production.txt ./
 
 # 安装 Python 依赖
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
