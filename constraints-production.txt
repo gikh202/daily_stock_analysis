@@ -1,0 +1,39 @@
+# Production/CI constraints for reproducible GitHub Actions runs.
+# Keep requirements.txt as the compatibility declaration; install with
+#   pip install -c constraints-production.txt -r requirements.txt
+# Update this file deliberately in a reviewed PR after provider/CI smoke tests.
+
+python-dotenv==1.2.2
+tenacity==9.1.4
+SQLAlchemy==2.0.52
+schedule==1.2.2
+exchange-calendars==4.13.2
+
+efinance==0.5.9
+akshare==1.18.84
+tushare==1.4.29
+pytdx==1.72
+baostock==0.9.3
+yfinance==1.5.2
+longbridge==0.2.74; platform_system == "Linux" and python_version < "3.12"
+tickflow==0.1.24
+futu-api==10.8.6808
+
+pandas==3.0.5
+numpy==2.4.6
+openpyxl==3.1.5
+json-repair==0.63.1
+orjson==3.11.9
+
+litellm==1.96.2
+tiktoken==0.11.0
+openai==2.54.0
+PyYAML==6.0.3
+
+requests==2.34.2
+httpx==0.28.1
+markdown2==2.5.5
+jinja2==3.1.6
+fastapi==0.141.1
+uvicorn==0.52.1
+python-multipart==0.0.32
