@@ -2,11 +2,14 @@
 
 这里是项目文档入口。README 负责项目概览和快速开始；更完整的配置、部署、功能说明和排障内容从这里进入。
 
+> `gikh202/daily_stock_analysis` 当前 Fork 的 V4/V6、美股开盘确认、最终邮件、Provider Smoke、依赖锁定与回测门禁，请优先参考 [当前生产架构与运行契约](production-architecture.md)。
+
 ## 按场景选择
 
 | 我想要 | 先看 | 继续看 |
 | --- | --- | --- |
 | 快速了解项目能做什么 | [README](../README.md) | [完整配置与部署指南](full-guide.md) |
+| 了解当前 Fork 的实际生产链路 | [当前生产架构与运行契约](production-architecture.md) | [完整配置与部署指南](full-guide.md) |
 | 第一次把项目跑起来 | [小白客户端安装与配置](beginner-client-setup.md) | [完整配置与部署指南](full-guide.md) |
 | 配置大模型渠道 | [LLM 配置指南](LLM_CONFIG_GUIDE.md) | [LLM 服务商配置指南](llm-providers.md) |
 | 配置推送通知 | [通知能力基线](notifications.md) | [完整配置与部署指南](full-guide.md) |
@@ -21,6 +24,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [README](../README.md) | 项目定位、核心能力、快速开始、推送效果 |
+| [当前生产架构与运行契约](production-architecture.md) | 当前 Fork 的 V4/V6 决策链、开盘确认、watchdog、Provider Smoke、依赖约束与策略回测门禁 |
 | [小白客户端安装与配置](beginner-client-setup.md) | 面向不会代码用户的客户端下载、Anspire Open / AIHubMix 模型配置、新闻源配置和常见问题 |
 | [完整配置与部署指南](full-guide.md) | 环境准备、运行方式、配置说明、部署路径和常见问题 |
 | [FAQ](FAQ.md) | 常见配置、模型、通知、部署和运行问题 |
