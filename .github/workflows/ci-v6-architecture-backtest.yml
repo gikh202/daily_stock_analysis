@@ -5,8 +5,15 @@ on:
     paths:
       - 'src/v6_daily/**'
       - 'src/alpha_engine/**'
+      - 'src/core/**'
+      - 'src/agent/**'
+      - 'src/llm_backends/**'
+      - 'data_provider/**'
       - 'scripts/run_v6_accuracy_weekly.py'
       - 'scripts/backfill_v6_accuracy_history.py'
+      - 'scripts/assert_v6_strategy_quality.py'
+      - 'scripts/check_architecture_budget.py'
+      - 'constraints-production.txt'
       - 'tests/test_v6_decision_packet.py'
       - '.github/workflows/ci-v6-architecture-backtest.yml'
 
@@ -41,12 +48,17 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-          cache-dependency-path: head/requirements.txt
+          cache-dependency-path: |
+            head/requirements.txt
+            head/constraints-production.txt
 
-      - name: Install dependencies
+      - name: Install dependencies (locked)
         run: |
           python -m pip install --upgrade pip
-          pip install -r head/requirements.txt
+          pip install -c head/constraints-production.txt -r head/requirements.txt
+
+      - name: Enforce architecture growth budget
+        run: python head/scripts/check_architecture_budget.py
 
       - name: Restore latest production source database
         uses: actions/cache/restore@v5
@@ -169,14 +181,22 @@ jobs:
                   f"{item.get('horizon_days')}D "
                   f"N={independent.get('samples')} "
                   f"hit={independent.get('directional_hit_rate_pct')} "
-                  f"spy_alpha={independent.get('avg_excess_vs_spy_pct')} "
-                  f"alpha_target_hit={alpha.get('alpha_hit_rate_pct')}"
+                  f"underlying_vs_spy={independent.get('avg_underlying_excess_vs_spy_pct')} "
+                  f"directional_strategy_vs_spy={independent.get('avg_excess_vs_spy_pct')} "
+                  f"alpha_target_hit={alpha.get('alpha_hit_rate_pct')} "
+                  f"alpha_return={alpha.get('avg_alpha_trade_return_pct')}"
               )
           PY
 
+      - name: Enforce strategy quality / no-regression gate
+        run: |
+          python head/scripts/assert_v6_strategy_quality.py \
+            --head backtest_artifacts/head/v6_accuracy_weekly.json \
+            --base backtest_artifacts/base/v6_accuracy_weekly.json
+
       - name: Upload backtest artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: v6-architecture-backtest-${{ github.run_id }}
           path: backtest_artifacts/
