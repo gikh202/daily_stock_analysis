@@ -1,12 +1,14 @@
 name: 美股开盘确认调度兜底
 
 on:
-  # GitHub Actions 的 schedule 可能因队列负载延迟或漏触发。
-  # 这里使用纯 UTC 候选点覆盖 EDT/EST，再按纽约本地时间二次校验。
-  # 刻意避开整点，降低 GitHub Actions 高峰排队概率。
+  # GitHub Actions 的 schedule 可能因队列负载延迟，极端情况下排队任务也可能被丢弃。
+  # 这里使用与主 workflow 独立的一组纯 UTC 候选点覆盖 EDT/EST，并按纽约本地时间二次校验。
+  # 候选点刻意避开整点；补偿窗口延长到 12:30 ET，允许严重排队后的任务仍能补发。
   schedule:
-    - cron: '47,57 13,14 * * 1-5'
-    - cron: '12,27,42 14,15 * * 1-5'
+    - cron: '47,57 13 * * 1-5'
+    - cron: '12,27,42,47,57 14 * * 1-5'
+    - cron: '12,27,42,57 15,16 * * 1-5'
+    - cron: '12,27 17 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -22,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: 检查纽约开盘确认窗口并按需补触发
+      - name: 检查最终 V6 覆盖并按需补触发
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -30,6 +32,7 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const manual = context.eventName === 'workflow_dispatch';
+            const BOT_LOGIN = 'github-actions[bot]';
 
             const now = new Date();
             const nyParts = new Intl.DateTimeFormat('en-US', {
@@ -44,34 +47,39 @@ jobs:
             const minute = Number(part('minute'));
             const hm = hour * 60 + minute;
             const weekdayOk = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
-            const inWindow = weekdayOk && hm >= 9 * 60 + 45 && hm <= 11 * 60 + 15;
+            const inWindow = weekdayOk && hm >= 9 * 60 + 45 && hm <= 12 * 60 + 30;
 
             core.info(`New York local: ${weekday} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
             if (!manual && !inWindow) {
-              core.info('Outside 09:45-11:15 ET confirmation window; skip.');
+              core.info('Outside 09:45-12:30 ET compensation window; skip.');
               return;
             }
 
-            // If the primary workflow already succeeded or is still running recently,
-            // do not dispatch another copy. Failed/cancelled runs are intentionally
-            // ignored so a later watchdog point can recover automatically.
+            // The primary confirmation workflow can finish with conclusion=success even
+            // when its gate skips all analysis because a delayed schedule arrived outside
+            // the primary window. Therefore primary-workflow success is NOT proof that an
+            // email was produced. Use the downstream V6 final-report run as the coverage
+            // signal instead. A failed V6 is deliberately ignored so a later watchdog
+            // candidate retries the entire V4 -> V6 chain.
             const response = await github.rest.actions.listWorkflowRuns({
               owner,
               repo,
-              workflow_id: '01-us-open-confirmation.yml',
+              workflow_id: '03-v6-daily.yml',
+              event: 'workflow_dispatch',
               branch: 'main',
               per_page: 50,
             });
             const cutoff = Date.now() - 4 * 60 * 60 * 1000;
-            const usable = (response.data.workflow_runs || []).find((run) => {
+            const covered = (response.data.workflow_runs || []).find((run) => {
+              if (run.actor?.login !== BOT_LOGIN) return false;
               const created = new Date(run.created_at).getTime();
               if (created < cutoff) return false;
               if (run.status !== 'completed') return true;
               return run.conclusion === 'success';
             });
 
-            if (usable && !manual) {
-              core.info(`Primary confirmation already covered by run ${usable.id} (${usable.status}/${usable.conclusion || 'n/a'}); skip.`);
+            if (covered && !manual) {
+              core.info(`Final V6 coverage already exists: run ${covered.id} (${covered.status}/${covered.conclusion || 'n/a'}); skip.`);
               return;
             }
 
@@ -81,4 +89,4 @@ jobs:
               workflow_id: '01-us-open-confirmation.yml',
               ref: 'main',
             });
-            core.info('Dispatched 01-us-open-confirmation.yml as schedule fallback.');
+            core.info('No successful/in-flight automated V6 final report found; dispatched 01-us-open-confirmation.yml fallback.');
