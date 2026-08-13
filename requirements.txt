@@ -2,6 +2,10 @@
 # Daily Stock Analysis - dependencies
 # ===================================
 
+# Reproducible direct-dependency snapshot used by production and CI.
+# Compatibility ranges stay below; deliberate upgrades update the constraints file.
+-c constraints-production.txt
+
 # Core dependencies
 python-dotenv>=1.0.0        # Environment variable configuration
 tenacity>=8.2.0             # Retry support with exponential backoff
