@@ -12,7 +12,7 @@ BUDGETS = {
     "src/core/pipeline.py": 218_000,
     "src/core/config_registry.py": 190_000,
     "data_provider/base.py": 174_000,
-    "src/llm_backends/local_cli_backend.py": 104_000,
+    "src/llm/local_cli_backend.py": 104_000,
     "src/agent/orchestrator.py": 87_000,
 }
 
