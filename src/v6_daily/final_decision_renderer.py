@@ -7,6 +7,7 @@ from .fusion_contracts import (
     FinalDecisionPacket,
     action_label_zh,
     agreement_label_zh,
+    render_final_decision_lines,
     verdict_label_zh,
 )
 
@@ -31,6 +32,12 @@ _NEXT_CHECK_LINE_RE = re.compile(r"^(?P<prefix>.*?下次检查(?:\*\*)?)[:：].*
 _NEXT_CHECK_DATE_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
 _UPSTREAM_CURRENT_EXECUTION_RE = re.compile(
     r"当前执行(?:\s*[:：])?\s*\*\*[^*\n]+\*\*"
+)
+_AUTHORITY_PREFIXES = (
+    "- **是否值得买**",
+    "- **当前执行授权**",
+    "- **当前可执行仓位上限**",
+    "- **条件触发后最大仓位上限**",
 )
 
 
@@ -60,18 +67,86 @@ def _execution_authorization_lines(packet: FinalDecisionPacket) -> list[str]:
     return lines
 
 
+def _authoritative_decision_lines(packet: FinalDecisionPacket) -> list[str]:
+    """Render the authority block directly from the typed final contract."""
+    typed_lines = render_final_decision_lines(packet)
+    verdict_line = typed_lines[0] if typed_lines else (
+        f"- **是否值得买**：**{verdict_label_zh(packet)}**"
+    )
+    return [verdict_line, *_execution_authorization_lines(packet)]
+
+
+def _assert_existing_authority_compatible(
+    section: str,
+    packet: FinalDecisionPacket,
+) -> None:
+    """Refuse to silently repair a stale business verdict or execution state.
+
+    The renderer may add missing typed fields and collapse duplicate *matching*
+    fields, but a pre-existing value that disagrees with FinalDecisionPacket is
+    a contract violation and must fail closed.
+    """
+    expected_verdict = f"**是否值得买**：**{verdict_label_zh(packet)}**"
+    expected_authorized = (
+        f"**当前执行授权**：**{'是' if packet.assessment.execution_authorized else '否'}**"
+    )
+    expected_position = (
+        f"**当前可执行仓位上限**：**{_execution_position_pct(packet):.1f}%**"
+    )
+    expected_conditional = None
+    if packet.execution.has_active_plan and not packet.assessment.execution_authorized:
+        expected_conditional = (
+            f"**条件触发后最大仓位上限**：**"
+            f"{100.0 * float(packet.execution.max_position_pct):.1f}%**"
+        )
+
+    errors: list[str] = []
+    for line in section.splitlines():
+        if line.startswith("- **是否值得买**") and expected_verdict not in line:
+            errors.append(f"{packet.symbol}: final verdict drift")
+        elif line.startswith("- **当前执行授权**") and expected_authorized not in line:
+            errors.append(f"{packet.symbol}: execution authorization drift")
+        elif line.startswith("- **当前可执行仓位上限**") and expected_position not in line:
+            errors.append(f"{packet.symbol}: executable position drift")
+        elif line.startswith("- **条件触发后最大仓位上限**"):
+            if expected_conditional is None or expected_conditional not in line:
+                errors.append(f"{packet.symbol}: conditional position cap drift")
+
+    if errors:
+        raise ValueError("FinalDecisionPacket/report mismatch: " + "; ".join(errors))
+
+
+def _replace_authoritative_decision_block(
+    section: str,
+    packet: FinalDecisionPacket,
+) -> str:
+    """Rebuild matching/missing authority fields from the typed contract."""
+    trailing_newline = "\n" if section.endswith("\n") else ""
+    lines = section.splitlines()
+    kept: list[str] = []
+    insertion_index: int | None = None
+    for line in lines:
+        if any(line.startswith(prefix) for prefix in _AUTHORITY_PREFIXES):
+            if insertion_index is None:
+                insertion_index = len(kept)
+            continue
+        kept.append(line)
+
+    if insertion_index is None:
+        insertion_index = 1 if kept else 0
+
+    authority = _authoritative_decision_lines(packet)
+    kept[insertion_index:insertion_index] = authority
+    return "\n".join(kept) + trailing_newline
+
+
 def _news_evidence_unavailable(section: str) -> bool:
     lowered = section.lower()
     return any(marker.lower() in lowered for marker in _NEWS_EVIDENCE_UNAVAILABLE)
 
 
 def _normalize_news_presentation(section: str) -> str:
-    """Fail safe when current news evidence is unavailable.
-
-    Missing evidence cannot support claims such as "sentiment is neutral" or
-    "there is no catalyst". Keep the raw upstream research in artifacts, while
-    the final investor report states only the evidence limitation.
-    """
+    """Fail safe when current news evidence is unavailable."""
     if not _news_evidence_unavailable(section):
         return section
     text = _NEWS_LINE_RE.sub(
@@ -82,31 +157,12 @@ def _normalize_news_presentation(section: str) -> str:
 
 
 def _normalize_us_price_units(section: str) -> str:
-    """Render bare CNY-style stock price suffixes as USD in U.S. stock cards.
-
-    These sections are exclusively U.S. equities/ETFs. A bare numeric ``元``
-    attached directly to a technical/watch price is therefore a presentation
-    leak from the upstream Chinese template, not a valid currency conversion.
-    Amounts such as ``900亿美元`` are unaffected because ``元`` is not directly
-    attached to the numeric token.
-    """
+    """Render bare CNY-style stock price suffixes as USD in U.S. stock cards."""
     return _US_PRICE_YUAN_RE.sub(r"$\1", section)
 
 
 def _normalize_next_check_presentation(section: str) -> str:
-    """Canonicalize the next live confirmation checkpoint to the 09:45 ET run.
-
-    The production workflow's confirmation run is 15 minutes after the regular
-    U.S. open. Upstream research text may say 09:30, "open +30", or emit an ISO
-    timestamp. Preserve the upstream trading date, but present one deterministic
-    checkpoint in the final report.
-
-    Keep the original line endings. ``_normalize_report_presentation`` replaces
-    one matched symbol section at a time; dropping the trailing newline here can
-    glue the next ``### N. SYMBOL`` heading onto the previous line. The validator
-    then treats the following symbol as missing and may accidentally validate its
-    content as part of the previous symbol.
-    """
+    """Canonicalize the next live confirmation checkpoint to 09:45 ET."""
     normalized: list[str] = []
     for raw_line in section.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
@@ -153,12 +209,9 @@ def _normalize_section_presentation(
     section: str,
     packet: FinalDecisionPacket,
 ) -> str:
-    """Normalize presentation from the already-authoritative final packet.
+    """Normalize display without silently changing a stale business decision."""
+    _assert_existing_authority_compatible(section, packet)
 
-    No business decision is derived here. The function only makes execution
-    authorization explicit and prevents upstream V4 guidance from being
-    presented as the final execution instruction.
-    """
     text = _normalize_news_presentation(section)
     text = _normalize_us_price_units(text)
     text = _normalize_next_check_presentation(text)
@@ -191,24 +244,7 @@ def _normalize_section_presentation(
             f"条件触发后最大仓位上限 {cap:.1f}%",
         )
 
-    auth_lines = _execution_authorization_lines(packet)
-    if "**当前执行授权**" not in text:
-        # Preserve the section's terminal newline. Losing it here glues the next
-        # ``### N. SYMBOL`` heading onto this card after replacement, causing the
-        # validator to report later symbols as missing and to inspect their text
-        # as if it belonged to the previous symbol.
-        trailing_newline = "\n" if text.endswith("\n") else ""
-        lines = text.splitlines()
-        insertion = next(
-            (
-                index + 1
-                for index, line in enumerate(lines)
-                if line.startswith("- **是否值得买**")
-            ),
-            1,
-        )
-        lines[insertion:insertion] = auth_lines
-        text = "\n".join(lines) + trailing_newline
+    text = _replace_authoritative_decision_block(text, packet)
 
     availability = _data_availability_summary(text)
     if availability and "**数据可用性**" not in text:
@@ -289,16 +325,16 @@ def assert_final_decision_report_consistency(
         expected_position = (
             f"**当前可执行仓位上限**：**{_execution_position_pct(packet):.1f}%**"
         )
-        if expected_verdict not in section:
-            errors.append(f"{packet.symbol}: final verdict drift")
+        if section.count(expected_verdict) != 1:
+            errors.append(f"{packet.symbol}: final verdict drift/duplicate")
         if expected_action not in section:
             errors.append(f"{packet.symbol}: final action drift")
         if expected_agreement not in section:
             errors.append(f"{packet.symbol}: fusion agreement drift")
-        if expected_authorized not in section:
-            errors.append(f"{packet.symbol}: execution authorization drift")
-        if expected_position not in section:
-            errors.append(f"{packet.symbol}: executable position drift")
+        if section.count(expected_authorized) != 1:
+            errors.append(f"{packet.symbol}: execution authorization drift/duplicate")
+        if section.count(expected_position) != 1:
+            errors.append(f"{packet.symbol}: executable position drift/duplicate")
         if "当前执行 **" in section or "当前执行：**" in section or "当前执行:**" in section:
             errors.append(f"{packet.symbol}: upstream V4 action masquerades as final execution")
         if packet.execution.has_active_plan and not packet.assessment.execution_authorized:
@@ -306,10 +342,12 @@ def assert_final_decision_report_consistency(
                 f"**条件触发后最大仓位上限**：**"
                 f"{100.0 * float(packet.execution.max_position_pct):.1f}%**"
             )
-            if conditional not in section:
-                errors.append(f"{packet.symbol}: conditional position cap missing")
+            if section.count(conditional) != 1:
+                errors.append(f"{packet.symbol}: conditional position cap missing/duplicate")
             if "**V6 最大仓位上限**" in section:
                 errors.append(f"{packet.symbol}: unauthorized plan rendered as active")
+        elif "**条件触发后最大仓位上限**" in section:
+            errors.append(f"{packet.symbol}: stale conditional position cap")
     if errors:
         raise ValueError("FinalDecisionPacket/report mismatch: " + "; ".join(errors))
 
@@ -318,12 +356,7 @@ def apply_final_decision_contract(
     report: str,
     packets: Iterable[FinalDecisionPacket],
 ) -> str:
-    """Normalize presentation from FinalDecisionPacket and validate it.
-
-    Business decisions are never repaired or re-derived from Markdown. Only
-    presentation fields that must mirror the authoritative packet are
-    normalized, then the report is validated fail-closed.
-    """
+    """Normalize display, preserving fail-closed typed business semantics."""
     packet_list = list(packets)
     text = _normalize_report_presentation(str(report or ""), packet_list)
     assert_final_decision_report_consistency(text, packet_list)
