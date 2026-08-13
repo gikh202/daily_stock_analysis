@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from src.v6_daily.final_decision_renderer import _normalize_report_presentation
+from src.v6_daily.fusion_contracts import FinalVerdict, FusionAgreement
 
 
 def _packet(symbol: str, v4_operation: str = "观望"):
@@ -8,7 +9,13 @@ def _packet(symbol: str, v4_operation: str = "观望"):
         symbol=symbol,
         effective_trade_date="2026-08-12",
         v4_operation=v4_operation,
-        assessment=SimpleNamespace(execution_authorized=False),
+        agreement=FusionAgreement.ALIGNED,
+        non_trading=False,
+        assessment=SimpleNamespace(
+            verdict=FinalVerdict.WAIT,
+            worth_buying=False,
+            execution_authorized=False,
+        ),
         execution=SimpleNamespace(has_active_plan=False, max_position_pct=0.0),
     )
 
@@ -17,7 +24,10 @@ def test_normalization_preserves_boundaries_between_multiple_stock_cards() -> No
     report = (
         "# AI 美股综合日报 · 2026-08-13\n\n"
         "### 1. MSFT · Microsoft · 最终：观察\n"
-        "- **是否值得买**：**暂不买，等待确认**\n"
+        "- **是否值得买**：**上游错误结论**\n"
+        "- **当前执行授权**：**是**\n"
+        "- **当前执行授权**：**是**\n"
+        "- **当前可执行仓位上限**：**99.0%**\n"
         "- **预测层 vs 执行层**：一致；当前执行 **观望**\n"
         "### 2. VOO · Vanguard S&P 500 ETF · 最终：观察\n"
         "- **是否值得买**：**暂不买，等待确认**\n"
@@ -43,3 +53,8 @@ def test_normalization_preserves_boundaries_between_multiple_stock_cards() -> No
     assert "当前执行：**" not in normalized
     assert "当前执行:**" not in normalized
     assert normalized.count("上游投研动作 **观望**（非最终执行）") == 3
+    assert normalized.count("- **是否值得买**：**暂不买，等待确认**") == 3
+    assert normalized.count("- **当前执行授权**：**否**") == 3
+    assert normalized.count("- **当前可执行仓位上限**：**0.0%**") == 3
+    assert "上游错误结论" not in normalized
+    assert "**99.0%**" not in normalized
