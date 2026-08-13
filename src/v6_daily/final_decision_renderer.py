@@ -30,7 +30,7 @@ _US_PRICE_YUAN_RE = re.compile(rf"(?<![\d.,])\$?({_US_PRICE_NUMBER})\s*元")
 _NEXT_CHECK_LINE_RE = re.compile(r"^(?P<prefix>.*?下次检查(?:\*\*)?)[:：].*$")
 _NEXT_CHECK_DATE_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
 _UPSTREAM_CURRENT_EXECUTION_RE = re.compile(
-    r"当前执行(?:\s*[:：])?\s+\*\*[^*\n]+\*\*"
+    r"当前执行(?:\s*[:：])?\s*\*\*[^*\n]+\*\*"
 )
 
 
