@@ -29,6 +29,9 @@ _US_PRICE_NUMBER = (
 _US_PRICE_YUAN_RE = re.compile(rf"(?<![\d.,])\$?({_US_PRICE_NUMBER})\s*元")
 _NEXT_CHECK_LINE_RE = re.compile(r"^(?P<prefix>.*?下次检查(?:\*\*)?)[:：].*$")
 _NEXT_CHECK_DATE_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+_UPSTREAM_CURRENT_EXECUTION_RE = re.compile(
+    r"当前执行(?:\s*[:：])?\s+\*\*[^*\n]+\*\*"
+)
 
 
 def _section_pattern(symbol: str) -> re.Pattern[str]:
@@ -162,14 +165,12 @@ def _normalize_section_presentation(
 
     text = text.replace("**预测层 vs 执行层**", "**预测层 vs 上游投研层**")
     if packet.v4_operation:
-        text = re.sub(
-            r"当前执行\s+\*\*[^*\n]+\*\*",
+        text = _UPSTREAM_CURRENT_EXECUTION_RE.sub(
             f"上游投研动作 **{packet.v4_operation}**（非最终执行）",
             text,
         )
     else:
-        text = re.sub(
-            r"当前执行\s+\*\*[^*\n]+\*\*",
+        text = _UPSTREAM_CURRENT_EXECUTION_RE.sub(
             "上游投研动作 **未知**（非最终执行）",
             text,
         )
@@ -192,6 +193,11 @@ def _normalize_section_presentation(
 
     auth_lines = _execution_authorization_lines(packet)
     if "**当前执行授权**" not in text:
+        # Preserve the section's terminal newline. Losing it here glues the next
+        # ``### N. SYMBOL`` heading onto this card after replacement, causing the
+        # validator to report later symbols as missing and to inspect their text
+        # as if it belonged to the previous symbol.
+        trailing_newline = "\n" if text.endswith("\n") else ""
         lines = text.splitlines()
         insertion = next(
             (
@@ -202,7 +208,7 @@ def _normalize_section_presentation(
             1,
         )
         lines[insertion:insertion] = auth_lines
-        text = "\n".join(lines)
+        text = "\n".join(lines) + trailing_newline
 
     availability = _data_availability_summary(text)
     if availability and "**数据可用性**" not in text:
@@ -293,7 +299,7 @@ def assert_final_decision_report_consistency(
             errors.append(f"{packet.symbol}: execution authorization drift")
         if expected_position not in section:
             errors.append(f"{packet.symbol}: executable position drift")
-        if "当前执行 **" in section:
+        if "当前执行 **" in section or "当前执行：**" in section or "当前执行:**" in section:
             errors.append(f"{packet.symbol}: upstream V4 action masquerades as final execution")
         if packet.execution.has_active_plan and not packet.assessment.execution_authorized:
             conditional = (
