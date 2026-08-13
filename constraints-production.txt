@@ -1,7 +1,7 @@
-# Production/CI constraints for reproducible GitHub Actions runs.
-# Keep requirements.txt as the compatibility declaration; install with
-#   pip install -c constraints-production.txt -r requirements.txt
-# Update this file deliberately in a reviewed PR after provider/CI smoke tests.
+# Production/CI constraints for reproducible installs.
+# requirements.txt remains the compatibility declaration; this file freezes the
+# direct runtime dependencies to versions already exercised by CI/provider runs.
+# Upgrade deliberately in a reviewed PR, then rerun CI, V6 backtest and live smoke.
 
 python-dotenv==1.2.2
 tenacity==9.1.4
@@ -16,13 +16,16 @@ pytdx==1.72
 baostock==0.9.3
 yfinance==1.5.2
 longbridge==0.2.74; platform_system == "Linux" and python_version < "3.12"
+longbridge==4.0.5; platform_system != "Linux" or python_version >= "3.12"
 tickflow==0.1.24
 futu-api==10.8.6808
+lark-oapi==1.7.2
 
 pandas==3.0.5
 numpy==2.4.6
+pypinyin==0.55.0
 openpyxl==3.1.5
-json-repair==0.63.1
+json-repair==0.63.0
 orjson==3.11.9
 
 litellm==1.96.2
@@ -30,9 +33,18 @@ tiktoken==0.11.0
 openai==2.54.0
 PyYAML==6.0.3
 
+tavily-python==0.7.27
+google-search-results==2.4.2
 requests==2.34.2
 httpx==0.28.1
 markdown2==2.5.5
+imgkit==1.2.3
+fake-useragent==2.2.0
+dingtalk-stream==0.24.3
+discord.py==2.7.1
+PyNaCl==1.6.2
+newspaper3k==0.2.8
+lxml_html_clean==0.4.5
 jinja2==3.1.6
 fastapi==0.141.1
 uvicorn==0.52.1
