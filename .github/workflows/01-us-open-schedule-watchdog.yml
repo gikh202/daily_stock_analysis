@@ -1,0 +1,84 @@
+name: 美股开盘确认调度兜底
+
+on:
+  # GitHub Actions 的 schedule 可能因队列负载延迟或漏触发。
+  # 这里使用纯 UTC 候选点覆盖 EDT/EST，再按纽约本地时间二次校验。
+  # 刻意避开整点，降低 GitHub Actions 高峰排队概率。
+  schedule:
+    - cron: '47,57 13,14 * * 1-5'
+    - cron: '12,27,42 14,15 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: us-open-confirmation-watchdog
+  cancel-in-progress: false
+
+jobs:
+  ensure-us-open-confirmation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检查纽约开盘确认窗口并按需补触发
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const manual = context.eventName === 'workflow_dispatch';
+
+            const now = new Date();
+            const nyParts = new Intl.DateTimeFormat('en-US', {
+              timeZone: 'America/New_York',
+              year: 'numeric', month: '2-digit', day: '2-digit',
+              hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+              weekday: 'short',
+            }).formatToParts(now);
+            const part = (type) => nyParts.find((item) => item.type === type)?.value;
+            const weekday = part('weekday');
+            const hour = Number(part('hour'));
+            const minute = Number(part('minute'));
+            const hm = hour * 60 + minute;
+            const weekdayOk = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
+            const inWindow = weekdayOk && hm >= 9 * 60 + 45 && hm <= 11 * 60 + 15;
+
+            core.info(`New York local: ${weekday} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+            if (!manual && !inWindow) {
+              core.info('Outside 09:45-11:15 ET confirmation window; skip.');
+              return;
+            }
+
+            // If the primary workflow already succeeded or is still running recently,
+            // do not dispatch another copy. Failed/cancelled runs are intentionally
+            // ignored so a later watchdog point can recover automatically.
+            const response = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: '01-us-open-confirmation.yml',
+              branch: 'main',
+              per_page: 50,
+            });
+            const cutoff = Date.now() - 4 * 60 * 60 * 1000;
+            const usable = (response.data.workflow_runs || []).find((run) => {
+              const created = new Date(run.created_at).getTime();
+              if (created < cutoff) return false;
+              if (run.status !== 'completed') return true;
+              return run.conclusion === 'success';
+            });
+
+            if (usable && !manual) {
+              core.info(`Primary confirmation already covered by run ${usable.id} (${usable.status}/${usable.conclusion || 'n/a'}); skip.`);
+              return;
+            }
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: '01-us-open-confirmation.yml',
+              ref: 'main',
+            });
+            core.info('Dispatched 01-us-open-confirmation.yml as schedule fallback.');
