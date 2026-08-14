@@ -98,7 +98,8 @@ def _assert_watchdog_coverage(text: str, utc_day: datetime) -> None:
     gaps = [b - a for a, b in zip(checkpoints, checkpoints[1:])]
     if max(gaps) > MAX_WATCHDOG_GAP_MINUTES:
         raise AssertionError(
-            f"watchdog gap too large on {utc_day.date()}: max={max(gaps)} local={list(map(_fmt_hm, local))}"
+            f"watchdog gap too large on {utc_day.date()}: "
+            f"max={max(gaps)} local={list(map(_fmt_hm, local))}"
         )
 
 
@@ -106,25 +107,41 @@ def validate() -> None:
     primary_text = PRIMARY.read_text(encoding="utf-8")
     watchdog_text = WATCHDOG.read_text(encoding="utf-8")
 
-    # Explicit V4 -> V6 orchestration and exact upstream binding are required.
+    # 新架构必须复用上一收盘 V6 Artifact，并由盘中确定性确认器做最终执行判断。
     for marker in (
+        "scripts/run_us_open_confirmation.py",
+        "v6-daily-*",
+        "v6_daily_latest.json",
+        "OPEN_CONFIRMATION_STARTER_POSITION_PCT",
+        "us-open-confirmation-${{ steps.gate.outputs.ny_date }}",
+    ):
+        if marker not in primary_text:
+            raise AssertionError(f"primary confirmation missing actionable marker: {marker}")
+
+    # 盘中确认不得再触发完整 V4 -> V6 重跑，否则会退化回重复日报。
+    for forbidden in (
         "00-daily-analysis.yml",
-        "03-v6-daily.yml",
         "upstream_run_id",
         "waitForCompletion",
     ):
-        if marker not in primary_text:
-            raise AssertionError(f"primary confirmation missing orchestration marker: {marker}")
+        if forbidden in primary_text:
+            raise AssertionError(
+                f"primary confirmation still contains legacy full-analysis orchestration: {forbidden}"
+            )
 
-    # Coverage must be judged by the downstream final V6, not by a primary
-    # workflow that can finish success after a gate skip.
-    if "workflow_id: '03-v6-daily.yml'" not in watchdog_text:
-        raise AssertionError("watchdog must use V6 final-report coverage as its success signal")
-    if "No successful/in-flight automated V6 final report found" not in watchdog_text:
-        raise AssertionError("watchdog fallback reason is missing")
+    # Watchdog 必须用开盘确认 Artifact，而不是新的 V6 workflow_dispatch，作为真实发送覆盖信号。
+    for marker in (
+        "workflow_id: '01-us-open-confirmation.yml'",
+        "listWorkflowRunArtifacts",
+        "us-open-confirmation-",
+        "No successful open-confirmation Artifact",
+    ):
+        if marker not in watchdog_text:
+            raise AssertionError(f"watchdog missing open-confirmation coverage marker: {marker}")
+    if "workflow_id: '03-v6-daily.yml'" in watchdog_text:
+        raise AssertionError("watchdog must not use V6 rerun as open-confirmation coverage")
 
-    # Exercise one EDT and one EST date. These are deliberately ordinary
-    # weekdays, so the test validates DST mapping without holiday semantics.
+    # Exercise one EDT and one EST weekday.
     summer = datetime(2026, 8, 13, tzinfo=timezone.utc)
     winter = datetime(2026, 12, 11, tzinfo=timezone.utc)
     for day in (summer, winter):

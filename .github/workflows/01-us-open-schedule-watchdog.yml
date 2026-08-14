@@ -1,9 +1,8 @@
 name: 美股开盘确认调度兜底
 
 on:
-  # GitHub Actions 的 schedule 可能因队列负载延迟，极端情况下排队任务也可能被丢弃。
-  # 这里使用与主 workflow 独立的一组纯 UTC 候选点覆盖 EDT/EST，并按纽约本地时间二次校验。
-  # 候选点刻意避开整点；补偿窗口延长到 12:30 ET，允许严重排队后的任务仍能补发。
+  # 与主 workflow 独立的 UTC 候选点。主调度丢失/失败时，watchdog 通过
+  # “是否生成开盘确认 Artifact”判断真实覆盖，而不再依赖 V6 重跑。
   schedule:
     - cron: '47,57 13 * * 1-5'
     - cron: '12,27,42,47,57 14 * * 1-5'
@@ -41,8 +40,9 @@ jobs:
     permissions:
       actions: write
       contents: read
+
     steps:
-      - name: 检查最终 V6 覆盖并按需补触发
+      - name: 检查开盘确认真实覆盖并按需补触发
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -50,7 +50,6 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const manual = context.eventName === 'workflow_dispatch';
-            const BOT_LOGIN = 'github-actions[bot]';
 
             const now = new Date();
             const nyParts = new Intl.DateTimeFormat('en-US', {
@@ -67,37 +66,61 @@ jobs:
             const weekdayOk = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
             const inWindow = weekdayOk && hm >= 9 * 60 + 45 && hm <= 12 * 60 + 30;
 
-            core.info(`New York local: ${weekday} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+            core.info(
+              `New York local: ${weekday} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+            );
             if (!manual && !inWindow) {
               core.info('Outside 09:45-12:30 ET compensation window; skip.');
               return;
             }
 
-            // The primary confirmation workflow can finish with conclusion=success even
-            // when its gate skips all analysis because a delayed schedule arrived outside
-            // the primary window. Therefore primary-workflow success is NOT proof that an
-            // email was produced. Use the downstream V6 final-report run as the coverage
-            // signal instead. A failed V6 is deliberately ignored so a later watchdog
-            // candidate retries the entire V4 -> V6 chain.
+            // “workflow success” 本身不能证明发过邮件：主 workflow 在无效 DST
+            // 候选/每日已发送时也会成功跳过。因此以真实生成的
+            // us-open-confirmation-* Artifact 作为成功覆盖凭证。
             const response = await github.rest.actions.listWorkflowRuns({
               owner,
               repo,
-              workflow_id: '03-v6-daily.yml',
-              event: 'workflow_dispatch',
+              workflow_id: '01-us-open-confirmation.yml',
               branch: 'main',
               per_page: 50,
             });
             const cutoff = Date.now() - 4 * 60 * 60 * 1000;
-            const covered = (response.data.workflow_runs || []).find((run) => {
-              if (run.actor?.login !== BOT_LOGIN) return false;
-              const created = new Date(run.created_at).getTime();
-              if (created < cutoff) return false;
-              if (run.status !== 'completed') return true;
-              return run.conclusion === 'success';
-            });
+            const recentRuns = (response.data.workflow_runs || [])
+              .filter((run) => new Date(run.created_at).getTime() >= cutoff)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            const inFlight = recentRuns.find(
+              (run) => run.status !== 'completed'
+            );
+            if (inFlight && !manual) {
+              core.info(
+                `Primary confirmation still in flight: run ${inFlight.id} status=${inFlight.status}; defer fallback.`
+              );
+              return;
+            }
+
+            let covered = null;
+            for (const run of recentRuns) {
+              if (run.status !== 'completed' || run.conclusion !== 'success') continue;
+              const artifactsResponse = await github.rest.actions.listWorkflowRunArtifacts({
+                owner,
+                repo,
+                run_id: run.id,
+                per_page: 100,
+              });
+              const artifact = (artifactsResponse.data.artifacts || []).find(
+                (item) => !item.expired && String(item.name || '').startsWith('us-open-confirmation-')
+              );
+              if (artifact) {
+                covered = {run, artifact};
+                break;
+              }
+            }
 
             if (covered && !manual) {
-              core.info(`Final V6 coverage already exists: run ${covered.id} (${covered.status}/${covered.conclusion || 'n/a'}); skip.`);
+              core.info(
+                `Open confirmation coverage exists: run ${covered.run.id}, artifact ${covered.artifact.name}; skip.`
+              );
               return;
             }
 
@@ -107,4 +130,6 @@ jobs:
               workflow_id: '01-us-open-confirmation.yml',
               ref: 'main',
             });
-            core.info('No successful/in-flight automated V6 final report found; dispatched 01-us-open-confirmation.yml fallback.');
+            core.info(
+              'No successful open-confirmation Artifact or in-flight primary run found; dispatched fallback.'
+            );
