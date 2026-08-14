@@ -60,7 +60,8 @@ jobs:
           pip install pytest
 
       - name: 规则与报告回归测试
-        run: python -m pytest -q tests/test_us_open_confirmation.py
+        # 本测试是纯规则单测，不依赖仓库 tests/conftest.py 的 Web/AnyIO 测试夹具。
+        run: python -m pytest -q --noconftest tests/test_us_open_confirmation.py
 
       - name: Python 语法校验
         run: python -m py_compile scripts/run_us_open_confirmation.py
@@ -211,8 +212,9 @@ jobs:
               return;
             }
 
-            const run = candidates[0];
-            core.info(`Using prior close V6 run ${run.id} created_at=${run.created_at}`);
+            const workflowRunCandidates = candidates.filter((run) => run.event === 'workflow_run');
+            const run = workflowRunCandidates[0] || candidates[0];
+            core.info(`Using prior close V6 run ${run.id} event=${run.event} created_at=${run.created_at}`);
             core.setOutput('run_id', String(run.id));
             core.setOutput('created_at', run.created_at);
 
