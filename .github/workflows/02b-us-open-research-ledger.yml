@@ -21,23 +21,47 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Checkout
+      - name: Check triggering run has confirmation evidence
+        id: evidence
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.payload.workflow_run.id,
+              per_page: 100,
+            });
+            const matches = (artifacts.data.artifacts || [])
+              .filter((item) => String(item.name || '').startsWith('us-open-confirmation-'));
+            const capture = matches.length > 0;
+            core.info(capture
+              ? `Found ${matches.length} open-confirmation artifact(s); capture research evidence.`
+              : 'Triggering run was a successful skip/retry with no confirmation artifact; research capture is skipped.');
+            core.setOutput('capture', capture ? 'true' : 'false');
+
+      - name: Checkout exact production code
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Setup Python
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Install research dependencies
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         run: |
           python -m pip install --upgrade pip
           pip install yfinance pandas
 
       - name: Download triggering open-confirmation artifact
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         uses: actions/download-artifact@v5
         with:
           pattern: us-open-confirmation-*
@@ -48,6 +72,7 @@ jobs:
 
       - name: Locate confirmation and source V6 run
         id: source
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -70,6 +95,7 @@ jobs:
           echo "source_run_id=$SOURCE_RUN" >> "$GITHUB_OUTPUT"
 
       - name: Download exact prior-close V6 plan
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         uses: actions/download-artifact@v5
         with:
           pattern: v6-daily-*
@@ -80,6 +106,7 @@ jobs:
 
       - name: Locate exact V6 payload
         id: v6
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -94,6 +121,7 @@ jobs:
           echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
 
       - name: Restore cumulative research ledger
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         uses: actions/cache/restore@v5
         with:
           path: open_confirmation_research/
@@ -102,6 +130,7 @@ jobs:
             us-open-research-${{ runner.os }}-
 
       - name: Capture live signal and settle prior sessions
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         shell: bash
         run: |
           mkdir -p open_confirmation_research open_confirmation_reports
@@ -112,6 +141,7 @@ jobs:
             --summary-output open_confirmation_reports/us_open_research_summary.json
 
       - name: Validate standalone research database
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         shell: bash
         run: |
           python - <<'PY'
@@ -138,13 +168,14 @@ jobs:
           PY
 
       - name: Save cumulative research ledger
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
         uses: actions/cache/save@v5
         with:
           path: open_confirmation_research/
           key: us-open-research-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload cumulative research evidence
-        if: always()
+        if: ${{ always() && steps.evidence.outputs.capture == 'true' }}
         uses: actions/upload-artifact@v6
         with:
           name: us-open-research-${{ github.run_id }}-${{ github.run_attempt }}
@@ -153,3 +184,7 @@ jobs:
             open_confirmation_reports/us_open_research_summary.json
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Report skipped research capture
+        if: ${{ steps.evidence.outputs.capture != 'true' }}
+        run: echo 'No open-confirmation Artifact on triggering run; nothing to persist.'
