@@ -17,6 +17,7 @@ on:
       - 'tests/test_us_open_confirmation.py'
       - 'tests/test_us_open_confirmation_v2.py'
       - 'tests/test_us_open_research_ledger.py'
+      - 'tests/test_us_open_policy_probe.py'
 
 permissions:
   contents: read
@@ -46,7 +47,8 @@ jobs:
           python -m pytest -q --noconftest \
             tests/test_us_open_confirmation.py \
             tests/test_us_open_confirmation_v2.py \
-            tests/test_us_open_research_ledger.py
+            tests/test_us_open_research_ledger.py \
+            tests/test_us_open_policy_probe.py
 
       - name: Find latest successful V6 artifact
         id: prior-v6
