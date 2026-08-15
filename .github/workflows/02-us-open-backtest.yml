@@ -7,6 +7,7 @@ on:
       - '.github/workflows/02-us-open-backtest.yml'
       - '.github/workflows/01-us-open-confirmation.yml'
       - 'scripts/backtest_us_open_confirmation.py'
+      - 'scripts/probe_us_open_conservative.py'
       - 'scripts/run_us_open_confirmation.py'
       - 'tests/test_us_open_confirmation.py'
 
@@ -17,7 +18,7 @@ permissions:
 jobs:
   backtest-us-open:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -66,7 +67,8 @@ jobs:
           run-id: ${{ steps.prior-v6.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run causal 1-minute backtest and parameter grid
+      - name: Locate V6 database
+        id: db
         shell: bash
         run: |
           set -euo pipefail
@@ -75,15 +77,27 @@ jobs:
             echo '::error::V6 artifact does not contain v6_daily.db'
             exit 2
           fi
+          echo "path=$DB" >> "$GITHUB_OUTPUT"
+
+      - name: Run causal 1-minute backtest and parameter grid
+        run: |
           python scripts/backtest_us_open_confirmation.py \
-            --v6-db "$DB" \
+            --v6-db '${{ steps.db.outputs.path }}' \
             --output open_confirmation_backtest.json
+
+      - name: Compare conservative parameter sets
+        run: |
+          python scripts/probe_us_open_conservative.py \
+            --v6-db '${{ steps.db.outputs.path }}' \
+            --output open_confirmation_conservative_probe.json
 
       - name: Upload backtest evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: us-open-backtest-${{ github.run_id }}-${{ github.run_attempt }}
-          path: open_confirmation_backtest.json
+          path: |
+            open_confirmation_backtest.json
+            open_confirmation_conservative_probe.json
           if-no-files-found: warn
           retention-days: 30
