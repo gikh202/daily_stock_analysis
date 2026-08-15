@@ -417,6 +417,8 @@ def action_label_zh(packet: FinalDecisionPacket) -> str:
     verdict = packet.assessment.verdict
     if verdict is FinalVerdict.BUY_BY_PLAN:
         return "买入准备"
+    if verdict is FinalVerdict.CONDITIONAL_BUY:
+        return "等待触发后买入"
     if verdict is FinalVerdict.AVOID:
         return "回避"
     if verdict is FinalVerdict.WAIT:
