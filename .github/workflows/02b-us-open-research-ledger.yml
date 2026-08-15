@@ -1,0 +1,190 @@
+name: 美股开盘研究账本
+
+on:
+  workflow_run:
+    workflows: ['美股开盘执行确认']
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: us-open-research-ledger
+  cancel-in-progress: false
+
+jobs:
+  capture-and-settle:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check triggering run has confirmation evidence
+        id: evidence
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.payload.workflow_run.id,
+              per_page: 100,
+            });
+            const matches = (artifacts.data.artifacts || [])
+              .filter((item) => String(item.name || '').startsWith('us-open-confirmation-'));
+            const capture = matches.length > 0;
+            core.info(capture
+              ? `Found ${matches.length} open-confirmation artifact(s); capture research evidence.`
+              : 'Triggering run was a successful skip/retry with no confirmation artifact; research capture is skipped.');
+            core.setOutput('capture', capture ? 'true' : 'false');
+
+      - name: Checkout exact production code
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup Python
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install research dependencies
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas
+
+      - name: Download triggering open-confirmation artifact
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        uses: actions/download-artifact@v5
+        with:
+          pattern: us-open-confirmation-*
+          path: triggering_open
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Locate confirmation and source V6 run
+        id: source
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          JSON="$(find triggering_open -type f -name 'us_open_confirmation_latest.json' -print | sort | tail -n 1 || true)"
+          if [ -z "$JSON" ]; then
+            echo '::error::Triggering open-confirmation artifact is missing JSON evidence.'
+            exit 2
+          fi
+          SOURCE_RUN="$(python - "$JSON" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1], encoding='utf-8'))
+          print(str(payload.get('source_run_id') or '').strip())
+          PY
+          )"
+          if [ -z "$SOURCE_RUN" ]; then
+            echo '::error::Open confirmation JSON has no source_run_id.'
+            exit 2
+          fi
+          echo "confirmation_json=$JSON" >> "$GITHUB_OUTPUT"
+          echo "source_run_id=$SOURCE_RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact prior-close V6 plan
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        uses: actions/download-artifact@v5
+        with:
+          pattern: v6-daily-*
+          path: source_v6
+          merge-multiple: true
+          run-id: ${{ steps.source.outputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Locate exact V6 payload
+        id: v6
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PAYLOAD="$(find source_v6 -type f -path '*/v6_reports/v6_daily_latest.json' -print | sort | tail -n 1 || true)"
+          if [ -z "$PAYLOAD" ]; then
+            PAYLOAD="$(find source_v6 -type f -name 'v6_daily_latest.json' -print | sort | tail -n 1 || true)"
+          fi
+          if [ -z "$PAYLOAD" ]; then
+            echo '::error::Exact source V6 artifact is missing v6_daily_latest.json.'
+            exit 2
+          fi
+          echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cumulative research ledger
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: open_confirmation_research/
+          key: us-open-research-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            us-open-research-${{ runner.os }}-
+
+      - name: Capture live signal and settle prior sessions
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        shell: bash
+        run: |
+          mkdir -p open_confirmation_research open_confirmation_reports
+          python scripts/capture_us_open_research.py \
+            --confirmation-json '${{ steps.source.outputs.confirmation_json }}' \
+            --v6-payload '${{ steps.v6.outputs.payload }}' \
+            --db open_confirmation_research/us_open_research.db \
+            --summary-output open_confirmation_reports/us_open_research_summary.json
+
+      - name: Validate standalone research database
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import sqlite3
+          from pathlib import Path
+
+          db = Path('open_confirmation_research/us_open_research.db')
+          summary = Path('open_confirmation_reports/us_open_research_summary.json')
+          if not db.is_file() or db.stat().st_size <= 0:
+              raise SystemExit('research ledger DB missing/empty')
+          conn = sqlite3.connect(str(db))
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              rows = int(conn.execute('SELECT COUNT(*) FROM us_open_signals').fetchone()[0])
+          finally:
+              conn.close()
+          if quick != 'ok':
+              raise SystemExit(f'research ledger quick_check failed: {quick}')
+          payload = json.loads(summary.read_text(encoding='utf-8'))
+          if int(payload.get('signals') or 0) != rows:
+              raise SystemExit(f'summary/db row mismatch summary={payload.get("signals")} db={rows}')
+          print(f'US-open research ledger PASS rows={rows}')
+          PY
+
+      - name: Save cumulative research ledger
+        if: ${{ steps.evidence.outputs.capture == 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: open_confirmation_research/
+          key: us-open-research-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload cumulative research evidence
+        if: ${{ always() && steps.evidence.outputs.capture == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: us-open-research-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            open_confirmation_research/us_open_research.db
+            open_confirmation_reports/us_open_research_summary.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Report skipped research capture
+        if: ${{ steps.evidence.outputs.capture != 'true' }}
+        run: echo 'No open-confirmation Artifact on triggering run; nothing to persist.'

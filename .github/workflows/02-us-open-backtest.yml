@@ -6,10 +6,19 @@ on:
     paths:
       - '.github/workflows/02-us-open-backtest.yml'
       - '.github/workflows/01-us-open-confirmation.yml'
+      - '.github/workflows/02b-us-open-research-ledger.yml'
       - 'scripts/backtest_us_open_confirmation.py'
       - 'scripts/probe_us_open_conservative.py'
+      - 'scripts/probe_us_open_v2.py'
       - 'scripts/run_us_open_confirmation.py'
+      - 'scripts/run_us_open_confirmation_v2.py'
+      - 'scripts/us_open_research_ledger.py'
+      - 'scripts/capture_us_open_research.py'
       - 'tests/test_us_open_confirmation.py'
+      - 'tests/test_us_open_confirmation_v2.py'
+      - 'tests/test_us_open_research_ledger.py'
+      - 'tests/test_us_open_policy_probe.py'
+      - 'tests/test_us_open_research_workflow_contract.py'
 
 permissions:
   contents: read
@@ -32,7 +41,16 @@ jobs:
       - name: Install backtest dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance pandas
+          pip install yfinance pandas pytest
+
+      - name: Validate production-policy and research-ledger rules
+        run: |
+          python -m pytest -q --noconftest \
+            tests/test_us_open_confirmation.py \
+            tests/test_us_open_confirmation_v2.py \
+            tests/test_us_open_research_ledger.py \
+            tests/test_us_open_policy_probe.py \
+            tests/test_us_open_research_workflow_contract.py
 
       - name: Find latest successful V6 artifact
         id: prior-v6
@@ -91,6 +109,12 @@ jobs:
             --v6-db '${{ steps.db.outputs.path }}' \
             --output open_confirmation_conservative_probe.json
 
+      - name: Evaluate exact production V2 implementation
+        run: |
+          python scripts/probe_us_open_v2.py \
+            --v6-db '${{ steps.db.outputs.path }}' \
+            --output open_confirmation_v2_probe.json
+
       - name: Upload backtest evidence
         if: always()
         uses: actions/upload-artifact@v6
@@ -99,5 +123,6 @@ jobs:
           path: |
             open_confirmation_backtest.json
             open_confirmation_conservative_probe.json
+            open_confirmation_v2_probe.json
           if-no-files-found: warn
           retention-days: 30
