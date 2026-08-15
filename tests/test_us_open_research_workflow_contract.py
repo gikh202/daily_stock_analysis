@@ -7,6 +7,9 @@ def test_research_workflow_runs_after_open_confirmation_and_never_notifies():
     text = Path('.github/workflows/02b-us-open-research-ledger.yml').read_text(encoding='utf-8')
     assert "workflows: ['美股开盘执行确认']" in text
     assert "github.event.workflow_run.conclusion == 'success'" in text
+    assert "startsWith('us-open-confirmation-')" in text
+    assert "steps.evidence.outputs.capture == 'true'" in text
+    assert 'github.event.workflow_run.head_sha' in text
     assert 'capture_us_open_research.py' in text
     assert 'us_open_research.db' in text
     assert '--notify' not in text
