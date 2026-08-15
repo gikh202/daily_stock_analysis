@@ -425,6 +425,8 @@ def action_label_zh(packet: FinalDecisionPacket) -> str:
         return "等待（V4缺失）"
     if packet.non_trading and packet.assessment.worth_buying:
         return "观察（等待开盘确认）"
+    if verdict is FinalVerdict.CONDITIONAL_BUY:
+        return "等待触发后买入"
     return "观察"
 
 

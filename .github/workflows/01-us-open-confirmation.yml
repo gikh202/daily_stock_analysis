@@ -20,8 +20,14 @@ on:
     - cron: '55 15 * * 1-5'
     - cron: '10 16 * * 1-5'
 
-  # 手动运行始终执行，不受每日已发送标记限制，便于排障。
+  # 手动运行默认仍服从当日幂等标记；只有明确 force_resend 才允许重复发送，便于排障。
   workflow_dispatch:
+    inputs:
+      force_resend:
+        description: '忽略当日已发送标记并强制重发（仅排障使用）'
+        required: false
+        type: boolean
+        default: false
 
   pull_request:
     paths:
@@ -88,6 +94,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SCHEDULE: ${{ github.event.schedule }}
+          FORCE_RESEND_INPUT: ${{ inputs.force_resend }}
         run: |
           set -euo pipefail
 
@@ -98,14 +105,18 @@ jobs:
           SESSION_OPEN_EPOCH="$(TZ='America/New_York' date -d "${NY_DATE} 09:30:00" '+%s')"
 
           SHOULD_RUN=false
-          MANUAL=false
+          FORCE_RESEND=false
           FAMILY_OK=false
           REASON='outside_confirmation_window'
 
           if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
             SHOULD_RUN=true
-            MANUAL=true
-            REASON='manual_dispatch'
+            if [ "${FORCE_RESEND_INPUT:-false}" = 'true' ]; then
+              FORCE_RESEND=true
+              REASON='manual_force_resend'
+            else
+              REASON='manual_idempotent_dispatch'
+            fi
           else
             if [ "$NY_OFFSET" = '-0400' ]; then
               case "$EVENT_SCHEDULE" in
@@ -134,11 +145,11 @@ jobs:
 
           echo "NY date/time: ${NY_DATE} ${NY_HM} ${NY_OFFSET}"
           echo "event schedule: ${EVENT_SCHEDULE:-manual}"
-          echo "should_run=${SHOULD_RUN}; reason=${REASON}"
+          echo "should_run=${SHOULD_RUN}; force_resend=${FORCE_RESEND}; reason=${REASON}"
 
           {
             echo "should_run=$SHOULD_RUN"
-            echo "manual=$MANUAL"
+            echo "force_resend=$FORCE_RESEND"
             echo "ny_date=$NY_DATE"
             echo "session_open_epoch=$SESSION_OPEN_EPOCH"
             echo "reason=$REASON"
@@ -146,7 +157,7 @@ jobs:
 
       - name: 恢复当日已发送标记
         id: sent-cache
-        if: ${{ steps.gate.outputs.should_run == 'true' && steps.gate.outputs.manual != 'true' }}
+        if: ${{ steps.gate.outputs.should_run == 'true' }}
         uses: actions/cache/restore@v5
         with:
           path: .open-confirmation-sent/
@@ -157,15 +168,18 @@ jobs:
         if: ${{ steps.gate.outputs.should_run == 'true' }}
         shell: bash
         env:
-          MANUAL: ${{ steps.gate.outputs.manual }}
+          FORCE_RESEND: ${{ steps.gate.outputs.force_resend }}
           CACHE_HIT: ${{ steps.sent-cache.outputs.cache-hit }}
         run: |
-          if [ "$MANUAL" = 'true' ] || [ "$CACHE_HIT" != 'true' ]; then
+          if [ "$FORCE_RESEND" = 'true' ]; then
+            echo 'execute=true' >> "$GITHUB_OUTPUT"
+            echo '已明确启用 force_resend，本轮强制执行盘中确认。'
+          elif [ "$CACHE_HIT" = 'true' ]; then
+            echo 'execute=false' >> "$GITHUB_OUTPUT"
+            echo '今天已经成功发送过开盘确认，跳过补偿/普通手动候选。'
+          else
             echo 'execute=true' >> "$GITHUB_OUTPUT"
             echo '本轮执行盘中确认。'
-          else
-            echo 'execute=false' >> "$GITHUB_OUTPUT"
-            echo '今天已经成功发送过开盘确认，跳过补偿候选。'
           fi
 
       - name: 检出代码
@@ -328,7 +342,7 @@ jobs:
             --notify
 
       - name: 写入成功标记
-        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.gate.outputs.manual != 'true' }}
+        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.sent-cache.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           mkdir -p .open-confirmation-sent
@@ -339,7 +353,7 @@ jobs:
             > ".open-confirmation-sent/${{ steps.gate.outputs.ny_date }}.txt"
 
       - name: 保存当日已发送标记
-        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.gate.outputs.manual != 'true' }}
+        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.sent-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: .open-confirmation-sent/

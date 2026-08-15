@@ -103,6 +103,26 @@ def _assert_watchdog_coverage(text: str, utc_day: datetime) -> None:
         )
 
 
+def _assert_idempotent_dispatch(primary_text: str, watchdog_text: str) -> None:
+    # workflow_dispatch 默认也必须遵守每日已发送标记；仅显式 force_resend=true 可绕过。
+    for marker in (
+        "force_resend:",
+        "default: false",
+        "FORCE_RESEND_INPUT: ${{ inputs.force_resend }}",
+        "force_resend=$FORCE_RESEND",
+        "steps.gate.outputs.should_run == 'true'",
+        "steps.sent-cache.outputs.cache-hit != 'true'",
+    ):
+        if marker not in primary_text:
+            raise AssertionError(f"primary confirmation missing idempotency marker: {marker}")
+
+    if "steps.gate.outputs.manual" in primary_text or "MANUAL:" in primary_text:
+        raise AssertionError("workflow_dispatch must not bypass the daily sent marker implicitly")
+
+    if "inputs: {force_resend: 'false'}" not in watchdog_text:
+        raise AssertionError("watchdog fallback must dispatch force_resend=false")
+
+
 def validate() -> None:
     primary_text = PRIMARY.read_text(encoding="utf-8")
     watchdog_text = WATCHDOG.read_text(encoding="utf-8")
@@ -140,6 +160,8 @@ def validate() -> None:
             raise AssertionError(f"watchdog missing open-confirmation coverage marker: {marker}")
     if "workflow_id: '03-v6-daily.yml'" in watchdog_text:
         raise AssertionError("watchdog must not use V6 rerun as open-confirmation coverage")
+
+    _assert_idempotent_dispatch(primary_text, watchdog_text)
 
     # Exercise one EDT and one EST weekday.
     summer = datetime(2026, 8, 13, tzinfo=timezone.utc)

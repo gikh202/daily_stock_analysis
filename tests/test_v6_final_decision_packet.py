@@ -85,7 +85,7 @@ def test_watch_active_plan_becomes_final_conditional_buy_only_after_fusion() -> 
     assert packet.assessment.worth_buying is True
     assert packet.assessment.execution_authorized is False
     assert packet.execution.has_active_plan is True
-    assert action_label_zh(packet) == "观察"
+    assert action_label_zh(packet) == "等待触发后买入"
     assert "多头排列且相对强弱领先" in packet.assessment.bullish_evidence
     assert "RSI超买且上涨缩量" in packet.assessment.bearish_evidence
 
