@@ -1,0 +1,89 @@
+name: 美股开盘确认回测
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/02-us-open-backtest.yml'
+      - '.github/workflows/01-us-open-confirmation.yml'
+      - 'scripts/backtest_us_open_confirmation.py'
+      - 'scripts/run_us_open_confirmation.py'
+      - 'tests/test_us_open_confirmation.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  backtest-us-open:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install backtest dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas
+
+      - name: Find latest successful V6 artifact
+        id: prior-v6
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const response = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '03-v6-daily.yml',
+              branch: 'main',
+              status: 'completed',
+              per_page: 50,
+            });
+            const run = (response.data.workflow_runs || [])
+              .filter((item) => item.conclusion === 'success')
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+            if (!run) {
+              core.setFailed('No successful V6 run found on main.');
+              return;
+            }
+            core.info(`Using V6 run ${run.id} created_at=${run.created_at}`);
+            core.setOutput('run_id', String(run.id));
+
+      - name: Download V6 history artifact
+        uses: actions/download-artifact@v5
+        with:
+          pattern: v6-daily-*
+          path: prior_v6
+          merge-multiple: true
+          run-id: ${{ steps.prior-v6.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run causal 1-minute backtest and parameter grid
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB="$(find prior_v6 -type f -name 'v6_daily.db' -print | head -n 1 || true)"
+          if [ -z "$DB" ]; then
+            echo '::error::V6 artifact does not contain v6_daily.db'
+            exit 2
+          fi
+          python scripts/backtest_us_open_confirmation.py \
+            --v6-db "$DB" \
+            --output open_confirmation_backtest.json
+
+      - name: Upload backtest evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: us-open-backtest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: open_confirmation_backtest.json
+          if-no-files-found: warn
+          retention-days: 30
