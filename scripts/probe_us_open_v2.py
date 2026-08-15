@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, time
 from pathlib import Path
 from statistics import mean, median
 from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from scripts.backtest_us_open_confirmation import build_observations, load_candidates
 from scripts.run_us_open_confirmation import classify_confirmation
