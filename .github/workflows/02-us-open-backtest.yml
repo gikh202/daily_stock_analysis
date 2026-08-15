@@ -39,7 +39,14 @@ jobs:
       - name: Install backtest dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance pandas
+          pip install yfinance pandas pytest
+
+      - name: Validate production-policy and research-ledger rules
+        run: |
+          python -m pytest -q --noconftest \
+            tests/test_us_open_confirmation.py \
+            tests/test_us_open_confirmation_v2.py \
+            tests/test_us_open_research_ledger.py
 
       - name: Find latest successful V6 artifact
         id: prior-v6
