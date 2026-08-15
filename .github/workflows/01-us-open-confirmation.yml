@@ -3,6 +3,7 @@ name: 美股开盘执行确认
 on:
   # GitHub schedule 可能延迟，因此保留补偿候选。真正发送由纽约时间门控 + 每日幂等标记控制。
   # 目标：09:45 ET；若 Actions 延迟/失败，最晚补偿到 11:10 ET。
+  # V2 在 10:15 ET 后仍可补发状态邮件，但硬性禁止新的 BUY_NOW 授权。
   schedule:
     # EDT (-04:00)
     - cron: '45 13 * * 1-5'
@@ -26,7 +27,9 @@ on:
     paths:
       - '.github/workflows/01-us-open-confirmation.yml'
       - 'scripts/run_us_open_confirmation.py'
+      - 'scripts/run_us_open_confirmation_v2.py'
       - 'tests/test_us_open_confirmation.py'
+      - 'tests/test_us_open_confirmation_v2.py'
 
 permissions:
   contents: read
@@ -60,11 +63,17 @@ jobs:
           pip install pytest
 
       - name: 规则与报告回归测试
-        # 本测试是纯规则单测，不依赖仓库 tests/conftest.py 的 Web/AnyIO 测试夹具。
-        run: python -m pytest -q --noconftest tests/test_us_open_confirmation.py
+        # 纯规则单测，不依赖仓库 tests/conftest.py 的 Web/AnyIO 测试夹具。
+        run: |
+          python -m pytest -q --noconftest \
+            tests/test_us_open_confirmation.py \
+            tests/test_us_open_confirmation_v2.py
 
       - name: Python 语法校验
-        run: python -m py_compile scripts/run_us_open_confirmation.py
+        run: |
+          python -m py_compile \
+            scripts/run_us_open_confirmation.py \
+            scripts/run_us_open_confirmation_v2.py
 
   confirm-us-open:
     name: actionable-open-confirmation
@@ -274,8 +283,13 @@ jobs:
         env:
           OPEN_CONFIRMATION_SOURCE_RUN_ID: ${{ steps.plan.outputs.source_run_id }}
           OPEN_CONFIRMATION_CHASE_TOLERANCE_PCT: ${{ vars.OPEN_CONFIRMATION_CHASE_TOLERANCE_PCT || '0.5' }}
-          OPEN_CONFIRMATION_WEAK_OPEN_PCT: ${{ vars.OPEN_CONFIRMATION_WEAK_OPEN_PCT || '-0.75' }}
-          OPEN_CONFIRMATION_MIN_VOLUME_RATIO: ${{ vars.OPEN_CONFIRMATION_MIN_VOLUME_RATIO || '0.55' }}
+          OPEN_CONFIRMATION_MOMENTUM_CHASE_PCT: ${{ vars.OPEN_CONFIRMATION_MOMENTUM_CHASE_PCT || '0.75' }}
+          OPEN_CONFIRMATION_WEAK_OPEN_PCT: ${{ vars.OPEN_CONFIRMATION_WEAK_OPEN_PCT || '-0.5' }}
+          OPEN_CONFIRMATION_MIN_VOLUME_RATIO: ${{ vars.OPEN_CONFIRMATION_MIN_VOLUME_RATIO || '0.70' }}
+          OPEN_CONFIRMATION_MIN_OPENING_RANGE_POSITION: ${{ vars.OPEN_CONFIRMATION_MIN_OPENING_RANGE_POSITION || '0.25' }}
+          OPEN_CONFIRMATION_MOMENTUM_MIN_RANGE_POSITION: ${{ vars.OPEN_CONFIRMATION_MOMENTUM_MIN_RANGE_POSITION || '0.50' }}
+          OPEN_CONFIRMATION_MOMENTUM_MIN_VOLUME_RATIO: ${{ vars.OPEN_CONFIRMATION_MOMENTUM_MIN_VOLUME_RATIO || '0.70' }}
+          OPEN_CONFIRMATION_MAX_QUOTE_AGE_MINUTES: ${{ vars.OPEN_CONFIRMATION_MAX_QUOTE_AGE_MINUTES || '8' }}
           OPEN_CONFIRMATION_STARTER_POSITION_PCT: ${{ vars.OPEN_CONFIRMATION_STARTER_POSITION_PCT || '10' }}
 
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
@@ -307,7 +321,7 @@ jobs:
           LOG_LEVEL: INFO
         shell: bash
         run: |
-          python scripts/run_us_open_confirmation.py \
+          python scripts/run_us_open_confirmation_v2.py \
             --v6-payload '${{ steps.plan.outputs.payload }}' \
             --output-dir open_confirmation_reports \
             --source-run-id '${{ steps.plan.outputs.source_run_id }}' \
