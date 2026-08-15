@@ -129,7 +129,8 @@ jobs:
               repo,
               workflow_id: '01-us-open-confirmation.yml',
               ref: 'main',
+              inputs: {force_resend: 'false'},
             });
             core.info(
-              'No successful open-confirmation Artifact or in-flight primary run found; dispatched fallback.'
+              'No successful open-confirmation Artifact or in-flight primary run found; dispatched idempotent fallback.'
             );
