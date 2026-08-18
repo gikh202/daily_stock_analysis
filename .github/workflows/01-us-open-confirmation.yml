@@ -34,8 +34,10 @@ on:
       - '.github/workflows/01-us-open-confirmation.yml'
       - 'scripts/run_us_open_confirmation.py'
       - 'scripts/run_us_open_confirmation_v2.py'
+      - 'scripts/send_us_open_failure_alert.py'
       - 'tests/test_us_open_confirmation.py'
       - 'tests/test_us_open_confirmation_v2.py'
+      - 'tests/test_us_open_email_delivery_contract.py'
 
 permissions:
   contents: read
@@ -73,13 +75,15 @@ jobs:
         run: |
           python -m pytest -q --noconftest \
             tests/test_us_open_confirmation.py \
-            tests/test_us_open_confirmation_v2.py
+            tests/test_us_open_confirmation_v2.py \
+            tests/test_us_open_email_delivery_contract.py
 
       - name: Python 语法校验
         run: |
           python -m py_compile \
             scripts/run_us_open_confirmation.py \
-            scripts/run_us_open_confirmation_v2.py
+            scripts/run_us_open_confirmation_v2.py \
+            scripts/send_us_open_failure_alert.py
 
   confirm-us-open:
     name: actionable-open-confirmation
@@ -162,6 +166,14 @@ jobs:
         with:
           path: .open-confirmation-sent/
           key: us-open-confirmation-${{ steps.gate.outputs.ny_date }}
+
+      - name: 恢复当日失败告警标记
+        id: failure-alert-cache
+        if: ${{ steps.gate.outputs.should_run == 'true' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: .open-confirmation-failure-alert/
+          key: us-open-confirmation-failure-alert-${{ steps.gate.outputs.ny_date }}
 
       - name: 判断本轮是否需要执行
         id: once
@@ -293,6 +305,7 @@ jobs:
           echo "source_run_id=$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
 
       - name: 运行开盘15分钟执行确认并发送邮件
+        id: confirm
         if: ${{ steps.once.outputs.execute == 'true' }}
         env:
           OPEN_CONFIRMATION_SOURCE_RUN_ID: ${{ steps.plan.outputs.source_run_id }}
@@ -328,7 +341,9 @@ jobs:
           GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
-          NOTIFICATION_REPORT_CHANNELS: ${{ vars.NOTIFICATION_REPORT_CHANNELS || secrets.NOTIFICATION_REPORT_CHANNELS }}
+          # 开盘确认的成功标准是“邮件本身发送成功”。其他渠道成功不能替代邮件成功，
+          # 否则会错误写入当日成功缓存，导致 watchdog 后续补偿全部跳过。
+          NOTIFICATION_REPORT_CHANNELS: email
           NOTIFICATION_DEDUP_TTL_SECONDS: ${{ vars.NOTIFICATION_DEDUP_TTL_SECONDS || secrets.NOTIFICATION_DEDUP_TTL_SECONDS || '0' }}
           NOTIFICATION_COOLDOWN_SECONDS: ${{ vars.NOTIFICATION_COOLDOWN_SECONDS || secrets.NOTIFICATION_COOLDOWN_SECONDS || '0' }}
           NOTIFICATION_TIMEZONE: ${{ vars.NOTIFICATION_TIMEZONE || secrets.NOTIFICATION_TIMEZONE || 'Asia/Shanghai' }}
@@ -340,6 +355,38 @@ jobs:
             --output-dir open_confirmation_reports \
             --source-run-id '${{ steps.plan.outputs.source_run_id }}' \
             --notify
+
+      - name: 发送一次当日开盘确认失败告警邮件
+        id: failure-alert
+        if: ${{ failure() && steps.once.outputs.execute == 'true' && steps.failure-alert-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        env:
+          EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'AI 美股开盘执行确认' }}
+        shell: bash
+        run: |
+          python scripts/send_us_open_failure_alert.py \
+            --session-date '${{ steps.gate.outputs.ny_date }}' \
+            --run-url '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
+            --prior-v6-outcome '${{ steps.prior-v6.outcome }}' \
+            --plan-outcome '${{ steps.plan.outcome }}' \
+            --confirmation-outcome '${{ steps.confirm.outcome }}' \
+            --output-dir open_confirmation_reports
+
+          mkdir -p .open-confirmation-failure-alert
+          printf '%s\n' \
+            "session_date=${{ steps.gate.outputs.ny_date }}" \
+            "confirmation_run=${{ github.run_id }}" \
+            > ".open-confirmation-failure-alert/${{ steps.gate.outputs.ny_date }}.txt"
+
+      - name: 保存当日失败告警标记
+        if: ${{ always() && steps.failure-alert.outcome == 'success' && steps.failure-alert-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: .open-confirmation-failure-alert/
+          key: us-open-confirmation-failure-alert-${{ steps.gate.outputs.ny_date }}
 
       - name: 写入成功标记
         if: ${{ success() && steps.once.outputs.execute == 'true' && steps.sent-cache.outputs.cache-hit != 'true' }}
