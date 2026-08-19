@@ -1,0 +1,82 @@
+name: Provider Live Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_llm_probe:
+        description: '是否真实调用 LLM（会产生 API 费用）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-live-smoke
+  cancel-in-progress: true
+
+jobs:
+  live-provider-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      LIVE_SMOKE_SYMBOL: ${{ vars.LIVE_SMOKE_SYMBOL || 'AAPL' }}
+      LIVE_SMOKE_LLM_ENABLED: ${{ inputs.run_llm_probe && 'true' || 'false' }}
+      LIVE_SMOKE_LLM_MAX_TOKENS: ${{ vars.LIVE_SMOKE_LLM_MAX_TOKENS || '256' }}
+      LIVE_SMOKE_REPORT: artifacts/live-provider-smoke.json
+
+      SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
+      SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+      SERPAPI_FRESH_TIMEOUT_SECONDS: ${{ vars.SERPAPI_FRESH_TIMEOUT_SECONDS || '12' }}
+
+      GENERATION_BACKEND: ${{ vars.GENERATION_BACKEND || secrets.GENERATION_BACKEND }}
+      LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+      LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG || secrets.LITELLM_CONFIG }}
+      LITELLM_CONFIG_YAML: ${{ vars.LITELLM_CONFIG_YAML || secrets.LITELLM_CONFIG_YAML }}
+      LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_API_KEYS: ${{ secrets.DEEPSEEK_API_KEYS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints-production.txt -r requirements.txt
+
+      - name: Prepare LiteLLM config
+        if: ${{ env.LITELLM_CONFIG_YAML != '' && env.LITELLM_CONFIG != '' }}
+        shell: bash
+        run: |
+          mkdir -p "$(dirname "$LITELLM_CONFIG")"
+          printf '%s\n' "$LITELLM_CONFIG_YAML" > "$LITELLM_CONFIG"
+
+      - name: Show cost guard
+        run: |
+          if [ "$LIVE_SMOKE_LLM_ENABLED" = 'true' ]; then
+            echo 'LLM probe explicitly enabled: this manual run may consume API quota.'
+          else
+            echo 'LLM probe disabled: this run will not intentionally call the paid LLM probe.'
+          fi
+
+      - name: Run provider probes
+        run: python scripts/live_provider_smoke.py
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: live-provider-smoke-${{ github.run_id }}
+          path: artifacts/live-provider-smoke.json
+          if-no-files-found: ignore
+          retention-days: 14
