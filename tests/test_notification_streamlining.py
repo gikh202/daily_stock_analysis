@@ -29,6 +29,20 @@ def test_daily_notification_guard_is_narrow() -> None:
     assert argv == ["main.py"]
 
 
+def test_unconfigured_legacy_stock_fallback_is_blocked() -> None:
+    argv = ["main.py", "--no-notify"]
+    base = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_WORKFLOW": "每日股票分析",
+        "STOCK_LIST_CONFIG": "",
+        "STOCK_LIST": "600519",
+    }
+    assert sitecustomize.uses_unconfigured_daily_fallback_stock(argv, base) is True
+
+    configured = dict(base, STOCK_LIST_CONFIG="600519")
+    assert sitecustomize.uses_unconfigured_daily_fallback_stock(argv, configured) is False
+
+
 def test_provider_smoke_is_manual_and_paid_llm_is_opt_in() -> None:
     text = SMOKE.read_text(encoding="utf-8")
     assert "workflow_dispatch:" in text
