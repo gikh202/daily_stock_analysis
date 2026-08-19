@@ -103,7 +103,7 @@ jobs:
           key: us-open-confirmation-${{ steps.gate.outputs.ny_date }}
 
       - name: 恢复当日失败告警标记
-        id: failure-cache
+        id: failure-alert-cache
         if: ${{ steps.gate.outputs.should_run == 'true' }}
         uses: actions/cache/restore@v5
         with:
@@ -246,7 +246,7 @@ jobs:
 
       - name: 发送一次当日链路失败告警
         id: failure-alert
-        if: ${{ failure() && steps.once.outputs.execute == 'true' && steps.failure-cache.outputs.cache-hit != 'true' }}
+        if: ${{ failure() && steps.once.outputs.execute == 'true' && steps.failure-alert-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         env:
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
@@ -266,7 +266,7 @@ jobs:
           printf '%s\n' "session_date=${{ steps.gate.outputs.ny_date }}" > ".open-confirmation-failure-alert/${{ steps.gate.outputs.ny_date }}.txt"
 
       - name: 保存当日失败告警标记
-        if: ${{ always() && steps.failure-alert.outcome == 'success' && steps.failure-cache.outputs.cache-hit != 'true' }}
+        if: ${{ always() && steps.failure-alert.outcome == 'success' && steps.failure-alert-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: .open-confirmation-failure-alert/
