@@ -1,18 +1,32 @@
 from pathlib import Path
 
+import sitecustomize
+
 
 ROOT = Path(__file__).resolve().parents[1]
-DAILY = ROOT / ".github" / "workflows" / "00-daily-analysis.yml"
 OPEN = ROOT / ".github" / "workflows" / "01-us-open-confirmation.yml"
 SMOKE = ROOT / ".github" / "workflows" / "02-live-provider-smoke.yml"
 WATCHDOG = ROOT / ".github" / "workflows" / "01-us-open-schedule-watchdog.yml"
 SAFE_RUNNER = ROOT / "scripts" / "run_us_open_confirmation_safe.py"
 
 
-def test_daily_analysis_never_sends_user_notifications() -> None:
-    text = DAILY.read_text(encoding="utf-8")
-    assert "python main.py --no-notify" in text
-    assert "STOCK_LIST 未配置" in text
+def test_daily_analysis_forces_no_notify_without_changing_workflow_contract() -> None:
+    argv = ["main.py"]
+    env = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_WORKFLOW": "每日股票分析",
+    }
+    assert sitecustomize.apply_daily_workflow_notification_guard(argv, env) is True
+    assert argv == ["main.py", "--no-notify"]
+
+
+def test_daily_notification_guard_is_narrow() -> None:
+    argv = ["main.py"]
+    assert sitecustomize.apply_daily_workflow_notification_guard(
+        argv,
+        {"GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "CI"},
+    ) is False
+    assert argv == ["main.py"]
 
 
 def test_provider_smoke_is_manual_and_paid_llm_is_opt_in() -> None:
