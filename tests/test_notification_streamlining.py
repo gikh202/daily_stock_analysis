@@ -1,8 +1,11 @@
+from datetime import datetime
 from pathlib import Path
 import subprocess
 import sys
+from zoneinfo import ZoneInfo
 
 import sitecustomize
+from scripts.run_us_open_confirmation_safe import _near_open_retry_seconds
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +13,7 @@ OPEN = ROOT / ".github" / "workflows" / "01-us-open-confirmation.yml"
 SMOKE = ROOT / ".github" / "workflows" / "02-live-provider-smoke.yml"
 WATCHDOG = ROOT / ".github" / "workflows" / "01-us-open-schedule-watchdog.yml"
 SAFE_RUNNER = ROOT / "scripts" / "run_us_open_confirmation_safe.py"
+NY = ZoneInfo("America/New_York")
 
 
 def test_daily_analysis_forces_no_notify_without_changing_workflow_contract() -> None:
@@ -74,6 +78,12 @@ def test_safe_runner_supports_actions_direct_script_invocation() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "actual execution clock" in result.stdout
+
+
+def test_near_open_retry_waits_only_until_minimum_opening_window() -> None:
+    assert _near_open_retry_seconds(datetime(2026, 8, 20, 9, 31, tzinfo=NY)) == 245.0
+    assert _near_open_retry_seconds(datetime(2026, 8, 20, 9, 35, tzinfo=NY)) == 0.0
+    assert _near_open_retry_seconds(datetime(2026, 8, 20, 10, 5, tzinfo=NY)) == 0.0
 
 
 def test_safe_runner_has_quote_outage_fallback() -> None:
