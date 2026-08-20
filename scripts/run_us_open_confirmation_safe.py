@@ -79,7 +79,7 @@ def _fallback_data_unavailable(
                 None,
                 evaluated_at=generated_at,
                 data_error=(
-                    "开盘15分钟实时行情暂时不可验证。系统不会在缺少可靠行情时给出买入授权；"
+                    "当前开盘实时行情暂时不可验证。系统不会在缺少可靠行情时给出买入授权；"
                     f"当前不要下单。技术信息：{reason}"
                 ),
                 **params,
@@ -96,7 +96,7 @@ def _fallback_data_unavailable(
         source_run_id=source_run_id,
     )
     payload = json.loads(json_path.read_text(encoding="utf-8"))
-    payload["policy_version"] = "us-open-confirmation-v2-safe-fallback"
+    payload["policy_version"] = "us-open-confirmation-v2-runtime-safe-fallback"
     payload["fallback"] = {
         "active": True,
         "reason": reason,
@@ -161,7 +161,7 @@ def run_safe(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fail-safe U.S. open +15m confirmation that never silently drops on quote outage"
+        description="Fail-safe U.S. open runtime confirmation that uses the actual execution clock"
     )
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")
