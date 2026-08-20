@@ -41,7 +41,7 @@ def test_stage11_native_runner_has_no_legacy_runtime_or_fact_tables(
     )
 
     assert result["run"]["new_signals"] == 1
-    assert result["run"]["new_outcomes"] == 3
+    assert result["run"]["new_outcomes"] == 4
     assert result["run"]["production_runner"] == "native_normalized_stage11"
     assert result["write_path"]["mode"] == "normalized_only_no_legacy_projection"
     assert result["write_path"]["legacy_projection_enabled"] is False
@@ -71,7 +71,14 @@ def test_stage11_native_runner_has_no_legacy_runtime_or_fact_tables(
         assert "v6_signals" not in tables
         assert "v6_outcomes" not in tables
         assert conn.execute("SELECT COUNT(*) FROM v6_forecast_runs").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM v6_forecast_outcomes").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM v6_forecast_outcomes").fetchone()[0] == 4
+        horizons = {
+            int(row[0])
+            for row in conn.execute(
+                "SELECT horizon_days FROM v6_forecast_outcomes ORDER BY horizon_days"
+            ).fetchall()
+        }
+        assert horizons == {1, 5, 10, 20}
 
     run_payload = json.loads(
         (report_dir / "v6_run.json").read_text(encoding="utf-8")
@@ -107,14 +114,18 @@ def test_stage11_native_runner_has_no_legacy_runtime_or_fact_tables(
 
 def test_stage11_entrypoint_and_runtime_do_not_import_retired_runtime_modules() -> None:
     root = Path(__file__).resolve().parents[1]
+    production_runner = root / "src/v6_daily/production_runner.py"
     paths = (
         root / "scripts/run_v6_daily_stage11.py",
-        root / "src/v6_daily/production_runner.py",
+        production_runner,
         root / "src/v6_daily/production_write_store.py",
         root / "src/v6_daily/production_read_store.py",
         root / "src/v6_daily/production_outcomes.py",
         root / "src/v6_daily/production_report.py",
         root / "src/v6_daily/production_cutover.py",
+    )
+    assert "V6DailyEngine(history_db_path=v6_db_path)" in production_runner.read_text(
+        encoding="utf-8"
     )
     banned = (
         "from scripts.run_v6_daily import",

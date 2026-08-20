@@ -12,6 +12,7 @@ def test_open_confirmation_requires_email_channel_success() -> None:
     assert "NOTIFICATION_REPORT_CHANNELS: email" in text
     assert "id: confirm" in text
     assert "--notify" in text
+    assert "scripts/run_us_open_confirmation_safe.py" in text
 
 
 def test_open_confirmation_starts_at_market_open_and_uses_runtime_gate() -> None:
@@ -19,14 +20,31 @@ def test_open_confirmation_starts_at_market_open_and_uses_runtime_gate() -> None
     for marker in (
         "cron: '30 13 * * 1-5'",
         "cron: '30 14 * * 1-5'",
+        "cron: '30 14 * * 1-5'",
+        "cron: '0 16 * * 1-5'",
         '"$HM" -ge 930',
-        '"$HM" -le 1600',
-        "scheduled_runtime_confirmation",
-        "发送开盘实时执行确认",
+        '"$HM" -le 1230',
+        "scheduled_intraday_timing",
+        "发送开盘实时执行确认 / V7盘中择时",
     ):
         assert marker in text
     assert "cron: '45 13 * * 1-5'" in text
     assert "cron: '45 14 * * 1-5'" in text
+
+
+def test_waiting_state_is_rechecked_until_terminal() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for marker in (
+        "id: terminal-cache",
+        "us-open-terminal-${{ steps.gate.outputs.ny_date }}",
+        "id: state-cache",
+        "us-open-state-${{ steps.gate.outputs.ny_date }}-",
+        "--previous-state",
+        "follow_up_needed",
+        "steps.timing-state.outputs.follow_up_needed == 'false'",
+    ):
+        assert marker in text
+    assert "us-open-confirmation-${{ steps.gate.outputs.ny_date }}" not in text
 
 
 def test_open_confirmation_has_once_per_day_failure_email() -> None:

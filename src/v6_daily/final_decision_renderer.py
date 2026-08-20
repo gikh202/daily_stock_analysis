@@ -162,7 +162,7 @@ def _normalize_us_price_units(section: str) -> str:
 
 
 def _normalize_next_check_presentation(section: str) -> str:
-    """Canonicalize the next live confirmation checkpoint to 09:45 ET."""
+    """Canonicalize the next live check to the stateful V7 timing session."""
     normalized: list[str] = []
     for raw_line in section.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
@@ -176,7 +176,8 @@ def _normalize_next_check_presentation(section: str) -> str:
             normalized.append(raw_line)
             continue
         normalized.append(
-            f"{line_match.group('prefix')}：**{date_match.group(0)} 09:45 ET（开盘后15分钟）**"
+            f"{line_match.group('prefix')}：**{date_match.group(0)} 09:30 ET 起"
+            "（按实际运行时间持续择时，等待态盘中复查）**"
             f"{ending}"
         )
     return "".join(normalized)

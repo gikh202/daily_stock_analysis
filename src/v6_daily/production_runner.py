@@ -243,7 +243,7 @@ def run(
     import_guard = assert_production_import_graph_clean(root)
     legacy_before = snapshot_legacy_facts(v6_db_path)
 
-    engine = V6DailyEngine()
+    engine = V6DailyEngine(history_db_path=v6_db_path)
     store = ProductionV6WriteStore(
         v6_db_path,
         active_engine_version=engine.version,

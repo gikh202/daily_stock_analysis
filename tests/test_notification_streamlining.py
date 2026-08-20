@@ -13,6 +13,7 @@ OPEN = ROOT / ".github" / "workflows" / "01-us-open-confirmation.yml"
 SMOKE = ROOT / ".github" / "workflows" / "02-live-provider-smoke.yml"
 WATCHDOG = ROOT / ".github" / "workflows" / "01-us-open-schedule-watchdog.yml"
 SAFE_RUNNER = ROOT / "scripts" / "run_us_open_confirmation_safe.py"
+TIMING_RUNNER = ROOT / "scripts" / "run_us_open_timing.py"
 NY = ZoneInfo("America/New_York")
 
 
@@ -65,7 +66,8 @@ def test_open_confirmation_is_email_only_and_uses_safe_runner() -> None:
     text = OPEN.read_text(encoding="utf-8")
     assert "NOTIFICATION_REPORT_CHANNELS: email" in text
     assert "run_us_open_confirmation_safe.py" in text
-    assert "us-open-confirmation-${{ steps.gate.outputs.ny_date }}" in text
+    assert "us-open-terminal-${{ steps.gate.outputs.ny_date }}" in text
+    assert "us-open-state-${{ steps.gate.outputs.ny_date }}-" in text
 
 
 def test_safe_runner_supports_actions_direct_script_invocation() -> None:
@@ -80,14 +82,24 @@ def test_safe_runner_supports_actions_direct_script_invocation() -> None:
     assert "actual execution clock" in result.stdout
 
 
+def test_timing_policy_import_keeps_notification_stack_lazy() -> None:
+    text = TIMING_RUNNER.read_text(encoding="utf-8")
+    prefix, notify_block = text.split("def _notify", 1)
+    assert "from src.notification import NotificationService" not in prefix
+    assert "from src.notification import NotificationService" in notify_block
+
+
 def test_near_open_retry_waits_only_until_minimum_opening_window() -> None:
     assert _near_open_retry_seconds(datetime(2026, 8, 20, 9, 31, tzinfo=NY)) == 245.0
     assert _near_open_retry_seconds(datetime(2026, 8, 20, 9, 35, tzinfo=NY)) == 0.0
     assert _near_open_retry_seconds(datetime(2026, 8, 20, 10, 5, tzinfo=NY)) == 0.0
 
 
-def test_safe_runner_has_quote_outage_fallback() -> None:
-    text = SAFE_RUNNER.read_text(encoding="utf-8")
-    assert "all live U.S. session quotes unavailable" in text
-    assert "当前不要下单" in text
-    assert "us-open-confirmation-v2-runtime-safe-fallback" in text
+def test_safe_runner_has_quote_outage_fallback_and_nonterminal_state() -> None:
+    safe = SAFE_RUNNER.read_text(encoding="utf-8")
+    timing = TIMING_RUNNER.read_text(encoding="utf-8")
+    assert "all live U.S. session quotes unavailable" in safe
+    assert "allow_all_unavailable=True" in safe
+    assert 'action="DATA_UNAVAILABLE"' in timing
+    assert "terminal=False" in timing
+    assert "follow_up_needed" in timing

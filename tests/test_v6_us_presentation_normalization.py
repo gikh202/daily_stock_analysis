@@ -23,7 +23,7 @@ def test_us_price_units_replace_bare_yuan_leaks_in_us_stock_cards() -> None:
     assert "357.66亿美元" in normalized
 
 
-def test_next_check_is_canonical_open_plus_15_checkpoint() -> None:
+def test_next_check_is_canonical_runtime_timing_checkpoint() -> None:
     variants = (
         "  - 下次检查：**2026-08-12 09:30 开盘后**",
         "  - 下次检查：**2026-08-12 09:30 ET（美东）（开盘后30分钟）**",
@@ -33,7 +33,10 @@ def test_next_check_is_canonical_open_plus_15_checkpoint() -> None:
 
     for source in variants:
         normalized = _normalize_next_check_presentation(source)
-        assert normalized == "  - 下次检查：**2026-08-12 09:45 ET（开盘后15分钟）**"
+        assert normalized == (
+            "  - 下次检查：**2026-08-12 09:30 ET 起"
+            "（按实际运行时间持续择时，等待态盘中复查）**"
+        )
 
 
 def test_next_check_without_explicit_date_is_left_unchanged() -> None:

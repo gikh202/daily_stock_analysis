@@ -13,7 +13,7 @@ def test_next_check_normalization_preserves_section_trailing_newlines() -> None:
     normalized = _normalize_next_check_presentation(source)
 
     assert normalized.endswith("\n\n")
-    assert "2026-08-12 09:45 ET（开盘后15分钟）" in normalized
+    assert "2026-08-12 09:30 ET 起（按实际运行时间持续择时，等待态盘中复查）" in normalized
 
 
 def test_next_check_normalization_does_not_glue_adjacent_heading() -> None:
@@ -26,4 +26,4 @@ def test_next_check_normalization_does_not_glue_adjacent_heading() -> None:
     normalized = _normalize_next_check_presentation(first) + second
 
     assert "\n### 2. VOO" in normalized
-    assert "分钟）**### 2. VOO" not in normalized
+    assert "盘中复查）**### 2. VOO" not in normalized

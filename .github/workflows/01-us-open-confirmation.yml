@@ -1,23 +1,29 @@
 name: 美股开盘执行确认
 
 on:
-  # 首个候选从 09:30 ET 开盘启动。GitHub schedule 可能延迟，所以保留少量补偿候选；
-  # 真正确认时刻始终以 runner 实际执行时的纽约时间和最新行情为准。
+  # 从 09:30 ET 开始。等待态会在后续候选继续按实际 runner 时间复查，
+  # 直到出现“现在买 / 今天不买 / 计划失效”等终态；状态未变化时邮件自动抑制。
   schedule:
-    # EDT (-04:00): 09:30 / 09:35 / 09:45 / 10:00 ET
+    # EDT (-04:00): 09:30 / 09:35 / 09:45 / 10:00 / 10:30 / 11:00 / 12:00 ET
     - cron: '30 13 * * 1-5'
     - cron: '35 13 * * 1-5'
     - cron: '45 13 * * 1-5'
     - cron: '0 14 * * 1-5'
-    # EST (-05:00): 09:30 / 09:35 / 09:45 / 10:00 ET
+    - cron: '30 14 * * 1-5'
+    - cron: '0 15 * * 1-5'
+    - cron: '0 16 * * 1-5'
+    # EST (-05:00): 09:30 / 09:35 / 09:45 / 10:00 / 10:30 / 11:00 / 12:00 ET
     - cron: '30 14 * * 1-5'
     - cron: '35 14 * * 1-5'
     - cron: '45 14 * * 1-5'
     - cron: '0 15 * * 1-5'
+    - cron: '30 15 * * 1-5'
+    - cron: '0 16 * * 1-5'
+    - cron: '0 17 * * 1-5'
   workflow_dispatch:
     inputs:
       force_resend:
-        description: '忽略当日成功标记并强制重发（仅排障）'
+        description: '忽略终态/状态去重并强制重新评估和发信（仅排障）'
         required: false
         default: false
         type: boolean
@@ -36,7 +42,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: 判断纽约开盘确认窗口
+      - name: 判断纽约盘中择时窗口
         id: gate
         shell: bash
         env:
@@ -54,7 +60,7 @@ jobs:
           SHOULD_RUN=false
           FORCE_RESEND=false
           FAMILY_OK=false
-          REASON='outside_regular_session'
+          REASON='outside_intraday_timing_window'
 
           if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
             SHOULD_RUN=true
@@ -62,25 +68,25 @@ jobs:
               FORCE_RESEND=true
               REASON='manual_force_resend'
             else
-              REASON='manual_idempotent_dispatch'
+              REASON='manual_intraday_timing'
             fi
           else
             if [ "$NY_OFFSET" = '-0400' ]; then
               case "$EVENT_SCHEDULE" in
-                '30 13 * * 1-5'|'35 13 * * 1-5'|'45 13 * * 1-5'|'0 14 * * 1-5') FAMILY_OK=true ;;
+                '30 13 * * 1-5'|'35 13 * * 1-5'|'45 13 * * 1-5'|'0 14 * * 1-5'|'30 14 * * 1-5'|'0 15 * * 1-5'|'0 16 * * 1-5') FAMILY_OK=true ;;
               esac
             elif [ "$NY_OFFSET" = '-0500' ]; then
               case "$EVENT_SCHEDULE" in
-                '30 14 * * 1-5'|'35 14 * * 1-5'|'45 14 * * 1-5'|'0 15 * * 1-5') FAMILY_OK=true ;;
+                '30 14 * * 1-5'|'35 14 * * 1-5'|'45 14 * * 1-5'|'0 15 * * 1-5'|'30 15 * * 1-5'|'0 16 * * 1-5'|'0 17 * * 1-5') FAMILY_OK=true ;;
               esac
             fi
 
             HM=$((10#$NY_HM))
             if [ "$NY_WEEKDAY" -ge 1 ] && [ "$NY_WEEKDAY" -le 5 ] \
-              && [ "$HM" -ge 930 ] && [ "$HM" -le 1600 ] \
+              && [ "$HM" -ge 930 ] && [ "$HM" -le 1230 ] \
               && [ "$FAMILY_OK" = 'true' ]; then
               SHOULD_RUN=true
-              REASON='scheduled_runtime_confirmation'
+              REASON='scheduled_intraday_timing'
             elif [ "$FAMILY_OK" != 'true' ]; then
               REASON='inactive_dst_schedule_family'
             fi
@@ -95,13 +101,23 @@ jobs:
             echo "reason=$REASON"
           } >> "$GITHUB_OUTPUT"
 
-      - name: 恢复当日成功标记
-        id: sent-cache
+      - name: 恢复当日终态标记
+        id: terminal-cache
         if: ${{ steps.gate.outputs.should_run == 'true' }}
         uses: actions/cache/restore@v5
         with:
-          path: .open-confirmation-sent/
-          key: us-open-confirmation-${{ steps.gate.outputs.ny_date }}
+          path: .open-confirmation-terminal/
+          key: us-open-terminal-${{ steps.gate.outputs.ny_date }}
+
+      - name: 恢复最近一次盘中状态
+        id: state-cache
+        if: ${{ steps.gate.outputs.should_run == 'true' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: .open-confirmation-state/
+          key: us-open-state-${{ steps.gate.outputs.ny_date }}-${{ github.run_id }}-restore
+          restore-keys: |
+            us-open-state-${{ steps.gate.outputs.ny_date }}-
 
       - name: 恢复当日失败告警标记
         id: failure-alert-cache
@@ -111,19 +127,19 @@ jobs:
           path: .open-confirmation-failure-alert/
           key: us-open-confirmation-failure-alert-${{ steps.gate.outputs.ny_date }}
 
-      - name: 判断本轮是否执行
+      - name: 判断本轮是否继续择时
         id: once
         if: ${{ steps.gate.outputs.should_run == 'true' }}
         shell: bash
         env:
           FORCE_RESEND: ${{ steps.gate.outputs.force_resend }}
-          CACHE_HIT: ${{ steps.sent-cache.outputs.cache-hit }}
+          TERMINAL_HIT: ${{ steps.terminal-cache.outputs.cache-hit }}
         run: |
-          if [ "$FORCE_RESEND" = 'true' ] || [ "$CACHE_HIT" != 'true' ]; then
+          if [ "$FORCE_RESEND" = 'true' ] || [ "$TERMINAL_HIT" != 'true' ]; then
             echo 'execute=true' >> "$GITHUB_OUTPUT"
           else
             echo 'execute=false' >> "$GITHUB_OUTPUT"
-            echo '今日开盘确认邮件已成功发送，本轮跳过。'
+            echo '今日盘中择时已进入终态，本轮自动跳过。'
           fi
 
       - name: 检出代码
@@ -143,7 +159,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 查找开盘前最近成功的 V6 收盘计划
+      - name: 查找开盘前最近成功的 V7/V6 收盘预测
         id: prior-v6
         if: ${{ steps.once.outputs.execute == 'true' }}
         uses: actions/github-script@v7
@@ -172,14 +188,14 @@ jobs:
               })
               .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
             if (!candidates.length) {
-              core.setFailed('No successful V6 close-plan run found before today’s 09:30 ET within 7 days.');
+              core.setFailed('No successful close forecast run found before today’s 09:30 ET within 7 days.');
               return;
             }
             const preferred = candidates.find((run) => run.event === 'workflow_run') || candidates[0];
             core.setOutput('run_id', String(preferred.id));
-            core.info(`Using V6 close plan run ${preferred.id} created_at=${preferred.created_at}`);
+            core.info(`Using close forecast run ${preferred.id} created_at=${preferred.created_at}`);
 
-      - name: 下载上一收盘 V6 计划
+      - name: 下载上一收盘预测 Artifact
         if: ${{ steps.once.outputs.execute == 'true' && steps.prior-v6.outputs.run_id != '' }}
         uses: actions/download-artifact@v5
         with:
@@ -189,7 +205,7 @@ jobs:
           run-id: ${{ steps.prior-v6.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 定位结构化收盘计划
+      - name: 定位结构化收盘预测
         id: plan
         if: ${{ steps.once.outputs.execute == 'true' }}
         shell: bash
@@ -199,7 +215,7 @@ jobs:
           set -euo pipefail
           PAYLOAD="$(find prior_v6 -type f -name 'v6_daily_latest.json' -print | sort | tail -n 1 || true)"
           if [ -z "$PAYLOAD" ]; then
-            echo '::error::上一收盘 V6 Artifact 缺少 v6_daily_latest.json。'
+            echo '::error::上一收盘 Artifact 缺少 v6_daily_latest.json。'
             exit 2
           fi
           python - "$PAYLOAD" <<'PY'
@@ -208,16 +224,20 @@ jobs:
           packets = [x for x in ((payload.get('final_decisions') or {}).get('packets') or []) if isinstance(x, dict)]
           if not packets:
               raise SystemExit('final_decisions.packets is empty')
-          print('V6 plan PASS packets=', len(packets))
+          board = [x for x in (payload.get('board') or []) if isinstance(x, dict)]
+          v7 = sum(bool(((x.get('context_features') or {}).get('forecast_intelligence'))) for x in board)
+          print('close forecast PASS packets=', len(packets), 'v7_forecasts=', v7)
           PY
           echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
           echo "source_run_id=$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
 
-      - name: 发送开盘实时执行确认
+      - name: 发送开盘实时执行确认 / V7盘中择时
         id: confirm
         if: ${{ steps.once.outputs.execute == 'true' }}
         env:
           OPEN_CONFIRMATION_SOURCE_RUN_ID: ${{ steps.plan.outputs.source_run_id }}
+          OPEN_CONFIRMATION_PREVIOUS_STATE: .open-confirmation-state/${{ steps.gate.outputs.ny_date }}.json
+          OPEN_CONFIRMATION_FORCE_NOTIFY: ${{ steps.gate.outputs.force_resend }}
           OPEN_CONFIRMATION_CHASE_TOLERANCE_PCT: ${{ vars.OPEN_CONFIRMATION_CHASE_TOLERANCE_PCT || '0.5' }}
           OPEN_CONFIRMATION_MOMENTUM_CHASE_PCT: ${{ vars.OPEN_CONFIRMATION_MOMENTUM_CHASE_PCT || '0.75' }}
           OPEN_CONFIRMATION_WEAK_OPEN_PCT: ${{ vars.OPEN_CONFIRMATION_WEAK_OPEN_PCT || '-0.5' }}
@@ -231,7 +251,7 @@ jobs:
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
-          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'AI 美股开盘执行确认' }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'AI 美股盘中择时' }}
           NOTIFICATION_REPORT_CHANNELS: email
           NOTIFICATION_DEDUP_TTL_SECONDS: '0'
           NOTIFICATION_COOLDOWN_SECONDS: '0'
@@ -239,11 +259,61 @@ jobs:
           LOG_LEVEL: INFO
         shell: bash
         run: |
+          mkdir -p .open-confirmation-state
           python scripts/run_us_open_confirmation_safe.py \
             --v6-payload '${{ steps.plan.outputs.payload }}' \
             --output-dir open_confirmation_reports \
             --source-run-id '${{ steps.plan.outputs.source_run_id }}' \
+            --previous-state '.open-confirmation-state/${{ steps.gate.outputs.ny_date }}.json' \
             --notify
+
+      - name: 解析盘中择时状态
+        id: timing-state
+        if: ${{ success() && steps.once.outputs.execute == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          JSON='open_confirmation_reports/us_open_confirmation_latest.json'
+          python - "$JSON" "${{ steps.gate.outputs.ny_date }}" <<'PY'
+          import json, pathlib, shutil, sys
+          src = pathlib.Path(sys.argv[1])
+          session = sys.argv[2]
+          payload = json.loads(src.read_text(encoding='utf-8'))
+          follow = bool(payload.get('follow_up_needed'))
+          print('follow_up_needed=', follow, 'signature=', payload.get('state_signature'))
+          out = pathlib.Path('.open-confirmation-state') / f'{session}.json'
+          out.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile(src, out)
+          with open(pathlib.Path(__import__('os').environ['GITHUB_OUTPUT']), 'a', encoding='utf-8') as fh:
+              fh.write(f"follow_up_needed={'true' if follow else 'false'}\n")
+              fh.write(f"state_signature={payload.get('state_signature') or ''}\n")
+          PY
+
+      - name: 保存最新盘中状态
+        if: ${{ success() && steps.once.outputs.execute == 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: .open-confirmation-state/
+          key: us-open-state-${{ steps.gate.outputs.ny_date }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: 写入当日终态标记
+        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.timing-state.outputs.follow_up_needed == 'false' && steps.terminal-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          mkdir -p .open-confirmation-terminal
+          printf '%s\n' \
+            "session_date=${{ steps.gate.outputs.ny_date }}" \
+            "source_close_run=${{ steps.plan.outputs.source_run_id }}" \
+            "timing_run=${{ github.run_id }}" \
+            "state_signature=${{ steps.timing-state.outputs.state_signature }}" \
+            > ".open-confirmation-terminal/${{ steps.gate.outputs.ny_date }}.txt"
+
+      - name: 保存当日终态标记
+        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.timing-state.outputs.follow_up_needed == 'false' && steps.terminal-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: .open-confirmation-terminal/
+          key: us-open-terminal-${{ steps.gate.outputs.ny_date }}
 
       - name: 发送一次当日链路失败告警
         id: failure-alert
@@ -253,7 +323,7 @@ jobs:
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
-          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'AI 美股开盘执行确认' }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'AI 美股盘中择时' }}
         shell: bash
         run: |
           python scripts/send_us_open_failure_alert.py \
@@ -273,29 +343,11 @@ jobs:
           path: .open-confirmation-failure-alert/
           key: us-open-confirmation-failure-alert-${{ steps.gate.outputs.ny_date }}
 
-      - name: 写入当日成功标记
-        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.sent-cache.outputs.cache-hit != 'true' }}
-        shell: bash
-        run: |
-          mkdir -p .open-confirmation-sent
-          printf '%s\n' \
-            "session_date=${{ steps.gate.outputs.ny_date }}" \
-            "source_v6_run=${{ steps.plan.outputs.source_run_id }}" \
-            "confirmation_run=${{ github.run_id }}" \
-            > ".open-confirmation-sent/${{ steps.gate.outputs.ny_date }}.txt"
-
-      - name: 保存当日成功标记
-        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.sent-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v5
-        with:
-          path: .open-confirmation-sent/
-          key: us-open-confirmation-${{ steps.gate.outputs.ny_date }}
-
-      - name: 上传开盘确认报告
+      - name: 上传盘中择时报告
         if: ${{ always() && steps.once.outputs.execute == 'true' }}
         uses: actions/upload-artifact@v6
         with:
-          name: us-open-confirmation-${{ github.run_id }}-${{ github.run_attempt }}
+          name: us-open-timing-${{ github.run_id }}-${{ github.run_attempt }}
           path: open_confirmation_reports/
           if-no-files-found: warn
           retention-days: 30
@@ -304,4 +356,4 @@ jobs:
         if: ${{ steps.gate.outputs.should_run != 'true' || steps.once.outputs.execute == 'false' }}
         run: |
           echo "gate_reason=${{ steps.gate.outputs.reason }}"
-          echo "already_sent=${{ steps.sent-cache.outputs.cache-hit }}"
+          echo "terminal=${{ steps.terminal-cache.outputs.cache-hit }}"
