@@ -96,9 +96,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DB="$(find prior_v6 -type f -name 'v6_decision_engine.db' -print | sort | tail -n 1 || true)"
+          DB="$(find prior_v6 -type f -name 'v6_daily.db' -print | head -n 1 || true)"
           if [ -z "$DB" ]; then
-            echo '::error::V6 artifact is missing v6_decision_engine.db.'
+            echo '::error::V6 artifact does not contain v6_daily.db'
             exit 2
           fi
           echo "path=$DB" >> "$GITHUB_OUTPUT"
@@ -125,7 +125,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: us-open-backtest-${{ github.run_id }}
+          name: us-open-backtest-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             open_confirmation_backtest.json
             open_confirmation_conservative_probe.json
