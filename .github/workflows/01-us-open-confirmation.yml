@@ -1,18 +1,19 @@
 name: 美股开盘执行确认
 
 on:
-  # 目标 09:45 ET。保留少量补偿候选，使用纽约时间门控和每日幂等标记避免重复邮件。
+  # 首个候选从 09:30 ET 开盘启动。GitHub schedule 可能延迟，所以保留少量补偿候选；
+  # 真正确认时刻始终以 runner 实际执行时的纽约时间和最新行情为准。
   schedule:
-    # EDT
+    # EDT (-04:00): 09:30 / 09:35 / 09:45 / 10:00 ET
+    - cron: '30 13 * * 1-5'
+    - cron: '35 13 * * 1-5'
     - cron: '45 13 * * 1-5'
-    - cron: '55 13 * * 1-5'
-    - cron: '5 14 * * 1-5'
-    - cron: '15 14 * * 1-5'
-    # EST
+    - cron: '0 14 * * 1-5'
+    # EST (-05:00): 09:30 / 09:35 / 09:45 / 10:00 ET
+    - cron: '30 14 * * 1-5'
+    - cron: '35 14 * * 1-5'
     - cron: '45 14 * * 1-5'
-    - cron: '55 14 * * 1-5'
-    - cron: '5 15 * * 1-5'
-    - cron: '15 15 * * 1-5'
+    - cron: '0 15 * * 1-5'
   workflow_dispatch:
     inputs:
       force_resend:
@@ -53,7 +54,7 @@ jobs:
           SHOULD_RUN=false
           FORCE_RESEND=false
           FAMILY_OK=false
-          REASON='outside_confirmation_window'
+          REASON='outside_regular_session'
 
           if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
             SHOULD_RUN=true
@@ -66,20 +67,20 @@ jobs:
           else
             if [ "$NY_OFFSET" = '-0400' ]; then
               case "$EVENT_SCHEDULE" in
-                '45 13 * * 1-5'|'55 13 * * 1-5'|'5 14 * * 1-5'|'15 14 * * 1-5') FAMILY_OK=true ;;
+                '30 13 * * 1-5'|'35 13 * * 1-5'|'45 13 * * 1-5'|'0 14 * * 1-5') FAMILY_OK=true ;;
               esac
             elif [ "$NY_OFFSET" = '-0500' ]; then
               case "$EVENT_SCHEDULE" in
-                '45 14 * * 1-5'|'55 14 * * 1-5'|'5 15 * * 1-5'|'15 15 * * 1-5') FAMILY_OK=true ;;
+                '30 14 * * 1-5'|'35 14 * * 1-5'|'45 14 * * 1-5'|'0 15 * * 1-5') FAMILY_OK=true ;;
               esac
             fi
 
             HM=$((10#$NY_HM))
             if [ "$NY_WEEKDAY" -ge 1 ] && [ "$NY_WEEKDAY" -le 5 ] \
-              && [ "$HM" -ge 945 ] && [ "$HM" -le 1025 ] \
+              && [ "$HM" -ge 930 ] && [ "$HM" -le 1600 ] \
               && [ "$FAMILY_OK" = 'true' ]; then
               SHOULD_RUN=true
-              REASON='scheduled_confirmation_window'
+              REASON='scheduled_runtime_confirmation'
             elif [ "$FAMILY_OK" != 'true' ]; then
               REASON='inactive_dst_schedule_family'
             fi
@@ -212,7 +213,7 @@ jobs:
           echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
           echo "source_run_id=$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
 
-      - name: 发送开盘15分钟执行确认
+      - name: 发送开盘实时执行确认
         id: confirm
         if: ${{ steps.once.outputs.execute == 'true' }}
         env:

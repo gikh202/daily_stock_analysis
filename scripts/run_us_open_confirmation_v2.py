@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from dataclasses import replace
-from datetime import date, datetime, time
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -24,7 +24,7 @@ from scripts.run_us_open_confirmation import classify_confirmation as classify_v
 
 logger = logging.getLogger("us_open_confirmation_v2")
 NY = ZoneInfo("America/New_York")
-POLICY_VERSION = "us-open-confirmation-v2"
+POLICY_VERSION = "us-open-confirmation-v2-runtime"
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -42,6 +42,20 @@ def _parse_bar_time(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=NY)
     return parsed.astimezone(NY)
+
+
+def _runtime_snapshot(snapshot: LiveSnapshot) -> LiveSnapshot:
+    """Use only evidence that is comparable at the actual workflow runtime.
+
+    Before the first 15 regular-session bars are complete, the stored volume
+    ratio compares a partial current opening window with complete historical
+    15-minute windows. Treat that ratio as unavailable instead of letting the
+    scheduler's exact start minute create a false weak-volume signal. Price,
+    opening range, stops and quote freshness still use the latest available bar.
+    """
+    if snapshot.bar_count >= 15 or snapshot.volume_ratio is None:
+        return snapshot
+    return replace(snapshot, volume_ratio=None)
 
 
 def _opening_range_position(snapshot: LiveSnapshot) -> float:
@@ -93,31 +107,32 @@ def classify_confirmation_v2(
     momentum_min_opening_range_position: float = 0.50,
     momentum_min_volume_ratio: float = 0.70,
     max_quote_age_minutes: float = 8.0,
-    buy_authorization_cutoff: time = time(10, 15),
     max_plan_age_days: int = 4,
     starter_position_pct: float = 10.0,
     data_error: str | None = None,
 ) -> ConfirmationDecision:
-    """V2 intraday policy: V1 plan gates plus freshness and opening-momentum guards.
+    """V2 intraday policy evaluated at the workflow's actual runtime.
 
     The prior close packet remains the authority for whether a symbol is buyable
-    and for its entry/stop/targets. V2 only decides whether the +15m tape confirms
-    execution now; it never invents a new trade plan.
+    and for its entry/stop/targets. V2 only decides whether the latest verified
+    tape at the actual execution time confirms action now; it never invents a new
+    trade plan and it no longer assumes a fixed 09:45/10:15 confirmation clock.
     """
     evaluated = evaluated_at.astimezone(NY)
+    runtime_snapshot = _runtime_snapshot(snapshot) if snapshot is not None else None
     base = classify_v1(
         packet,
-        snapshot,
+        runtime_snapshot,
         chase_tolerance_pct=normal_chase_tolerance_pct,
         weak_open_pct=weak_open_pct,
         min_volume_ratio=min_volume_ratio,
         starter_position_pct=starter_position_pct,
         data_error=data_error,
     )
-    if snapshot is None:
+    if runtime_snapshot is None:
         return base
 
-    last_bar = _parse_bar_time(snapshot.last_bar_time)
+    last_bar = _parse_bar_time(runtime_snapshot.last_bar_time)
     if last_bar is None:
         return _with_status(
             base,
@@ -168,20 +183,32 @@ def classify_confirmation_v2(
     if base.status not in {"BUY_NOW", "WAIT_PULLBACK"}:
         return base
 
-    range_position = _opening_range_position(snapshot)
+    range_position = _opening_range_position(runtime_snapshot)
     if base.status == "BUY_NOW" and range_position < min_opening_range_position:
         return _with_status(
             base,
             status="WAIT_STABILIZE",
             label=STATUS_LABELS["WAIT_STABILIZE"],
             reason=(
-                f"09:45 价格仅位于开盘15分钟区间的 {range_position * 100:.0f}% 位置，"
+                f"当前价格仅位于开盘确认区间的 {range_position * 100:.0f}% 位置，"
                 f"低于 {min_opening_range_position * 100:.0f}% 确认线；先等价格重新转强。"
             ),
         )
 
     candidate = base
-    if base.status == "WAIT_PULLBACK":
+    if base.status == "BUY_NOW":
+        candidate = _with_status(
+            base,
+            status="BUY_NOW",
+            label=STATUS_LABELS["BUY_NOW"],
+            starter_position_pct=base.starter_position_pct,
+            reason=(
+                f"截至 {evaluated.strftime('%H:%M')} ET，现价位于昨晚计划允许范围内，"
+                "止损未失效且当前盘中价格未出现硬性走弱信号；允许执行第一笔仓位，"
+                "但不得超过昨晚计划总仓位上限。"
+            ),
+        )
+    elif base.status == "WAIT_PULLBACK":
         entry_high = _entry_high(packet)
         momentum_limit = (
             entry_high * (1.0 + max(0.0, momentum_chase_tolerance_pct) / 100.0)
@@ -190,11 +217,11 @@ def classify_confirmation_v2(
         )
         momentum_ok = bool(
             momentum_limit is not None
-            and snapshot.current_price <= momentum_limit
-            and snapshot.return_from_open_pct > 0.0
+            and runtime_snapshot.current_price <= momentum_limit
+            and runtime_snapshot.return_from_open_pct > 0.0
             and range_position >= momentum_min_opening_range_position
-            and snapshot.volume_ratio is not None
-            and snapshot.volume_ratio >= momentum_min_volume_ratio
+            and runtime_snapshot.volume_ratio is not None
+            and runtime_snapshot.volume_ratio >= momentum_min_volume_ratio
         )
         if not momentum_ok:
             return base
@@ -206,21 +233,9 @@ def classify_confirmation_v2(
             starter_position_pct=starter,
             reason=(
                 f"现价高于常规追价上限，但仍在 {momentum_chase_tolerance_pct:.2f}% 动量扩展内；"
-                f"较开盘 {snapshot.return_from_open_pct:+.2f}%、位于开盘15分钟区间 "
-                f"{range_position * 100:.0f}% 位置、量比 {snapshot.volume_ratio:.2f}x，"
+                f"较开盘 {runtime_snapshot.return_from_open_pct:+.2f}%、位于开盘确认区间 "
+                f"{range_position * 100:.0f}% 位置、量比 {runtime_snapshot.volume_ratio:.2f}x，"
                 "满足严格动量例外，允许小仓首笔。"
-            ),
-        )
-
-    if evaluated.time().replace(tzinfo=None) > buy_authorization_cutoff:
-        return _with_status(
-            candidate,
-            status="WAIT_STABILIZE",
-            label="确认已过时，暂不下单",
-            reason=(
-                f"本轮在 {evaluated.strftime('%H:%M')} ET 才完成，已超过 "
-                f"{buy_authorization_cutoff.strftime('%H:%M')} ET 的开盘确认授权窗口；"
-                "补偿任务仍发送状态，但不再给新的 BUY_NOW。"
             ),
         )
 
@@ -313,7 +328,8 @@ def run(
         "momentum_min_opening_range_position": momentum_min_opening_range_position,
         "momentum_min_volume_ratio": momentum_min_volume_ratio,
         "max_quote_age_minutes": max_quote_age_minutes,
-        "buy_authorization_cutoff_et": "10:15",
+        "evaluation_clock": "actual_runtime_et",
+        "early_partial_volume_ratio": "disabled_until_15_regular_session_bars",
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -335,7 +351,7 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Guarded U.S. open +15m execution confirmation v2")
+    parser = argparse.ArgumentParser(description="Guarded U.S. open runtime execution confirmation v2")
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")
     parser.add_argument("--source-run-id", default=os.getenv("OPEN_CONFIRMATION_SOURCE_RUN_ID"))

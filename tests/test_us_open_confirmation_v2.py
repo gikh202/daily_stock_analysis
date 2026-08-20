@@ -39,8 +39,9 @@ def _snapshot(
     open_price: float = 103.0,
     opening_low: float = 101.0,
     opening_high: float = 106.0,
-    volume_ratio: float = 1.0,
+    volume_ratio: float | None = 1.0,
     last_bar="2026-08-14T09:44:00-04:00",
+    bar_count: int = 15,
 ):
     return LiveSnapshot(
         symbol="TEST",
@@ -54,7 +55,7 @@ def _snapshot(
         opening_15m_volume=1_000_000,
         recent_opening_volume_median=900_000,
         volume_ratio=volume_ratio,
-        bar_count=15,
+        bar_count=bar_count,
         last_bar_time=last_bar,
     )
 
@@ -75,7 +76,8 @@ def test_low_opening_range_position_blocks_buy():
         evaluated_at=_at(),
     )
     assert decision.status == "WAIT_STABILIZE"
-    assert "开盘15分钟区间" in decision.reason
+    assert "开盘确认区间" in decision.reason
+    assert "09:45" not in decision.reason
 
 
 def test_momentum_extension_allows_only_confirmed_strength():
@@ -116,15 +118,31 @@ def test_stale_quote_is_non_actionable():
     assert decision.starter_position_pct == 0.0
 
 
-def test_late_retry_cannot_issue_new_buy():
+def test_late_runtime_uses_current_quote_instead_of_fixed_cutoff():
     decision = classify_confirmation_v2(
         _packet(),
-        _snapshot(104.0, last_bar="2026-08-14T10:19:00-04:00"),
+        _snapshot(104.0, last_bar="2026-08-14T10:19:00-04:00", bar_count=50),
         evaluated_at=_at(10, 20),
     )
-    assert decision.status == "WAIT_STABILIZE"
-    assert decision.label == "确认已过时，暂不下单"
-    assert decision.starter_position_pct == 0.0
+    assert decision.status == "BUY_NOW"
+    assert decision.label != "确认已过时，暂不下单"
+
+
+def test_pre_0945_partial_volume_ratio_cannot_create_false_weak_volume_block():
+    decision = classify_confirmation_v2(
+        _packet(),
+        _snapshot(
+            102.9,
+            open_price=103.0,
+            opening_low=102.7,
+            opening_high=103.4,
+            volume_ratio=0.2,
+            last_bar="2026-08-14T09:36:00-04:00",
+            bar_count=7,
+        ),
+        evaluated_at=_at(9, 37),
+    )
+    assert decision.status == "BUY_NOW"
 
 
 def test_same_day_plan_is_rejected_as_not_prior_close_plan():

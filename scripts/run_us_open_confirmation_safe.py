@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import time as time_module
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -56,6 +57,16 @@ def _policy() -> dict[str, float]:
     }
 
 
+def _near_open_retry_seconds(now: datetime | None = None) -> float:
+    current = (now or datetime.now(NY)).astimezone(NY)
+    if current.hour != 9 or current.minute >= 35:
+        return 0.0
+    if current.minute < 30:
+        return 0.0
+    target = current.replace(hour=9, minute=35, second=5, microsecond=0)
+    return max(0.0, min(300.0, (target - current).total_seconds()))
+
+
 def _fallback_data_unavailable(
     *,
     v6_payload_path: str | Path,
@@ -79,7 +90,7 @@ def _fallback_data_unavailable(
                 None,
                 evaluated_at=generated_at,
                 data_error=(
-                    "开盘15分钟实时行情暂时不可验证。系统不会在缺少可靠行情时给出买入授权；"
+                    "当前开盘实时行情暂时不可验证。系统不会在缺少可靠行情时给出买入授权；"
                     f"当前不要下单。技术信息：{reason}"
                 ),
                 **params,
@@ -96,7 +107,7 @@ def _fallback_data_unavailable(
         source_run_id=source_run_id,
     )
     payload = json.loads(json_path.read_text(encoding="utf-8"))
-    payload["policy_version"] = "us-open-confirmation-v2-safe-fallback"
+    payload["policy_version"] = "us-open-confirmation-v2-runtime-safe-fallback"
     payload["fallback"] = {
         "active": True,
         "reason": reason,
@@ -129,6 +140,23 @@ def _fallback_data_unavailable(
     }
 
 
+def _run_v2_once(
+    *,
+    v6_payload_path: str | Path,
+    output_dir: str | Path,
+    source_run_id: str | None,
+    notify: bool,
+    params: Mapping[str, float],
+) -> dict[str, Any]:
+    return run_v2(
+        v6_payload_path=v6_payload_path,
+        output_dir=output_dir,
+        notify=notify,
+        source_run_id=source_run_id,
+        **params,
+    )
+
+
 def run_safe(
     *,
     v6_payload_path: str | Path,
@@ -138,17 +166,38 @@ def run_safe(
 ) -> dict[str, Any]:
     params = _policy()
     try:
-        return run_v2(
+        return _run_v2_once(
             v6_payload_path=v6_payload_path,
             output_dir=output_dir,
             notify=notify,
             source_run_id=source_run_id,
-            **params,
+            params=params,
         )
     except RuntimeError as exc:
         text = str(exc)
         if "all live U.S. session quotes unavailable" not in text:
             raise
+
+        retry_seconds = _near_open_retry_seconds()
+        if retry_seconds > 0:
+            logger.info(
+                "opening bars are still warming up; retry live confirmation in %.1f seconds",
+                retry_seconds,
+            )
+            time_module.sleep(retry_seconds)
+            try:
+                return _run_v2_once(
+                    v6_payload_path=v6_payload_path,
+                    output_dir=output_dir,
+                    notify=notify,
+                    source_run_id=source_run_id,
+                    params=params,
+                )
+            except RuntimeError as retry_exc:
+                text = str(retry_exc)
+                if "all live U.S. session quotes unavailable" not in text:
+                    raise
+
         logger.warning("all live quotes unavailable; emit fail-safe confirmation email")
         return _fallback_data_unavailable(
             v6_payload_path=v6_payload_path,
@@ -161,7 +210,7 @@ def run_safe(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fail-safe U.S. open +15m confirmation that never silently drops on quote outage"
+        description="Fail-safe U.S. open runtime confirmation that uses the actual execution clock"
     )
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")
