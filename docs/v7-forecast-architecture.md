@@ -28,7 +28,8 @@ V7 把“预测”和“交易执行”拆成独立、可验证的层，避免�
 
 - outcome 的 `end_trade_date` 必须早于本次预测日期；
 - 原预测日期也必须早于本次预测日期；
-- 当前/未来结果绝不允许参与当前样本的概率校准。
+- 当前/未来结果绝不允许参与当前样本的概率校准；
+- effective trade date 缺失或非法时直接使用 `prior_only`，不读取任何历史 outcome，也不使用未来哨兵日期。
 
 校准统计包含：
 
@@ -40,11 +41,15 @@ V7 把“预测”和“交易执行”拆成独立、可验证的层，避免�
 
 Regime 样本足够时优先使用同 Regime 历史；否则退回 horizon 级历史。样本不足时采用 Bayesian shrinkage 向当前模型先验收缩，并标记 `prior_only` / `shrunk`，不制造虚假的高置信度。
 
+生产运行不新增独立的 V7 历史库环境变量。`V7ForecastEngine` 默认读取标准 `v6_data/v6_daily.db`，并允许调用方显式注入 history database；这样不会出现一个隐藏的 `V7_FORECAST_HISTORY_DB` 与生产 normalized forecast/outcome 数据库长期漂移。测试和研究回放可以直接注入隔离的 `ForecastHistory`。
+
 ## 4. Regime + Champion / Challenger
 
 V7 默认 Champion 是 `calibrated_ensemble`，同时记录 `momentum_challenger` 的 shadow 概率。
 
-Challenger 只有在 forward-only 样本达到最低门槛，且 Brier Score 相比 Champion 有明确改善时才允许晋级。旧 V6 历史可以用于 Champion 冷启动校准，但由于历史里没有 Challenger 概率，不能伪装成 Challenger 样本。
+Champion 与 Challenger 必须分别使用自己的历史概率序列进行分桶和 Brier/Log Loss 统计。旧 V6 历史可以用于 Champion 冷启动校准，但由于历史里没有 Challenger 概率，不能伪装成 Challenger 样本。
+
+Challenger 只有在 forward-only 样本达到最低门槛，且 Brier Score 相比 Champion 有明确改善时才允许晋级。晋级后，active probability、历史收益分布、校准样本数和 forecast confidence 都切换到 Challenger 对应校准结果，而不是只替换一个概率数字。
 
 ## 5. Decision Layer
 
@@ -83,6 +88,8 @@ Forecast Decision Policy 使用：
 ## 7. Outcome Learning Loop
 
 现有 normalized forecast/outcome 数据库继续保存 future return、MFE、MAE、benchmark return 和 excess alpha。V7 的 horizon payload 额外保存 Champion/Challenger 概率，所以后续 outcome 成熟后可以直接重新计算校准误差和模型表现，不需要 LLM 参与反馈学习。
+
+生产 outcome horizon 已扩展为 1D / 5D / 10D / 20D，使盘中择时使用的 1D 概率也可以形成真实 forward-only 校准样本，而不是长期停留在先验状态。
 
 学习闭环遵循：
 
