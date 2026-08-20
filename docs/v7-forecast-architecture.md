@@ -100,3 +100,7 @@ Forecast Decision Policy 使用：
 ## 8. 兼容性
 
 现阶段保留 `V6DailyEngine`、`v6_daily_latest.json`、`FinalDecisionPacket v1` 和既有 Artifact 名称，作为外部接口兼容层；其内部生产 Forecast Engine 已升级到 `v7.0-forecast.1`。这样 GitHub Actions、审计存储和现有报告消费者可以渐进迁移，而不是一次破坏所有下游接口。
+
+## 9. 合并门禁
+
+V7 进入 `main` 前必须以最终 PR head 通过 V6 Daily CI、V6 Architecture Backtest、美股开盘专项回测和通用 CI；早期 head 的成功结果不能替代最终代码的验证。用户可见的预测、盘中择时和邮件行为同时记录在 `docs/CHANGELOG.md` 的 `[Unreleased]` 中。
