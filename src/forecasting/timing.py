@@ -25,8 +25,18 @@ class IntradayTimingModel:
 
     def assess(self, *, base_status: str, current_price: float, entry_low: float | None, entry_high: float | None, stop_loss: float | None, session_low: float, session_high: float, session_vwap: float | None, last_5m_return_pct: float | None, intraday_volatility_pct: float | None, minutes_since_open: int, probability_up_1d: float | None, probability_up_5d: float | None) -> TimingAssessment:
         status = str(base_status or "").strip().upper()
-        if status in {"NO_BUY", "INVALIDATED", "DATA_UNAVAILABLE"}:
-            return TimingAssessment(status, 0.0, None, 0.0, 0, "hard blocker from prior plan/risk/data quality remains authoritative", True)
+        if status in {"NO_BUY", "INVALIDATED"}:
+            return TimingAssessment(status, 0.0, None, 0.0, 0, "hard blocker from prior plan/risk remains authoritative", True)
+        if status == "DATA_UNAVAILABLE":
+            return TimingAssessment(
+                "DATA_UNAVAILABLE",
+                0.0,
+                None,
+                0.0,
+                15,
+                "current quote/data quality is not sufficient for execution; keep the session open for a later fresh-data recheck",
+                False,
+            )
         price = float(current_price)
         width = max(1e-9, float(session_high) - float(session_low))
         range_position = _clamp((price - float(session_low)) / width, 0.0, 1.0)
