@@ -52,7 +52,7 @@ def build_message(
         (
             ("查找上一收盘 V6 计划失败", prior_v6_outcome),
             ("校验上一收盘结构化计划失败", plan_outcome),
-            ("运行开盘 15 分钟确认或发送邮件失败", confirmation_outcome),
+            ("运行开盘实时确认或发送邮件失败", confirmation_outcome),
         )
     )
     subject = f"⚠️ 美股开盘确认失败 - {session_date}"
@@ -67,7 +67,7 @@ def build_message(
             f"- **GitHub Actions**：{run_url}",
             "",
             "本邮件仅表示自动开盘确认链路失败，当前不要依据缺失/陈旧数据建立新仓。",
-            "watchdog 会继续按计划重试；只有正式开盘确认邮件发送成功后，才会写入当日成功标记。",
+            "后续开盘补偿候选会继续按计划尝试；只有正式开盘确认邮件发送成功后，才会写入当日成功标记。",
         ]
     )
     return subject, body
