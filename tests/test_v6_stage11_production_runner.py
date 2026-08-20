@@ -114,14 +114,18 @@ def test_stage11_native_runner_has_no_legacy_runtime_or_fact_tables(
 
 def test_stage11_entrypoint_and_runtime_do_not_import_retired_runtime_modules() -> None:
     root = Path(__file__).resolve().parents[1]
+    production_runner = root / "src/v6_daily/production_runner.py"
     paths = (
         root / "scripts/run_v6_daily_stage11.py",
-        root / "src/v6_daily/production_runner.py",
+        production_runner,
         root / "src/v6_daily/production_write_store.py",
         root / "src/v6_daily/production_read_store.py",
         root / "src/v6_daily/production_outcomes.py",
         root / "src/v6_daily/production_report.py",
         root / "src/v6_daily/production_cutover.py",
+    )
+    assert "V6DailyEngine(history_db_path=v6_db_path)" in production_runner.read_text(
+        encoding="utf-8"
     )
     banned = (
         "from scripts.run_v6_daily import",
