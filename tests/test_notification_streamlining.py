@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 
 import sitecustomize
 
@@ -60,6 +62,18 @@ def test_open_confirmation_is_email_only_and_uses_safe_runner() -> None:
     assert "NOTIFICATION_REPORT_CHANNELS: email" in text
     assert "run_us_open_confirmation_safe.py" in text
     assert "us-open-confirmation-${{ steps.gate.outputs.ny_date }}" in text
+
+
+def test_safe_runner_supports_actions_direct_script_invocation() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SAFE_RUNNER), "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Fail-safe U.S. open +15m confirmation" in result.stdout
 
 
 def test_safe_runner_has_quote_outage_fallback() -> None:
