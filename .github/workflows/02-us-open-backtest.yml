@@ -12,10 +12,14 @@ on:
       - 'scripts/probe_us_open_v2.py'
       - 'scripts/run_us_open_confirmation.py'
       - 'scripts/run_us_open_confirmation_v2.py'
+      - 'scripts/run_us_open_confirmation_safe.py'
+      - 'scripts/send_us_open_failure_alert.py'
       - 'scripts/us_open_research_ledger.py'
       - 'scripts/capture_us_open_research.py'
+      - 'tests/test_notification_streamlining.py'
       - 'tests/test_us_open_confirmation.py'
       - 'tests/test_us_open_confirmation_v2.py'
+      - 'tests/test_us_open_email_delivery_contract.py'
       - 'tests/test_us_open_research_ledger.py'
       - 'tests/test_us_open_policy_probe.py'
       - 'tests/test_us_open_research_workflow_contract.py'
@@ -43,11 +47,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas pytest
 
-      - name: Validate production-policy and research-ledger rules
+      - name: Validate production-policy and runtime workflow rules
         run: |
           python -m pytest -q --noconftest \
+            tests/test_notification_streamlining.py \
             tests/test_us_open_confirmation.py \
             tests/test_us_open_confirmation_v2.py \
+            tests/test_us_open_email_delivery_contract.py \
             tests/test_us_open_research_ledger.py \
             tests/test_us_open_policy_probe.py \
             tests/test_us_open_research_workflow_contract.py
@@ -90,9 +96,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DB="$(find prior_v6 -type f -name 'v6_daily.db' -print | head -n 1 || true)"
+          DB="$(find prior_v6 -type f -name 'v6_decision_engine.db' -print | sort | tail -n 1 || true)"
           if [ -z "$DB" ]; then
-            echo '::error::V6 artifact does not contain v6_daily.db'
+            echo '::error::V6 artifact is missing v6_decision_engine.db.'
             exit 2
           fi
           echo "path=$DB" >> "$GITHUB_OUTPUT"
@@ -119,7 +125,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: us-open-backtest-${{ github.run_id }}-${{ github.run_attempt }}
+          name: us-open-backtest-${{ github.run_id }}
           path: |
             open_confirmation_backtest.json
             open_confirmation_conservative_probe.json
