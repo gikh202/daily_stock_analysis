@@ -73,11 +73,11 @@ def test_safe_runner_supports_actions_direct_script_invocation() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "Fail-safe U.S. open +15m confirmation" in result.stdout
+    assert "actual execution clock" in result.stdout
 
 
 def test_safe_runner_has_quote_outage_fallback() -> None:
     text = SAFE_RUNNER.read_text(encoding="utf-8")
     assert "all live U.S. session quotes unavailable" in text
     assert "当前不要下单" in text
-    assert "us-open-confirmation-v2-safe-fallback" in text
+    assert "us-open-confirmation-v2-runtime-safe-fallback" in text
