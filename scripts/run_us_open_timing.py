@@ -19,7 +19,6 @@ if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
 from scripts.run_us_open_confirmation import ConfirmationDecision, LiveSnapshot, fetch_live_snapshot
 from scripts.run_us_open_confirmation_v2 import classify_confirmation_v2
 from src.forecasting import IntradayTimingModel
-from src.notification import NotificationService
 
 logger=logging.getLogger("us_open_timing"); NY=ZoneInfo("America/New_York"); POLICY_VERSION="us-open-timing-v7.0"
 ACTION_LABELS={"BUY_NOW":"现在可以买（首仓）","WAIT_BETTER_ENTRY":"等更好买点","WAIT_CONFIRMATION":"等确认再买","NO_BUY":"今天不买","INVALIDATED":"计划失效，不买","DATA_UNAVAILABLE":"行情不足，稍后再看"}
@@ -120,6 +119,7 @@ def _should_notify(previous:Mapping[str,Any]|None,*,signature:str,generated_at:d
     except ValueError:return True
 
 def _notify(report_path:Path,decisions:Sequence[OpenTimingDecision],session_date:str)->bool:
+    from src.notification import NotificationService
     service=NotificationService()
     if not service.is_available():return False
     return bool(service.send(report_path.read_text(encoding="utf-8"),email_stock_codes=[x.symbol for x in decisions if x.symbol],email_send_to_all=True,route_type="report",severity="info",dedup_key=f"us-open-timing-{session_date}"))
