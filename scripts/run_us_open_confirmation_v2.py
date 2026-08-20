@@ -196,7 +196,19 @@ def classify_confirmation_v2(
         )
 
     candidate = base
-    if base.status == "WAIT_PULLBACK":
+    if base.status == "BUY_NOW":
+        candidate = _with_status(
+            base,
+            status="BUY_NOW",
+            label=STATUS_LABELS["BUY_NOW"],
+            starter_position_pct=base.starter_position_pct,
+            reason=(
+                f"截至 {evaluated.strftime('%H:%M')} ET，现价位于昨晚计划允许范围内，"
+                "止损未失效且当前盘中价格未出现硬性走弱信号；允许执行第一笔仓位，"
+                "但不得超过昨晚计划总仓位上限。"
+            ),
+        )
+    elif base.status == "WAIT_PULLBACK":
         entry_high = _entry_high(packet)
         momentum_limit = (
             entry_high * (1.0 + max(0.0, momentum_chase_tolerance_pct) / 100.0)
