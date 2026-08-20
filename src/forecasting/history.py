@@ -5,6 +5,7 @@ import math
 import sqlite3
 import statistics
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
@@ -19,6 +20,14 @@ def _finite(value: Any) -> Optional[float]:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _valid_date(value: Any) -> Optional[str]:
+    text = str(value or "").strip()[:10]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
 
 
 def _quantile(values: Sequence[float], q: float) -> Optional[float]:
@@ -81,8 +90,9 @@ class ForecastHistory:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _rows(self, *, as_of_date: str, horizon_days: int) -> list[sqlite3.Row]:
-        if not self.available:
+    def _rows(self, *, as_of_date: str | None, horizon_days: int) -> list[sqlite3.Row]:
+        as_of = _valid_date(as_of_date)
+        if not self.available or as_of is None:
             return []
         try:
             with self._connect() as conn:
@@ -99,7 +109,7 @@ class ForecastHistory:
                       AND COALESCE(f.effective_trade_date, '') < ?
                     ORDER BY o.end_trade_date ASC, o.id ASC
                     """,
-                    (int(horizon_days), str(as_of_date), str(as_of_date)),
+                    (int(horizon_days), as_of, as_of),
                 ).fetchall())
         except sqlite3.Error:
             return []
@@ -115,9 +125,9 @@ class ForecastHistory:
         value = _finite(payload.get(key))
         if value is not None:
             return _clamp(value, 0.01, 0.99)
-        # Legacy V6 rows may bootstrap the champion from score/100, but they
-        # never contained a Challenger probability. Treat Challenger evidence
-        # as missing instead of duplicating the champion and fabricating samples.
+        # Legacy V6 rows may bootstrap only the production/Champion series from
+        # score/100. They never contained a Challenger probability, so missing
+        # Challenger evidence must stay missing instead of copying Champion data.
         if key != "probability_up":
             return None
         score = _finite(row["score"])
@@ -131,18 +141,36 @@ class ForecastHistory:
                 return low, high
         return 0.0, 1.01
 
-    def calibration(self, *, as_of_date: str, horizon_days: int, raw_probability_up: float, regime: str) -> CalibrationProfile:
+    def calibration(
+        self,
+        *,
+        as_of_date: str | None,
+        horizon_days: int,
+        raw_probability_up: float,
+        regime: str,
+        probability_key: str = "probability_up",
+    ) -> CalibrationProfile:
         raw = _clamp(float(raw_probability_up), 0.02, 0.98)
-        rows = self._rows(as_of_date=as_of_date, horizon_days=horizon_days)
+        as_of = _valid_date(as_of_date)
+        if as_of is None:
+            return CalibrationProfile(
+                "prior_only", 0, 0, raw, None, None, None, None,
+                None, None, None, None, None, None, "missing_as_of",
+            )
+        rows = self._rows(as_of_date=as_of, horizon_days=horizon_days)
         regime_key = str(regime or "unknown").strip().lower()
         regime_rows = [row for row in rows if str(row["market_regime"] or "unknown").strip().lower() == regime_key]
         use_regime = len(regime_rows) >= self.minimum_regime_samples
         selected = regime_rows if use_regime else rows
         source = "regime" if use_regime else "horizon"
         low, high = self._bucket(raw)
-        bucket = [row for row in selected if (p := self._row_probability(row)) is not None and low <= p < high]
+        bucket = [
+            row for row in selected
+            if (p := self._row_probability(row, probability_key)) is not None
+            and low <= p < high
+        ]
         if len(bucket) < max(5, self.minimum_samples // 3):
-            bucket = selected
+            bucket = [row for row in selected if self._row_probability(row, probability_key) is not None]
             source += "_all"
 
         outcomes: list[tuple[float, int, float]] = []
@@ -152,7 +180,7 @@ class ForecastHistory:
         maes: list[float] = []
         for row in bucket:
             ret = _finite(row["return_pct"])
-            p = self._row_probability(row)
+            p = self._row_probability(row, probability_key)
             if ret is None or p is None:
                 continue
             outcomes.append((p, int(ret > 0.0), ret))
@@ -164,7 +192,10 @@ class ForecastHistory:
 
         n = len(outcomes)
         if n == 0:
-            return CalibrationProfile("prior_only", 0, len(regime_rows), raw, None, None, None, None, None, None, None, None, None, None, "prior")
+            return CalibrationProfile(
+                "prior_only", 0, len(regime_rows), raw, None, None, None, None,
+                None, None, None, None, None, None, f"{source}:{probability_key}",
+            )
 
         hits = sum(y for _, y, _ in outcomes)
         posterior = (hits + self.prior_strength * raw) / (n + self.prior_strength)
@@ -173,7 +204,14 @@ class ForecastHistory:
         bins: Dict[int, list[tuple[float, int]]] = {}
         for p, y, _ in outcomes:
             bins.setdefault(min(9, int(p * 10.0)), []).append((p, y))
-        ece = sum(len(values) / n * abs(statistics.fmean(p for p, _ in values) - statistics.fmean(y for _, y in values)) for values in bins.values())
+        ece = sum(
+            len(values) / n
+            * abs(
+                statistics.fmean(p for p, _ in values)
+                - statistics.fmean(y for _, y in values)
+            )
+            for values in bins.values()
+        )
         return CalibrationProfile(
             "mature" if n >= self.minimum_samples else "shrunk", n, len(regime_rows),
             _clamp(posterior, 0.02, 0.98),
@@ -182,10 +220,19 @@ class ForecastHistory:
             statistics.fmean(mfes) if mfes else None,
             statistics.fmean(maes) if maes else None,
             _quantile(returns, 0.10), _quantile(returns, 0.50), _quantile(returns, 0.90),
-            brier, logloss, ece, source,
+            brier, logloss, ece, f"{source}:{probability_key}",
         )
 
-    def model_metrics(self, *, as_of_date: str, horizon_days: int, probability_key: str, regime: str | None = None) -> Dict[str, Any]:
+    def model_metrics(
+        self,
+        *,
+        as_of_date: str | None,
+        horizon_days: int,
+        probability_key: str,
+        regime: str | None = None,
+    ) -> Dict[str, Any]:
+        if _valid_date(as_of_date) is None:
+            return {"samples": 0, "brier_score": None, "log_loss": None}
         rows = self._rows(as_of_date=as_of_date, horizon_days=horizon_days)
         if regime:
             key = str(regime).strip().lower()
@@ -198,12 +245,40 @@ class ForecastHistory:
                 samples.append((p, int(ret > 0.0)))
         if not samples:
             return {"samples": 0, "brier_score": None, "log_loss": None}
-        return {"samples": len(samples), "brier_score": statistics.fmean((p-y)**2 for p,y in samples), "log_loss": statistics.fmean(_log_loss(p,y) for p,y in samples)}
+        return {
+            "samples": len(samples),
+            "brier_score": statistics.fmean((p-y)**2 for p,y in samples),
+            "log_loss": statistics.fmean(_log_loss(p,y) for p,y in samples),
+        }
 
-    def select_champion(self, *, as_of_date: str, horizon_days: int, regime: str, min_promotion_samples: int = 200, min_brier_improvement: float = 0.01) -> Dict[str, Any]:
-        champion = self.model_metrics(as_of_date=as_of_date, horizon_days=horizon_days, probability_key="probability_up", regime=regime)
-        challenger = self.model_metrics(as_of_date=as_of_date, horizon_days=horizon_days, probability_key="challenger_probability_up", regime=regime)
-        promote = bool(challenger["samples"] >= int(min_promotion_samples) and champion["brier_score"] is not None and challenger["brier_score"] is not None and challenger["brier_score"] <= champion["brier_score"] - float(min_brier_improvement))
+    def select_champion(
+        self,
+        *,
+        as_of_date: str | None,
+        horizon_days: int,
+        regime: str,
+        min_promotion_samples: int = 200,
+        min_brier_improvement: float = 0.01,
+    ) -> Dict[str, Any]:
+        champion = self.model_metrics(
+            as_of_date=as_of_date,
+            horizon_days=horizon_days,
+            probability_key="probability_up",
+            regime=regime,
+        )
+        challenger = self.model_metrics(
+            as_of_date=as_of_date,
+            horizon_days=horizon_days,
+            probability_key="challenger_probability_up",
+            regime=regime,
+        )
+        promote = bool(
+            challenger["samples"] >= int(min_promotion_samples)
+            and champion["brier_score"] is not None
+            and challenger["brier_score"] is not None
+            and challenger["brier_score"]
+            <= champion["brier_score"] - float(min_brier_improvement)
+        )
         return {
             "champion_model": "momentum_challenger" if promote else "calibrated_ensemble",
             "challenger_model": "calibrated_ensemble" if promote else "momentum_challenger",
