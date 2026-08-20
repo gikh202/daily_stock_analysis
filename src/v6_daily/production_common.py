@@ -10,7 +10,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 V6_PRODUCTION_SCOREBOARD_SCHEMA_VERSION = "v6.1-accuracy.1"
-DEFAULT_HORIZONS = (5, 10, 20)
+# V7 emits and learns 1D/5D/10D/20D probabilities. 1D must mature as a
+# first-class forward-only outcome instead of remaining a permanent prior.
+DEFAULT_HORIZONS = (1, 5, 10, 20)
 
 
 def utc_now() -> str:
