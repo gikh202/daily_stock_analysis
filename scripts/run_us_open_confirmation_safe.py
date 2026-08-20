@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import time as time_module
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -54,6 +55,16 @@ def _policy() -> dict[str, float]:
         "max_quote_age_minutes": _env_float("OPEN_CONFIRMATION_MAX_QUOTE_AGE_MINUTES", 8.0),
         "starter_position_pct": _env_float("OPEN_CONFIRMATION_STARTER_POSITION_PCT", 10.0),
     }
+
+
+def _near_open_retry_seconds(now: datetime | None = None) -> float:
+    current = (now or datetime.now(NY)).astimezone(NY)
+    if current.hour != 9 or current.minute >= 35:
+        return 0.0
+    if current.minute < 30:
+        return 0.0
+    target = current.replace(hour=9, minute=35, second=5, microsecond=0)
+    return max(0.0, min(300.0, (target - current).total_seconds()))
 
 
 def _fallback_data_unavailable(
@@ -129,6 +140,23 @@ def _fallback_data_unavailable(
     }
 
 
+def _run_v2_once(
+    *,
+    v6_payload_path: str | Path,
+    output_dir: str | Path,
+    source_run_id: str | None,
+    notify: bool,
+    params: Mapping[str, float],
+) -> dict[str, Any]:
+    return run_v2(
+        v6_payload_path=v6_payload_path,
+        output_dir=output_dir,
+        notify=notify,
+        source_run_id=source_run_id,
+        **params,
+    )
+
+
 def run_safe(
     *,
     v6_payload_path: str | Path,
@@ -138,17 +166,38 @@ def run_safe(
 ) -> dict[str, Any]:
     params = _policy()
     try:
-        return run_v2(
+        return _run_v2_once(
             v6_payload_path=v6_payload_path,
             output_dir=output_dir,
             notify=notify,
             source_run_id=source_run_id,
-            **params,
+            params=params,
         )
     except RuntimeError as exc:
         text = str(exc)
         if "all live U.S. session quotes unavailable" not in text:
             raise
+
+        retry_seconds = _near_open_retry_seconds()
+        if retry_seconds > 0:
+            logger.info(
+                "opening bars are still warming up; retry live confirmation in %.1f seconds",
+                retry_seconds,
+            )
+            time_module.sleep(retry_seconds)
+            try:
+                return _run_v2_once(
+                    v6_payload_path=v6_payload_path,
+                    output_dir=output_dir,
+                    notify=notify,
+                    source_run_id=source_run_id,
+                    params=params,
+                )
+            except RuntimeError as retry_exc:
+                text = str(retry_exc)
+                if "all live U.S. session quotes unavailable" not in text:
+                    raise
+
         logger.warning("all live quotes unavailable; emit fail-safe confirmation email")
         return _fallback_data_unavailable(
             v6_payload_path=v6_payload_path,
