@@ -1,0 +1,53 @@
+name: V7 changelog patch
+
+on:
+  push:
+    branches:
+      - refactor/v7-forecast-decision-architecture
+    paths:
+      - '.github/workflows/zz-v7-changelog-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v5
+        with:
+          ref: refactor/v7-forecast-decision-architecture
+          fetch-depth: 0
+
+      - name: Insert V7 Unreleased entry and remove temporary workflow
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('docs/CHANGELOG.md')
+          text = path.read_text(encoding='utf-8')
+          entry = ('- [新功能] V7 美股预测与盘中择时架构将证据覆盖与预测置信度分离，新增 1D/5D/10D/20D 校准概率、期望收益/Alpha、收益分布与 MFE/MAE、严格 no-lookahead 的 Regime/Champion-Challenger Outcome 学习，并将开盘邮件升级为可持续复查的“现在买/等更好买点/等确认/不买/失效”状态机；等待或行情不足状态会在后续盘中候选继续评估，未变化状态自动抑制重复邮件，现有止损、失效、R:R 与仓位硬约束保持优先。')
+          marker = '## [Unreleased]\n\n'
+          if entry not in text:
+              if marker not in text:
+                  raise SystemExit('Unreleased changelog marker missing')
+              text = text.replace(marker, marker + entry + '\n', 1)
+              path.write_text(text, encoding='utf-8')
+          PY
+          git rm .github/workflows/zz-v7-changelog-patch.yml
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo 'No changelog change required.'
+          else
+            git commit -m 'docs: record V7 forecast and timing architecture'
+          fi
+          git push origin HEAD:refactor/v7-forecast-decision-architecture
