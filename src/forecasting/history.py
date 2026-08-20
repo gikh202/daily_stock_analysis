@@ -115,6 +115,11 @@ class ForecastHistory:
         value = _finite(payload.get(key))
         if value is not None:
             return _clamp(value, 0.01, 0.99)
+        # Legacy V6 rows may bootstrap the champion from score/100, but they
+        # never contained a Challenger probability. Treat Challenger evidence
+        # as missing instead of duplicating the champion and fabricating samples.
+        if key != "probability_up":
+            return None
         score = _finite(row["score"])
         return None if score is None else _clamp(score / 100.0, 0.01, 0.99)
 
