@@ -21,7 +21,7 @@ def _clamp(value: float, low: float, high: float) -> float:
 class IntradayTimingModel:
     """Estimate whether waiting is likely to improve the near-term entry."""
 
-    version = "v7.1-intraday-timing.1"
+    version = "v7.1-intraday-timing.2"
     better_entry_metric = "heuristic_score_v1"
 
     def assess(self, *, base_status: str, current_price: float, entry_low: float | None, entry_high: float | None, stop_loss: float | None, session_low: float, session_high: float, session_vwap: float | None, last_5m_return_pct: float | None, intraday_volatility_pct: float | None, minutes_since_open: int, probability_up_1d: float | None, probability_up_5d: float | None) -> TimingAssessment:
@@ -65,10 +65,10 @@ class IntradayTimingModel:
         continuation_strong = bool(momentum>=0.30 and range_position>=0.65 and p1>=0.58 and vwap_premium_pct>=-0.10)
         if status == "BUY_NOW":
             if better>=0.62 and expected_improvement>=0.20 and not continuation_strong:
-                return TimingAssessment("WAIT_BETTER_ENTRY",round(better,4),round(better_price,4),round(expected_improvement,4),15 if minutes_since_open<60 else 30,f"near-term better-entry heuristic score {better:.1%} with estimated {expected_improvement:.2f}% price improvement; expected value favors waiting",False)
+                return TimingAssessment("WAIT_BETTER_ENTRY",round(better,4),round(better_price,4),round(expected_improvement,4),15 if minutes_since_open<60 else 30,f"near-term better-entry heuristic score {better:.1%} with estimated {expected_improvement:.2f}% price improvement; expected value favors waiting",False,30,"atr_pullback")
             return TimingAssessment("BUY_NOW",round(better,4),round(better_price,4),round(expected_improvement,4),0,f"waiting edge is not material (better-entry heuristic score {better:.1%}, estimated improvement {expected_improvement:.2f}%); current setup remains executable",True)
         if status == "WAIT_PULLBACK":
-            return TimingAssessment("WAIT_BETTER_ENTRY",round(max(better,0.60),4),round(better_price,4),round(expected_improvement,4),15 if minutes_since_open<60 else 30,"current price is extended above the risk-bounded entry; wait for a better price rather than chase",False)
+            return TimingAssessment("WAIT_BETTER_ENTRY",round(max(better,0.60),4),round(better_price,4),round(expected_improvement,4),15 if minutes_since_open<60 else 30,"current price is extended above the risk-bounded entry; wait for a better price rather than chase",False,30,"atr_pullback")
         if status in {"WAIT_ENTRY","WAIT_STABILIZE"}:
             return TimingAssessment("WAIT_CONFIRMATION",round(better,4),round(better_price,4),round(expected_improvement,4),15 if minutes_since_open<90 else 30,"price is already cheap/weak relative to the plan; "+("downside momentum is still elevated" if falling_hard else "stabilization is not yet confirmed"),False)
         return TimingAssessment(status or "WAIT_CONFIRMATION",round(better,4),round(better_price,4),round(expected_improvement,4),20,"state is non-terminal; re-evaluate with fresher intraday evidence",False)
