@@ -4,6 +4,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from src.forecasting.history import ForecastHistory
 
 
@@ -80,8 +82,10 @@ def test_promoted_rows_keep_stable_model_probability_identity(tmp_path: Path) ->
     history = ForecastHistory(str(path))
     row = history._rows(as_of_date="2026-03-01", horizon_days=5)[0]
 
-    assert history._row_probability(row, "probability_up") == 0.60
-    assert history._row_probability(row, "challenger_probability_up") == 0.90
+    assert history._row_probability(row, "probability_up") == pytest.approx(0.60)
+    assert history._row_probability(
+        row, "challenger_probability_up"
+    ) == pytest.approx(0.90)
 
 
 def test_paired_promotion_metrics_do_not_reverse_after_promotion(tmp_path: Path) -> None:
@@ -95,8 +99,8 @@ def test_paired_promotion_metrics_do_not_reverse_after_promotion(tmp_path: Path)
         regime="risk_on",
     )
     assert metrics["samples"] == 10
-    assert metrics["champion_brier_score"] == 0.16
-    assert metrics["challenger_brier_score"] == 0.01
+    assert metrics["champion_brier_score"] == pytest.approx(0.16)
+    assert metrics["challenger_brier_score"] == pytest.approx(0.01)
 
     selection = history.select_champion(
         as_of_date="2026-03-01",
