@@ -89,10 +89,40 @@ jobs:
           echo "path=$DB" >> "$GITHUB_OUTPUT"
 
       - name: Run causal WAIT vs immediate A/B backtest
+        shell: bash
         run: |
-          python -m scripts.backtest_wait_better_entry \
-            --v6-db '${{ steps.db.outputs.path }}' \
-            --output wait_better_entry_backtest.json
+          python - '${{ steps.db.outputs.path }}' <<'PY'
+          import json
+          import sys
+          from datetime import date, timedelta
+          from pathlib import Path
+
+          import scripts.backtest_wait_better_entry as backtest
+
+          db_path = sys.argv[1]
+          cutoff = date.today() - timedelta(days=29)
+          original_loader = backtest.load_candidates
+
+          def recent_candidates(path):
+              return [
+                  item
+                  for item in original_loader(path)
+                  if date.fromisoformat(item.effective_trade_date) >= cutoff
+              ]
+
+          backtest.load_candidates = recent_candidates
+          payload = backtest.run_backtest(db_path)
+          payload['candidate_cutoff'] = cutoff.isoformat()
+          payload['provider_scope'] = (
+              'Yahoo/yfinance 1m research window is intentionally bounded to the most recent '
+              '29 calendar days; Research Ledger is the authoritative long-run accumulator.'
+          )
+          Path('wait_better_entry_backtest.json').write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+              encoding='utf-8',
+          )
+          print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+          PY
 
       - name: Validate backtest artifact
         shell: bash
@@ -107,14 +137,15 @@ jobs:
           required = {
               'wait_sample_count', 'better_entry_hit_rate', 'avg_best_price_improvement_pct',
               'avg_minutes_to_entry', 'immediate', 'wait_policy', 'entry_timing_alpha',
-              'actual_session_start', 'actual_session_end', 'promotion_check'
+              'actual_session_start', 'actual_session_end', 'promotion_check', 'candidate_cutoff'
           }
           missing = sorted(required - set(data))
           if missing:
               raise SystemExit(f'WAIT backtest output missing fields: {missing}')
           print(json.dumps({k: data.get(k) for k in (
               'wait_sample_count','better_entry_hit_rate','avg_best_price_improvement_pct',
-              'avg_minutes_to_entry','missed_continuation_rate','actual_session_start','actual_session_end'
+              'avg_minutes_to_entry','missed_continuation_rate','actual_session_start','actual_session_end',
+              'candidate_cutoff'
           )}, indent=2))
           print('immediate=', data.get('immediate'))
           print('wait_policy=', data.get('wait_policy'))
