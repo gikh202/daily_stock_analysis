@@ -26,7 +26,7 @@ For older decisions that do not contain `expected_wait_minutes`, settlement fall
 - immediate entry at the signal price, and
 - WAIT entry at `expected_better_price` if touched within the promised window; otherwise the WAIT policy remains in cash for that session.
 
-The output reports WAIT sample count, target hit rate, price improvement, time to target, missed continuation rate, immediate and WAIT returns, MFE/MAE, diagnostic drawdown, and entry-timing alpha (`WAIT session return - immediate-entry session return`). These are research diagnostics and do not automatically change production thresholds.
+The output reports WAIT sample count, target hit rate, two distinct price-improvement measures, time to target, missed continuation rate, immediate and WAIT returns, MFE/MAE, diagnostic drawdown, and entry-timing alpha (`WAIT session return - immediate-entry session return`). `avg_best_price_improvement_pct` is the best observable low inside the promised wait window and is diagnostic only. `avg_realized_entry_improvement_pct` uses `(signal_price - expected_better_price) / signal_price` only for WAIT signals whose expected price was actually touched, so it is the promotion-relevant entry improvement. These are research diagnostics and do not automatically change production thresholds.
 
 ## Intraday history coverage
 
@@ -34,4 +34,11 @@ The workflow requests the available historical 1-minute data associated with the
 
 ## Promotion rule
 
-The backtest exposes a research-only promotion check. V7.1 remains unchanged unless there is sufficient sample size and the WAIT policy demonstrates both a better-entry hit rate above 50% and positive entry-timing alpha versus immediate entry. Any future V7.2 confidence enhancement requires a separate reviewed production change; WAIT is not promoted into a new hard buy filter by this research workflow.
+The backtest exposes a research-only promotion check. V7.1 remains unchanged unless all of the following are true:
+
+- at least 20 comparable WAIT samples are available;
+- the expected-better-price hit rate is above 50%;
+- average realized entry-price improvement exceeds the fixed 0.10% research transaction-cost/slippage hurdle; and
+- average entry-timing alpha versus immediate entry is positive.
+
+The 0.10% hurdle is an explicit research assumption, not a broker-specific fee quote. Any future V7.2 confidence enhancement requires a separate reviewed production change; WAIT is not promoted into a new hard buy filter by this research workflow.
