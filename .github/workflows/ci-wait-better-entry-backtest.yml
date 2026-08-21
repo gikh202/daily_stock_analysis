@@ -1,0 +1,172 @@
+name: WAIT Better Entry Backtest
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ci-wait-better-entry-backtest.yml'
+      - 'src/forecasting/**'
+      - 'scripts/run_us_open_timing.py'
+      - 'scripts/us_open_research_ledger.py'
+      - 'scripts/backtest_wait_better_entry.py'
+      - 'scripts/evaluate_wait_backtest.py'
+      - 'tests/test_v7_intraday_timing.py'
+      - 'tests/test_us_open_research_ledger.py'
+      - 'tests/test_wait_better_entry_contract.py'
+      - 'tests/test_wait_backtest_evaluation.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  wait-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install focused dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas pytest python-dotenv
+
+      - name: Run WAIT contract and settlement tests
+        run: |
+          python -m pytest -q --noconftest \
+            tests/test_v7_intraday_timing.py \
+            tests/test_us_open_research_ledger.py \
+            tests/test_wait_better_entry_contract.py \
+            tests/test_wait_backtest_evaluation.py
+
+      - name: Find latest successful V6/V7 artifact
+        id: prior-v6
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const response = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '03-v6-daily.yml',
+              branch: 'main',
+              status: 'completed',
+              per_page: 50,
+            });
+            const run = (response.data.workflow_runs || [])
+              .filter((item) => item.conclusion === 'success')
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+            if (!run) {
+              core.setFailed('No successful close forecast run found on main.');
+              return;
+            }
+            core.info(`Using close forecast run ${run.id} created_at=${run.created_at}`);
+            core.setOutput('run_id', String(run.id));
+
+      - name: Download V6/V7 history artifact
+        uses: actions/download-artifact@v5
+        with:
+          pattern: v6-daily-*
+          path: prior_v6
+          merge-multiple: true
+          run-id: ${{ steps.prior-v6.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Locate forecast database
+        id: db
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB="$(find prior_v6 -type f -name 'v6_daily.db' -print | head -n 1 || true)"
+          if [ -z "$DB" ]; then
+            echo '::error::Forecast artifact does not contain v6_daily.db'
+            exit 2
+          fi
+          echo "path=$DB" >> "$GITHUB_OUTPUT"
+
+      - name: Run causal WAIT vs immediate A/B backtest
+        shell: bash
+        run: |
+          python - '${{ steps.db.outputs.path }}' <<'PY'
+          import json
+          import sys
+          from datetime import date, timedelta
+          from pathlib import Path
+
+          import scripts.backtest_wait_better_entry as backtest
+          from scripts.evaluate_wait_backtest import enrich_wait_backtest
+
+          db_path = sys.argv[1]
+          cutoff = date.today() - timedelta(days=14)
+          original_loader = backtest.load_candidates
+
+          def recent_candidates(path):
+              return [
+                  item
+                  for item in original_loader(path)
+                  if date.fromisoformat(item.effective_trade_date) >= cutoff
+              ]
+
+          backtest.load_candidates = recent_candidates
+          payload = backtest.run_backtest(db_path)
+          payload = enrich_wait_backtest(payload, transaction_cost_hurdle_pct=0.10)
+          payload['candidate_cutoff'] = cutoff.isoformat()
+          payload['provider_scope'] = (
+              'Yahoo/yfinance 1m research candidates are intentionally bounded to the most recent '
+              '14 calendar days. A prior successful production backtest in this repository exposed '
+              'nine actual sessions from 2026-08-10 through 2026-08-20; actual_session_start/end in '
+              'this artifact remain authoritative. Research Ledger is the long-run accumulator.'
+          )
+          Path('wait_better_entry_backtest.json').write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+              encoding='utf-8',
+          )
+          print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+          PY
+
+      - name: Validate backtest artifact
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('wait_better_entry_backtest.json')
+          if not p.is_file():
+              raise SystemExit('WAIT backtest output missing')
+          data = json.loads(p.read_text(encoding='utf-8'))
+          required = {
+              'wait_sample_count', 'better_entry_hit_rate', 'avg_best_price_improvement_pct',
+              'avg_realized_entry_improvement_pct', 'research_transaction_cost_hurdle_pct',
+              'avg_minutes_to_entry', 'immediate', 'wait_policy', 'entry_timing_alpha',
+              'actual_session_start', 'actual_session_end', 'promotion_check', 'candidate_cutoff'
+          }
+          missing = sorted(required - set(data))
+          if missing:
+              raise SystemExit(f'WAIT backtest output missing fields: {missing}')
+          print(json.dumps({k: data.get(k) for k in (
+              'wait_sample_count','better_entry_hit_rate','avg_best_price_improvement_pct',
+              'avg_realized_entry_improvement_pct','research_transaction_cost_hurdle_pct',
+              'avg_minutes_to_entry','missed_continuation_rate','actual_session_start','actual_session_end',
+              'candidate_cutoff'
+          )}, indent=2))
+          print('immediate=', data.get('immediate'))
+          print('wait_policy=', data.get('wait_policy'))
+          print('entry_timing_alpha=', data.get('entry_timing_alpha'))
+          print('promotion_check=', data.get('promotion_check'))
+          PY
+
+      - name: Upload WAIT backtest evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: wait-better-entry-backtest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: wait_better_entry_backtest.json
+          if-no-files-found: error
+          retention-days: 30

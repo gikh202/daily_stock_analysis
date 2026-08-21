@@ -234,9 +234,6 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
     close_return = (close_price / signal_price - 1.0) * 100.0
     mfe = (future_high / signal_price - 1.0) * 100.0
     mae = (future_low / signal_price - 1.0) * 100.0
-    best_future_improvement = max(
-        0.0, (signal_price - future_low) / signal_price * 100.0
-    )
 
     cutoff = signal_time + timedelta(minutes=60)
     first_hour = future[future.index <= cutoff]
@@ -256,10 +253,22 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
         decision = {}
     stop, target1 = _execution_levels(packet)
     reference_better_price = _finite(decision.get("expected_better_price"))
+    wait_minutes_raw = _finite(decision.get("expected_wait_minutes"))
+    if wait_minutes_raw is None:
+        wait_minutes_raw = _finite(decision.get("recheck_minutes"))
+    wait_minutes = int(max(1.0, min(120.0, wait_minutes_raw or 30.0)))
+    wait_cutoff = signal_time + timedelta(minutes=wait_minutes)
+    wait_future = future[future.index <= wait_cutoff]
+    wait_low = float(wait_future["Low"].min()) if not wait_future.empty else None
+    best_future_improvement = (
+        None
+        if wait_low is None
+        else max(0.0, (signal_price - wait_low) / signal_price * 100.0)
+    )
     better_entry_hit = None
     minutes_to_reference = None
     if reference_better_price is not None and 0 < reference_better_price < signal_price:
-        matching = future[future["Low"] <= reference_better_price]
+        matching = wait_future[wait_future["Low"] <= reference_better_price]
         better_entry_hit = not matching.empty
         if better_entry_hit:
             first_time = matching.index[0]
@@ -309,6 +318,8 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
         "better_entry_hit": better_entry_hit,
         "best_future_improvement_pct": best_future_improvement,
         "minutes_to_reference_better_price": minutes_to_reference,
+        "expected_wait_minutes": wait_minutes,
+        "wait_window_end": wait_cutoff.isoformat(),
     }
 
 def settle_pending(

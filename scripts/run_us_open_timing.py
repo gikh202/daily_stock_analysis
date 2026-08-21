@@ -57,8 +57,8 @@ def _extended_intraday(symbol: str, now: datetime, base: LiveSnapshot) -> dict[s
         if frame is None or frame.empty: raise RuntimeError("empty timing frame")
         if getattr(frame.index,"tz",None) is None: frame.index=frame.index.tz_localize("UTC").tz_convert(NY)
         else: frame.index=frame.index.tz_convert(NY)
-        session=frame[frame.index.date==now.date()]
-        if session.empty: raise RuntimeError("empty regular session")
+        session=frame[(frame.index.date==now.date()) & (frame.index<=now)]
+        if session.empty: raise RuntimeError("empty regular session through evaluation time")
         volumes=session["Volume"].fillna(0); typical=(session["High"]+session["Low"]+session["Close"])/3.0; total=float(volumes.sum()); vwap=float((typical*volumes).sum()/total) if total>0 else None
         closes=[float(v) for v in session["Close"].dropna().tolist()]; last5=(closes[-1]/closes[-6]-1.0)*100.0 if len(closes)>=6 and closes[-6]>0 else None
         minute_returns=[(closes[i]/closes[i-1]-1.0)*100.0 for i in range(1,len(closes)) if closes[i-1]>0]
@@ -99,6 +99,12 @@ def render_markdown(decisions:Sequence[OpenTimingDecision],*,generated_at:dateti
         if x.targets: lines.append("- **目标位**："+" / ".join(f"${v:.2f}" for v in x.targets))
     lines += ["","## 决策纪律","","- 收盘预测决定“这个标的是否值得承担风险”，盘中择时决定“现在是否是较好的执行点”。","- `等更好买点` 不是看空，而是当前价格的等待期望值高于立即追入。","- `等待确认` 表示价格可能更便宜，但下跌/弱势尚未证明结束。","- 止损、计划失效和收盘风险否决是硬边界，盘中模型不能绕过。","- 收盘层上涨概率和期望收益来自历史校准，不是收益保证。","- `更好买点评分` 当前是盘中启发式 score，不是校准概率；Research Ledger 会按多时点 outcome 验证，样本不足前不得表述为胜率。",""]
     return "\n".join(lines)
+
+def _decision_payload(decision:OpenTimingDecision)->dict[str,Any]:
+    payload=asdict(decision)
+    payload["expected_wait_minutes"]=decision.recheck_minutes if decision.action=="WAIT_BETTER_ENTRY" else 0
+    payload["better_entry_reason"]="intraday_volatility_pullback" if decision.action=="WAIT_BETTER_ENTRY" else None
+    return payload
 
 def _semantic_price_state(current_price:float|None,entry_low:float|None,entry_high:float|None,stop_loss:float|None)->str:
     price=_finite(current_price); low=_finite(entry_low); high=_finite(entry_high); stop=_finite(stop_loss)
@@ -151,7 +157,7 @@ def run(*,v6_payload_path:str|Path,output_dir:str|Path,notify:bool=False,source_
     follow=any(not x.terminal for x in decisions); signature=_signature(decisions); previous=_read_previous(previous_state_path); send_now=notify and _should_notify(previous,signature=signature,generated_at=generated_at,force=force_notify)
     output=Path(output_dir); output.mkdir(parents=True,exist_ok=True); report_path=output/"us_open_confirmation_latest.md"; json_path=output/"us_open_confirmation_latest.json"; report_path.write_text(render_markdown(decisions,generated_at=generated_at,source_run_id=source_run_id),encoding="utf-8")
     summary={"symbols":len(decisions),"buy_now":sum(x.action=="BUY_NOW" for x in decisions),"wait_better_entry":sum(x.action=="WAIT_BETTER_ENTRY" for x in decisions),"wait_confirmation":sum(x.action=="WAIT_CONFIRMATION" for x in decisions),"no_buy":sum(x.action in {"NO_BUY","INVALIDATED"} for x in decisions),"data_unavailable":sum(x.action=="DATA_UNAVAILABLE" for x in decisions)}
-    payload={"version":"us-open-timing-v7.1","policy_version":POLICY_VERSION,"better_entry_metric":{"field":"better_entry_score","legacy_alias":"better_entry_probability","semantics":"heuristic_score","calibrated":False},"generated_at":generated_at.isoformat(),"source_run_id":source_run_id,"state_signature":signature,"follow_up_needed":follow,"summary":summary,"decisions":[asdict(x) for x in decisions],"notification":{"requested":bool(notify),"suppressed_unchanged":bool(notify and not send_now)}}; json_path.write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True),encoding="utf-8")
+    payload={"version":"us-open-timing-v7.1","policy_version":POLICY_VERSION,"better_entry_metric":{"field":"better_entry_score","legacy_alias":"better_entry_probability","semantics":"heuristic_score","calibrated":False},"generated_at":generated_at.isoformat(),"source_run_id":source_run_id,"state_signature":signature,"follow_up_needed":follow,"summary":summary,"decisions":[_decision_payload(x) for x in decisions],"notification":{"requested":bool(notify),"suppressed_unchanged":bool(notify and not send_now)}}; json_path.write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True),encoding="utf-8")
     sent=_notify(report_path,decisions,generated_at.strftime("%Y-%m-%d")) if send_now else False
     if send_now and not sent:raise RuntimeError("open timing notification failed")
     return {"policy_version":POLICY_VERSION,"report":str(report_path),"json":str(json_path),"symbols":len(decisions),"live_success":live_success,"buy_now":summary["buy_now"],"wait_better_entry":summary["wait_better_entry"],"wait_confirmation":summary["wait_confirmation"],"no_buy":summary["no_buy"],"data_unavailable":summary["data_unavailable"],"follow_up_needed":follow,"state_signature":signature,"notified":sent,"notification_suppressed":bool(notify and not send_now)}
