@@ -34,16 +34,13 @@ jobs:
             tests/test_us_open_research_ledger.py \
             tests/test_us_open_research_workflow_contract.py \
             tests/test_notification_streamlining.py
-      - name: Commit audited fixes and remove temporary tooling
+      - name: Commit non-workflow V7 fixes
         shell: bash
         run: |
-          rm -f \
-            .github/workflows/zz-v7-post-merge-hotfix.yml \
-            .github/workflows/zz-v7-hotfix-pr-trigger.yml \
-            .github/scripts/apply_v7_post_merge_hotfix.py
+          git checkout HEAD -- .github/workflows/02b-us-open-research-ledger.yml
           git config user.name 'gikh202'
           git config user.email 'gikh202@gmail.com'
-          git add -A -- \
+          git add -- \
             src/forecasting/history.py \
             src/forecasting/engine.py \
             src/forecasting/decision.py \
@@ -51,17 +48,13 @@ jobs:
             src/v6_daily/engine.py \
             scripts/run_us_open_timing.py \
             scripts/us_open_research_ledger.py \
-            .github/workflows/02b-us-open-research-ledger.yml \
             tests/test_v7_forecast_calibration.py \
             tests/test_us_open_research_ledger.py \
             tests/test_us_open_research_workflow_contract.py \
             tests/test_notification_streamlining.py \
             docs/v7-forecast-architecture.md \
             docs/us-open-runtime-confirmation.md \
-            docs/CHANGELOG.md \
-            .github/workflows/zz-v7-post-merge-hotfix.yml \
-            .github/workflows/zz-v7-hotfix-pr-trigger.yml \
-            .github/scripts/apply_v7_post_merge_hotfix.py
+            docs/CHANGELOG.md
           git diff --cached --check
           git commit -m 'fix: harden V7 forecast and intraday learning'
           git push origin HEAD:fix/v7-post-merge-audit
