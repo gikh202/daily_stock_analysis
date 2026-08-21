@@ -10,6 +10,7 @@ on:
       - 'src/forecasting/**'
       - 'src/v6_daily/engine.py'
       - 'scripts/backtest_us_open_confirmation.py'
+      - 'scripts/backtest_wait_better_entry.py'
       - 'scripts/probe_us_open_conservative.py'
       - 'scripts/probe_us_open_v2.py'
       - 'scripts/run_us_open_confirmation.py'
@@ -25,6 +26,7 @@ on:
       - 'tests/test_us_open_email_delivery_contract.py'
       - 'tests/test_v7_forecast_calibration.py'
       - 'tests/test_v7_intraday_timing.py'
+      - 'tests/test_v7_wait_better_entry_settlement.py'
       - 'tests/test_us_open_research_ledger.py'
       - 'tests/test_us_open_policy_probe.py'
       - 'tests/test_us_open_research_workflow_contract.py'
@@ -36,7 +38,7 @@ permissions:
 jobs:
   backtest-us-open:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -61,6 +63,7 @@ jobs:
             tests/test_us_open_email_delivery_contract.py \
             tests/test_v7_forecast_calibration.py \
             tests/test_v7_intraday_timing.py \
+            tests/test_v7_wait_better_entry_settlement.py \
             tests/test_us_open_research_ledger.py \
             tests/test_us_open_policy_probe.py \
             tests/test_us_open_research_workflow_contract.py
@@ -128,6 +131,14 @@ jobs:
             --v6-db '${{ steps.db.outputs.path }}' \
             --output open_confirmation_v2_probe.json
 
+      - name: Benchmark WAIT_BETTER_ENTRY versus immediate buy
+        run: |
+          python scripts/backtest_wait_better_entry.py \
+            --v6-db '${{ steps.db.outputs.path }}' \
+            --years 3 \
+            --transaction-cost-bps 10 \
+            --output wait_better_entry_backtest.json
+
       - name: Upload backtest evidence
         if: always()
         uses: actions/upload-artifact@v6
@@ -137,5 +148,6 @@ jobs:
             open_confirmation_backtest.json
             open_confirmation_conservative_probe.json
             open_confirmation_v2_probe.json
+            wait_better_entry_backtest.json
           if-no-files-found: warn
           retention-days: 30
