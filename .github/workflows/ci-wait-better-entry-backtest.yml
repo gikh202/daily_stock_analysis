@@ -8,9 +8,11 @@ on:
       - 'scripts/run_us_open_timing.py'
       - 'scripts/us_open_research_ledger.py'
       - 'scripts/backtest_wait_better_entry.py'
+      - 'scripts/evaluate_wait_backtest.py'
       - 'tests/test_v7_intraday_timing.py'
       - 'tests/test_us_open_research_ledger.py'
       - 'tests/test_wait_better_entry_contract.py'
+      - 'tests/test_wait_backtest_evaluation.py'
   workflow_dispatch:
 
 permissions:
@@ -41,7 +43,8 @@ jobs:
           python -m pytest -q --noconftest \
             tests/test_v7_intraday_timing.py \
             tests/test_us_open_research_ledger.py \
-            tests/test_wait_better_entry_contract.py
+            tests/test_wait_better_entry_contract.py \
+            tests/test_wait_backtest_evaluation.py
 
       - name: Find latest successful V6/V7 artifact
         id: prior-v6
@@ -98,6 +101,7 @@ jobs:
           from pathlib import Path
 
           import scripts.backtest_wait_better_entry as backtest
+          from scripts.evaluate_wait_backtest import enrich_wait_backtest
 
           db_path = sys.argv[1]
           cutoff = date.today() - timedelta(days=14)
@@ -112,6 +116,7 @@ jobs:
 
           backtest.load_candidates = recent_candidates
           payload = backtest.run_backtest(db_path)
+          payload = enrich_wait_backtest(payload, transaction_cost_hurdle_pct=0.10)
           payload['candidate_cutoff'] = cutoff.isoformat()
           payload['provider_scope'] = (
               'Yahoo/yfinance 1m research candidates are intentionally bounded to the most recent '
@@ -138,6 +143,7 @@ jobs:
           data = json.loads(p.read_text(encoding='utf-8'))
           required = {
               'wait_sample_count', 'better_entry_hit_rate', 'avg_best_price_improvement_pct',
+              'avg_realized_entry_improvement_pct', 'research_transaction_cost_hurdle_pct',
               'avg_minutes_to_entry', 'immediate', 'wait_policy', 'entry_timing_alpha',
               'actual_session_start', 'actual_session_end', 'promotion_check', 'candidate_cutoff'
           }
@@ -146,6 +152,7 @@ jobs:
               raise SystemExit(f'WAIT backtest output missing fields: {missing}')
           print(json.dumps({k: data.get(k) for k in (
               'wait_sample_count','better_entry_hit_rate','avg_best_price_improvement_pct',
+              'avg_realized_entry_improvement_pct','research_transaction_cost_hurdle_pct',
               'avg_minutes_to_entry','missed_continuation_rate','actual_session_start','actual_session_end',
               'candidate_cutoff'
           )}, indent=2))
