@@ -91,6 +91,8 @@ class TimingAssessment:
     recheck_minutes: int
     rationale: str
     terminal: bool
+    expected_wait_minutes: int = 0
+    better_entry_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
