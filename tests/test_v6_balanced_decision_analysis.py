@@ -152,18 +152,21 @@ def test_balanced_analysis_keeps_both_sides_and_original_opinion() -> None:
     assert "最大仓位上限" in email
 
 
-def test_wait_keeps_bull_case_but_says_not_to_buy_yet() -> None:
+def test_wait_keeps_bull_case_as_conditional_but_not_executable_yet() -> None:
     report = render_integrated_chinese_report(
         _payload(decision="WAIT", direction="neutral", active_plan=False),
         v4_records=[_v4_record(operation="观望")],
         report_date="2026-08-11",
     )
 
-    assert "**是否值得买**：**暂不买，等待确认**" in report
+    # This raw fusion renderer owns verdict/evidence prose only. Final execution
+    # authorization and executable-position lines are injected and validated by
+    # final_decision_renderer.apply_final_decision_contract().
+    assert "**是否值得买**：**条件式可买**" in report
     assert "多头排列且相对强弱领先" in report
     assert "RSI超买且上涨缩量" in report
-    assert "看多逻辑仍保留" in report
-    assert "方向尚未形成完全共振" in report
+    assert "**关键分界**" in report
+    assert "回踩MA5后能否获得支撑" in report
 
 
 def test_avoid_does_not_erase_existing_bullish_evidence() -> None:

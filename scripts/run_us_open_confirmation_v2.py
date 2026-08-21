@@ -25,10 +25,119 @@ from scripts.run_us_open_confirmation import classify_confirmation as classify_v
 logger = logging.getLogger("us_open_confirmation_v2")
 NY = ZoneInfo("America/New_York")
 POLICY_VERSION = "us-open-confirmation-v2-runtime"
+_EXECUTION_STATUSES = {"FULL_APPROVED", "CONDITIONAL_APPROVED", "REJECTED"}
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _finite(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _execution_contract(packet: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve the V7.2 execution contract while preserving V7 compatibility.
+
+    New producers may place the contract in assessment, execution, or the
+    metadata.execution namespace. Older packets are mapped from the legacy
+    worth_buying/execution_authorized fields so the runtime remains backward
+    compatible during the rollout.
+    """
+    assessment = _mapping(packet.get("assessment"))
+    execution = _mapping(packet.get("execution"))
+    metadata_execution = _mapping(_mapping(packet.get("metadata")).get("execution"))
+
+    raw_status = (
+        assessment.get("execution_status")
+        or execution.get("execution_status")
+        or metadata_execution.get("status")
+    )
+    status = str(raw_status or "").strip().upper()
+    explicit = status in _EXECUTION_STATUSES
+
+    if not explicit:
+        worth_buying = assessment.get("worth_buying")
+        authorized = bool(assessment.get("execution_authorized"))
+        if worth_buying is False:
+            status = "REJECTED"
+        elif worth_buying is True and authorized:
+            status = "FULL_APPROVED"
+        elif worth_buying is True:
+            status = "CONDITIONAL_APPROVED"
+        else:
+            status = "REJECTED"
+
+    conditional_price = _finite(
+        assessment.get("conditional_entry_price")
+        or execution.get("conditional_entry_price")
+        or metadata_execution.get("conditional_entry_price")
+        or metadata_execution.get("entry_price")
+    )
+    conditional_reason = str(
+        assessment.get("conditional_entry_reason")
+        or execution.get("conditional_entry_reason")
+        or metadata_execution.get("conditional_entry_reason")
+        or metadata_execution.get("reason")
+        or ""
+    ).strip() or None
+
+    return {
+        "status": status,
+        "explicit": explicit,
+        "conditional_entry_price": conditional_price,
+        "conditional_entry_reason": conditional_reason,
+    }
+
+
+def _adapt_packet_for_execution_status(
+    packet: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Translate the V7.2 contract into the legacy fields consumed by V1.
+
+    This is deliberately one-way compatibility glue. It does not invent an
+    entry zone, stop, target, or position size. A conditional/full approval
+    without a complete legacy execution plan therefore remains non-actionable.
+    """
+    adapted = dict(packet)
+    assessment = dict(_mapping(packet.get("assessment")))
+    status = str(contract.get("status") or "REJECTED")
+
+    if status == "REJECTED":
+        assessment["worth_buying"] = False
+        assessment["execution_authorized"] = False
+        assessment["verdict"] = "avoid"
+    elif status == "CONDITIONAL_APPROVED":
+        assessment["worth_buying"] = True
+        assessment["execution_authorized"] = False
+        if str(assessment.get("verdict") or "").strip().lower() not in {
+            "buy_by_plan",
+            "conditional_buy",
+            "watch",
+        }:
+            assessment["verdict"] = "conditional_buy"
+    else:  # FULL_APPROVED
+        assessment["worth_buying"] = True
+        assessment["execution_authorized"] = True
+        if str(assessment.get("verdict") or "").strip().lower() not in {
+            "buy_by_plan",
+            "conditional_buy",
+            "watch",
+        }:
+            assessment["verdict"] = "buy_by_plan"
+
+    assessment["execution_status"] = status
+    if contract.get("conditional_entry_price") is not None:
+        assessment["conditional_entry_price"] = contract["conditional_entry_price"]
+    if contract.get("conditional_entry_reason"):
+        assessment["conditional_entry_reason"] = contract["conditional_entry_reason"]
+    adapted["assessment"] = assessment
+    return adapted
 
 
 def _parse_bar_time(value: str | None) -> datetime | None:
@@ -114,14 +223,17 @@ def classify_confirmation_v2(
     """V2 intraday policy evaluated at the workflow's actual runtime.
 
     The prior close packet remains the authority for whether a symbol is buyable
-    and for its entry/stop/targets. V2 only decides whether the latest verified
-    tape at the actual execution time confirms action now; it never invents a new
-    trade plan and it no longer assumes a fixed 09:45/10:15 confirmation clock.
+    and for its entry/stop/targets. V7.2 adds a three-state execution contract:
+    full approvals may execute, conditional approvals may become executable only
+    after their declared condition is satisfied, and rejected plans remain hard
+    blockers. The intraday layer still never invents a new trade plan.
     """
     evaluated = evaluated_at.astimezone(NY)
     runtime_snapshot = _runtime_snapshot(snapshot) if snapshot is not None else None
+    contract = _execution_contract(packet)
+    adapted_packet = _adapt_packet_for_execution_status(packet, contract)
     base = classify_v1(
-        packet,
+        adapted_packet,
         runtime_snapshot,
         chase_tolerance_pct=normal_chase_tolerance_pct,
         weak_open_pct=weak_open_pct,
@@ -178,8 +290,34 @@ def classify_confirmation_v2(
                 ),
             )
 
-    # Final-fusion WAIT/AVOID/data-incomplete and incomplete-plan states from V1
-    # remain hard blockers. Only executable tape states continue below.
+    if contract["status"] == "REJECTED":
+        return _with_status(
+            base,
+            status="NO_BUY",
+            label=STATUS_LABELS["NO_BUY"],
+            reason="上一收盘执行状态为 REJECTED；风险层明确禁止建立新仓，盘中不能绕过。",
+        )
+
+    conditional_price = contract.get("conditional_entry_price")
+    if (
+        contract["status"] == "CONDITIONAL_APPROVED"
+        and conditional_price is not None
+        and runtime_snapshot.current_price > conditional_price
+    ):
+        reason = contract.get("conditional_entry_reason") or "等待收盘层设定的条件入场价格"
+        return _with_status(
+            base,
+            status="WAIT_PULLBACK",
+            label=STATUS_LABELS["WAIT_PULLBACK"],
+            reason=(
+                f"上一收盘为条件批准：{reason}。当前 ${runtime_snapshot.current_price:.2f} "
+                f"仍高于条件价 ${conditional_price:.2f}，继续等待，不视为风险否决。"
+            ),
+        )
+
+    # Incomplete plans remain hard blockers. Conditional approval only changes
+    # the meaning of the close-layer gate; it does not authorize inventing stops,
+    # targets, or position sizing intraday.
     if base.status not in {"BUY_NOW", "WAIT_PULLBACK"}:
         return base
 
@@ -197,19 +335,21 @@ def classify_confirmation_v2(
 
     candidate = base
     if base.status == "BUY_NOW":
+        prefix = "上一收盘条件已满足；" if contract["status"] == "CONDITIONAL_APPROVED" else ""
         candidate = _with_status(
             base,
             status="BUY_NOW",
             label=STATUS_LABELS["BUY_NOW"],
             starter_position_pct=base.starter_position_pct,
             reason=(
-                f"截至 {evaluated.strftime('%H:%M')} ET，现价位于昨晚计划允许范围内，"
+                prefix
+                + f"截至 {evaluated.strftime('%H:%M')} ET，现价位于昨晚计划允许范围内，"
                 "止损未失效且当前盘中价格未出现硬性走弱信号；允许执行第一笔仓位，"
                 "但不得超过昨晚计划总仓位上限。"
             ),
         )
     elif base.status == "WAIT_PULLBACK":
-        entry_high = _entry_high(packet)
+        entry_high = _entry_high(adapted_packet)
         momentum_limit = (
             entry_high * (1.0 + max(0.0, momentum_chase_tolerance_pct) / 100.0)
             if entry_high is not None
@@ -330,6 +470,7 @@ def run(
         "max_quote_age_minutes": max_quote_age_minutes,
         "evaluation_clock": "actual_runtime_et",
         "early_partial_volume_ratio": "disabled_until_15_regular_session_bars",
+        "execution_contract": "v7.2_three_state_compatible",
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
