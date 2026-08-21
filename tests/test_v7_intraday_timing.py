@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import sys
+from datetime import datetime
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 
+from scripts import run_us_open_timing as timing_module
 from scripts.capture_us_open_research import reconstruct_snapshot_from_frame
+from scripts.run_us_open_confirmation import LiveSnapshot
 from scripts.run_us_open_confirmation_safe import _apply_wait_better_entry_contract
 from src.forecasting.timing import IntradayTimingModel
+
+NY=ZoneInfo("America/New_York")
 
 
 def test_timing_waits_when_pullback_probability_has_material_value() -> None:
@@ -80,3 +89,35 @@ def test_expected_better_price_is_invariant_to_post_signal_future_bars() -> None
     right=assess(expensive_future)
     assert left.action=="WAIT_BETTER_ENTRY"
     assert left.expected_better_price==right.expected_better_price
+
+
+def test_extended_intraday_explicitly_ignores_bars_after_signal_time(monkeypatch) -> None:
+    snapshot=LiveSnapshot(
+        symbol="TEST",
+        current_price=100.1,
+        session_open=100.0,
+        session_high=100.3,
+        session_low=99.8,
+        opening_15m_high=100.3,
+        opening_15m_low=99.8,
+        return_from_open_pct=0.1,
+        opening_15m_volume=15000,
+        recent_opening_volume_median=14000,
+        volume_ratio=1.07,
+        bar_count=15,
+        last_bar_time="2026-08-14T09:44:00-04:00",
+    )
+    evaluated_at=datetime(2026,8,14,9,45,tzinfo=NY)
+
+    class FakeTicker:
+        def __init__(self, frame): self.frame=frame
+        def history(self, **kwargs): return self.frame.copy()
+
+    def features(frame):
+        monkeypatch.setitem(sys.modules,"yfinance",SimpleNamespace(Ticker=lambda symbol:FakeTicker(frame)))
+        return timing_module._extended_intraday("TEST",evaluated_at,snapshot)
+
+    cheap=features(_frame(70.0))
+    expensive=features(_frame(105.0))
+    assert cheap==expensive
+    assert cheap["minutes_since_open"]==14
