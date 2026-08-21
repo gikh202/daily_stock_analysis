@@ -1,0 +1,102 @@
+name: V7 Multi-horizon Research Backtest
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/backtest_v7_multihorizon_filter.py'
+      - '.github/workflows/ci-v7-multihorizon-backtest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v7-multihorizon-backtest-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  multihorizon-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout research head
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            constraints-production.txt
+
+      - name: Install dependencies (locked)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints-production.txt -r requirements.txt
+
+      - name: Restore latest production source database
+        uses: actions/cache/restore@v5
+        with:
+          path: data/
+          key: v7-multihorizon-backtest-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-analysis-data-${{ runner.os }}-
+
+      - name: Validate source database
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+
+          path = 'data/stock_analysis.db'
+          if not os.path.isfile(path):
+              raise SystemExit('stock_analysis.db missing; cannot perform multihorizon research backtest')
+          conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+              bars = int(conn.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]) if 'stock_daily' in tables else 0
+          finally:
+              conn.close()
+          if quick != 'ok' or bars <= 0:
+              raise SystemExit(f'invalid production source database: quick={quick!r} stock_daily={bars}')
+          print(f'Historical source: PASS stock_daily={bars}')
+          PY
+
+      - name: Build isolated 3-year research database
+        shell: bash
+        run: |
+          python scripts/backfill_v6_accuracy_history.py \
+            --source-db data/stock_analysis.db \
+            --research-db v7_research/stock_analysis_research.db \
+            --codes 'MSFT,GOOGL,QQQM,VOO' \
+            --history-years 3 \
+            --minimum-bars 81 \
+            --summary backtest_artifacts/history_backfill.json
+
+      - name: Run 5D / 10D / 20D confirmation research
+        shell: bash
+        run: |
+          python scripts/backtest_v7_multihorizon_filter.py \
+            --stock-db v7_research/stock_analysis_research.db \
+            --codes 'MSFT,GOOGL,QQQM,VOO' \
+            --output backtest_artifacts/v7_multihorizon_filter.json
+
+      - name: Print research summary
+        shell: bash
+        run: cat backtest_artifacts/v7_multihorizon_filter.json
+
+      - name: Upload research artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: v7-multihorizon-backtest-${{ github.run_id }}
+          path: backtest_artifacts/
+          if-no-files-found: error
+          retention-days: 14
