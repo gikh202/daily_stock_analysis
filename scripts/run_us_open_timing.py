@@ -20,12 +20,12 @@ from scripts.run_us_open_confirmation import ConfirmationDecision, LiveSnapshot,
 from scripts.run_us_open_confirmation_v2 import classify_confirmation_v2
 from src.forecasting import IntradayTimingModel
 
-logger=logging.getLogger("us_open_timing"); NY=ZoneInfo("America/New_York"); POLICY_VERSION="us-open-timing-v7.0"
+logger=logging.getLogger("us_open_timing"); NY=ZoneInfo("America/New_York"); POLICY_VERSION="us-open-timing-v7.1"
 ACTION_LABELS={"BUY_NOW":"现在可以买（首仓）","WAIT_BETTER_ENTRY":"等更好买点","WAIT_CONFIRMATION":"等确认再买","NO_BUY":"今天不买","INVALIDATED":"计划失效，不买","DATA_UNAVAILABLE":"行情不足，稍后再看"}
 
 @dataclass(frozen=True)
 class OpenTimingDecision:
-    symbol:str; action:str; label:str; reason:str; current_price:float|None; entry_low:float|None; entry_high:float|None; stop_loss:float|None; targets:tuple[float,...]; starter_position_pct:float; max_position_pct:float; return_from_open_pct:float|None; volume_ratio:float|None; probability_up_1d:float|None; probability_up_5d:float|None; probability_up_20d:float|None; expected_return_5d_pct:float|None; expected_alpha_5d_pct:float|None; forecast_confidence:float|None; better_entry_probability:float; expected_better_price:float|None; expected_improvement_pct:float; recheck_minutes:int; terminal:bool; source_trade_date:str|None; source_last_bar_time:str|None
+    symbol:str; action:str; label:str; reason:str; current_price:float|None; entry_low:float|None; entry_high:float|None; stop_loss:float|None; targets:tuple[float,...]; starter_position_pct:float; max_position_pct:float; return_from_open_pct:float|None; volume_ratio:float|None; probability_up_1d:float|None; probability_up_5d:float|None; probability_up_20d:float|None; expected_return_5d_pct:float|None; expected_alpha_5d_pct:float|None; forecast_confidence:float|None; better_entry_score:float; better_entry_probability:float; expected_better_price:float|None; expected_improvement_pct:float; recheck_minutes:int; terminal:bool; source_trade_date:str|None; source_last_bar_time:str|None
 
 def _finite(value: Any) -> float|None:
     try: number=float(value)
@@ -73,10 +73,10 @@ def _to_open_decision(packet: Mapping[str,Any], base: ConfirmationDecision, snap
     forecast=_extract_forecast(packet)
     common=dict(symbol=base.symbol,current_price=base.current_price,entry_low=base.entry_low,entry_high=base.entry_high,stop_loss=base.stop_loss,targets=base.targets,max_position_pct=base.max_position_pct,return_from_open_pct=base.return_from_open_pct,volume_ratio=base.volume_ratio,probability_up_1d=forecast["p1"],probability_up_5d=forecast["p5"],probability_up_20d=forecast["p20"],expected_return_5d_pct=forecast["return5"],expected_alpha_5d_pct=forecast["alpha5"],forecast_confidence=forecast["confidence"],source_trade_date=base.source_trade_date,source_last_bar_time=base.source_last_bar_time)
     if snapshot is None:
-        return OpenTimingDecision(action="DATA_UNAVAILABLE",label=ACTION_LABELS["DATA_UNAVAILABLE"],reason=base.reason,starter_position_pct=0.0,better_entry_probability=0.0,expected_better_price=None,expected_improvement_pct=0.0,recheck_minutes=15,terminal=False,**common)
+        return OpenTimingDecision(action="DATA_UNAVAILABLE",label=ACTION_LABELS["DATA_UNAVAILABLE"],reason=base.reason,starter_position_pct=0.0,better_entry_score=0.0,better_entry_probability=0.0,expected_better_price=None,expected_improvement_pct=0.0,recheck_minutes=15,terminal=False,**common)
     ext=_extended_intraday(base.symbol,evaluated_at,snapshot); timing=IntradayTimingModel().assess(base_status=base.status,current_price=snapshot.current_price,entry_low=base.entry_low,entry_high=base.entry_high,stop_loss=base.stop_loss,session_low=snapshot.session_low,session_high=snapshot.session_high,session_vwap=_finite(ext["session_vwap"]),last_5m_return_pct=_finite(ext["last_5m_return_pct"]),intraday_volatility_pct=_finite(ext["intraday_volatility_pct"]),minutes_since_open=int(ext["minutes_since_open"] or 0),probability_up_1d=forecast["p1"],probability_up_5d=forecast["p5"])
     reason=base.reason if timing.action in {"NO_BUY","INVALIDATED","DATA_UNAVAILABLE"} else f"{base.reason}；择时判断：{timing.rationale}"
-    return OpenTimingDecision(action=timing.action,label=ACTION_LABELS.get(timing.action,timing.action),reason=reason,starter_position_pct=base.starter_position_pct if timing.action=="BUY_NOW" else 0.0,better_entry_probability=timing.better_entry_probability,expected_better_price=timing.expected_better_price,expected_improvement_pct=timing.expected_improvement_pct,recheck_minutes=timing.recheck_minutes,terminal=timing.terminal,**common)
+    return OpenTimingDecision(action=timing.action,label=ACTION_LABELS.get(timing.action,timing.action),reason=reason,starter_position_pct=base.starter_position_pct if timing.action=="BUY_NOW" else 0.0,better_entry_score=timing.better_entry_probability,better_entry_probability=timing.better_entry_probability,expected_better_price=timing.expected_better_price,expected_improvement_pct=timing.expected_improvement_pct,recheck_minutes=timing.recheck_minutes,terminal=timing.terminal,**common)
 
 def _money(value:float|None)->str: return "N/A" if value is None else f"${value:.2f}"
 def _pct(value:float|None,*,probability:bool=False)->str:
@@ -87,21 +87,36 @@ def render_markdown(decisions:Sequence[OpenTimingDecision],*,generated_at:dateti
     now=generated_at.astimezone(NY); buy=sum(x.action=="BUY_NOW" for x in decisions); better=sum(x.action=="WAIT_BETTER_ENTRY" for x in decisions); confirm=sum(x.action=="WAIT_CONFIRMATION" for x in decisions); blocked=sum(x.action in {"NO_BUY","INVALIDATED"} for x in decisions); unavailable=sum(x.action=="DATA_UNAVAILABLE" for x in decisions)
     lines=[f"# 美股盘中择时决策 · {now.strftime('%Y-%m-%d %H:%M ET')}","","> 这封邮件不只回答“现在能不能买”。它同时结合上一收盘的中短期预测、当前 1 分钟行情和盘中路径，估计未来一段时间是否更可能出现更好的买点。","","## 一眼结论","",f"- **现在可以买**：{buy} 只",f"- **更适合等更好买点**：{better} 只",f"- **等待价格确认**：{confirm} 只",f"- **今天不买/计划失效**：{blocked} 只",f"- **行情不足**：{unavailable} 只"]
     if source_run_id: lines.append(f"- **上一收盘决策来源**：run `{source_run_id}`")
-    lines += ["","| 标的 | 当前动作 | 当前价 | 1D上涨概率 | 5D上涨概率 | 更好买点概率 | 预计更优价 |","|---|---|---:|---:|---:|---:|---:|"]
-    for x in decisions: lines.append(f"| {x.symbol} | **{x.label}** | {_money(x.current_price)} | {_pct(x.probability_up_1d,probability=True)} | {_pct(x.probability_up_5d,probability=True)} | {_pct(x.better_entry_probability,probability=True)} | {_money(x.expected_better_price)} |")
+    lines += ["","| 标的 | 当前动作 | 当前价 | 1D上涨概率 | 5D上涨概率 | 更好买点评分* | 预计更优价 |","|---|---|---:|---:|---:|---:|---:|"]
+    for x in decisions: lines.append(f"| {x.symbol} | **{x.label}** | {_money(x.current_price)} | {_pct(x.probability_up_1d,probability=True)} | {_pct(x.probability_up_5d,probability=True)} | {_pct(x.better_entry_score,probability=True)} | {_money(x.expected_better_price)} |")
     for i,x in enumerate(decisions,1):
-        lines += ["",f"## {i}. {x.symbol} · {x.label}","",f"- **当前判断**：{x.reason}",f"- **当前价**：{_money(x.current_price)}；较开盘 {_pct(x.return_from_open_pct)}",f"- **预测**：1D {_pct(x.probability_up_1d,probability=True)} / 5D {_pct(x.probability_up_5d,probability=True)} / 20D {_pct(x.probability_up_20d,probability=True)}；5D 期望收益 {_pct(x.expected_return_5d_pct)}；5D 相对 SPY Alpha {_pct(x.expected_alpha_5d_pct)}",f"- **择时**：未来近端出现更好买点概率 {_pct(x.better_entry_probability,probability=True)}；预计可改善 {x.expected_improvement_pct:.2f}%；参考更优价 {_money(x.expected_better_price)}"]
+        lines += ["",f"## {i}. {x.symbol} · {x.label}","",f"- **当前判断**：{x.reason}",f"- **当前价**：{_money(x.current_price)}；较开盘 {_pct(x.return_from_open_pct)}",f"- **预测**：1D {_pct(x.probability_up_1d,probability=True)} / 5D {_pct(x.probability_up_5d,probability=True)} / 20D {_pct(x.probability_up_20d,probability=True)}；5D 期望收益 {_pct(x.expected_return_5d_pct)}；5D 相对 SPY Alpha {_pct(x.expected_alpha_5d_pct)}",f"- **择时**：更好买点启发式评分（未校准） {_pct(x.better_entry_score,probability=True)}；预计可改善 {x.expected_improvement_pct:.2f}%；参考更优价 {_money(x.expected_better_price)}"]
         if x.forecast_confidence is not None: lines.append(f"- **预测可信度**：{x.forecast_confidence:.0%}（与证据覆盖率分开；低样本会自动收缩）")
         if x.entry_low is not None and x.entry_high is not None: lines.append(f"- **风控入场区间**：${x.entry_low:.2f}–${x.entry_high:.2f}")
         if x.action=="BUY_NOW": lines.append(f"- **现在执行**：首仓不超过 {x.starter_position_pct:.1f}%；计划总仓位上限 {x.max_position_pct:.1f}%")
         elif not x.terminal: lines.append(f"- **下一次评估**：约 {x.recheck_minutes} 分钟后或价格/状态明显变化时。")
         if x.stop_loss is not None: lines.append(f"- **止损/失效线**：${x.stop_loss:.2f}")
         if x.targets: lines.append("- **目标位**："+" / ".join(f"${v:.2f}" for v in x.targets))
-    lines += ["","## 决策纪律","","- 收盘预测决定“这个标的是否值得承担风险”，盘中择时决定“现在是否是较好的执行点”。","- `等更好买点` 不是看空，而是当前价格的等待期望值高于立即追入。","- `等待确认` 表示价格可能更便宜，但下跌/弱势尚未证明结束。","- 止损、计划失效和收盘风险否决是硬边界，盘中模型不能绕过。","- 概率和期望收益是基于历史校准的估计，不是收益保证。",""]
+    lines += ["","## 决策纪律","","- 收盘预测决定“这个标的是否值得承担风险”，盘中择时决定“现在是否是较好的执行点”。","- `等更好买点` 不是看空，而是当前价格的等待期望值高于立即追入。","- `等待确认` 表示价格可能更便宜，但下跌/弱势尚未证明结束。","- 止损、计划失效和收盘风险否决是硬边界，盘中模型不能绕过。","- 收盘层上涨概率和期望收益来自历史校准，不是收益保证。","- `更好买点评分` 当前是盘中启发式 score，不是校准概率；Research Ledger 会按多时点 outcome 验证，样本不足前不得表述为胜率。",""]
     return "\n".join(lines)
 
+def _semantic_price_state(current_price:float|None,entry_low:float|None,entry_high:float|None,stop_loss:float|None)->str:
+    price=_finite(current_price); low=_finite(entry_low); high=_finite(entry_high); stop=_finite(stop_loss)
+    if price is None:return "unknown"
+    if stop is not None and price<=stop:return "at_or_below_stop"
+    if low is not None and high is not None:
+        if price<low:return "below_entry"
+        if price<=high:return "inside_entry"
+        premium=(price/high-1.0)*100.0 if high>0 else 0.0
+        if premium<0.5:return "above_entry_lt_0_5pct"
+        if premium<1.0:return "above_entry_0_5_1pct"
+        if premium<2.0:return "above_entry_1_2pct"
+        return "above_entry_ge_2pct"
+    return "priced"
+
+
 def _signature(decisions:Sequence[OpenTimingDecision])->str:
-    compact=[{"symbol":x.symbol,"action":x.action,"better_bucket":round(x.better_entry_probability/.10),"price_bucket":None if x.current_price is None else round(x.current_price,1)} for x in decisions]
+    compact=[{"symbol":x.symbol,"action":x.action,"better_bucket":min(9,max(0,int(x.better_entry_score*10.0))),"price_state":_semantic_price_state(x.current_price,x.entry_low,x.entry_high,x.stop_loss)} for x in decisions]
     return hashlib.sha256(json.dumps(compact,sort_keys=True,ensure_ascii=False).encode()).hexdigest()[:16]
 
 def _read_previous(path:str|Path|None)->dict[str,Any]|None:
@@ -111,12 +126,9 @@ def _read_previous(path:str|Path|None)->dict[str,Any]|None:
     return value if isinstance(value,dict) else None
 
 def _should_notify(previous:Mapping[str,Any]|None,*,signature:str,generated_at:datetime,force:bool)->bool:
+    del generated_at
     if force or not previous:return True
-    if str(previous.get("state_signature") or "")!=signature:return True
-    try:
-        parsed=datetime.fromisoformat(str(previous.get("generated_at") or "").replace("Z","+00:00")); parsed=parsed.replace(tzinfo=NY) if parsed.tzinfo is None else parsed.astimezone(NY)
-        return (generated_at-parsed).total_seconds()/60.0>=60.0
-    except ValueError:return True
+    return str(previous.get("state_signature") or "")!=signature
 
 def _notify(report_path:Path,decisions:Sequence[OpenTimingDecision],session_date:str)->bool:
     from src.notification import NotificationService
@@ -139,7 +151,7 @@ def run(*,v6_payload_path:str|Path,output_dir:str|Path,notify:bool=False,source_
     follow=any(not x.terminal for x in decisions); signature=_signature(decisions); previous=_read_previous(previous_state_path); send_now=notify and _should_notify(previous,signature=signature,generated_at=generated_at,force=force_notify)
     output=Path(output_dir); output.mkdir(parents=True,exist_ok=True); report_path=output/"us_open_confirmation_latest.md"; json_path=output/"us_open_confirmation_latest.json"; report_path.write_text(render_markdown(decisions,generated_at=generated_at,source_run_id=source_run_id),encoding="utf-8")
     summary={"symbols":len(decisions),"buy_now":sum(x.action=="BUY_NOW" for x in decisions),"wait_better_entry":sum(x.action=="WAIT_BETTER_ENTRY" for x in decisions),"wait_confirmation":sum(x.action=="WAIT_CONFIRMATION" for x in decisions),"no_buy":sum(x.action in {"NO_BUY","INVALIDATED"} for x in decisions),"data_unavailable":sum(x.action=="DATA_UNAVAILABLE" for x in decisions)}
-    payload={"version":"us-open-timing-v7","policy_version":POLICY_VERSION,"generated_at":generated_at.isoformat(),"source_run_id":source_run_id,"state_signature":signature,"follow_up_needed":follow,"summary":summary,"decisions":[asdict(x) for x in decisions],"notification":{"requested":bool(notify),"suppressed_unchanged":bool(notify and not send_now)}}; json_path.write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True),encoding="utf-8")
+    payload={"version":"us-open-timing-v7.1","policy_version":POLICY_VERSION,"better_entry_metric":{"field":"better_entry_score","legacy_alias":"better_entry_probability","semantics":"heuristic_score","calibrated":False},"generated_at":generated_at.isoformat(),"source_run_id":source_run_id,"state_signature":signature,"follow_up_needed":follow,"summary":summary,"decisions":[asdict(x) for x in decisions],"notification":{"requested":bool(notify),"suppressed_unchanged":bool(notify and not send_now)}}; json_path.write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True),encoding="utf-8")
     sent=_notify(report_path,decisions,generated_at.strftime("%Y-%m-%d")) if send_now else False
     if send_now and not sent:raise RuntimeError("open timing notification failed")
     return {"policy_version":POLICY_VERSION,"report":str(report_path),"json":str(json_path),"symbols":len(decisions),"live_success":live_success,"buy_now":summary["buy_now"],"wait_better_entry":summary["wait_better_entry"],"wait_confirmation":summary["wait_confirmation"],"no_buy":summary["no_buy"],"data_unavailable":summary["data_unavailable"],"follow_up_needed":follow,"state_signature":signature,"notified":sent,"notification_suppressed":bool(notify and not send_now)}

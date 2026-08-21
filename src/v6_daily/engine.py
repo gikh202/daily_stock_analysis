@@ -12,7 +12,7 @@ from .accuracy import classify_instrument, enrich_features
 from .models import V6Signal
 
 
-V6_ENGINE_VERSION = "v7.0-forecast.1"
+V6_ENGINE_VERSION = "v7.1-forecast.1"
 
 
 def _finite(value: Any) -> Optional[float]:

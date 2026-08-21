@@ -9,7 +9,7 @@ from .history import ForecastHistory
 from .models import ForecastBundle, ForecastHorizon
 
 
-V7_FORECAST_VERSION = "v7.0-forecast.1"
+V7_FORECAST_VERSION = "v7.1-forecast.1"
 FORECAST_HORIZONS = (1, 5, 10, 20)
 
 
@@ -251,17 +251,18 @@ class V7ForecastEngine:
             else (atr_pct if atr_pct is not None and atr_pct > 0 else 1.5)
         )
 
-        selection = self.history.select_champion(
-            as_of_date=as_of,
-            horizon_days=5,
-            regime=regime,
-        )
-        selected_champion = str(selection["champion_model"])
-        selected_challenger = str(selection["challenger_model"])
-        challenger_active = selected_champion == "momentum_challenger"
-
+        selections: Dict[int, Dict[str, Any]] = {}
         horizons: Dict[str, ForecastHorizon] = {}
         for horizon in FORECAST_HORIZONS:
+            selection = self.history.select_champion(
+                as_of_date=as_of,
+                horizon_days=horizon,
+                regime=regime,
+            )
+            selections[horizon] = selection
+            selected_champion = str(selection["champion_model"])
+            selected_challenger = str(selection["challenger_model"])
+            challenger_active = selected_champion == "momentum_challenger"
             feature_p, feature_coverage = _feature_probability(
                 features,
                 horizon,
@@ -415,6 +416,7 @@ class V7ForecastEngine:
             )
 
         coverage = sum(item.evidence_coverage for item in horizons.values()) / len(horizons)
+        primary_selection = selections[5]
         return ForecastBundle(
             str(symbol or "").strip().upper(),
             str(instrument_type or "STOCK").strip().upper(),
@@ -423,15 +425,18 @@ class V7ForecastEngine:
             self.version,
             horizons,
             "5d",
-            selected_champion,
-            selected_challenger,
-            str(selection["status"]),
+            str(primary_selection["champion_model"]),
+            str(primary_selection["challenger_model"]),
+            str(primary_selection["status"]),
             round(coverage, 4),
             {
                 "history_available": self.history.available,
                 "realized_vol_20d_pct": realized_vol,
                 "daily_volatility_pct": round(daily_vol, 4),
-                "champion_selection": selection,
+                "champion_selection_by_horizon": {
+                    f"{horizon}d": selections[horizon]
+                    for horizon in FORECAST_HORIZONS
+                },
                 "numeric_llm_influence": "none",
                 "as_of_policy": (
                     "outcome_end_trade_date_strictly_before_effective_trade_date; "

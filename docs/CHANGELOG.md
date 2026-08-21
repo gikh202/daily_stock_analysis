@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] V7.1 修复 post-merge 审计发现的预测与盘中学习漏洞：strict no-lookahead 排除无效历史日期，Champion/Challenger 改为各 horizon 独立且仅用 paired forward-only 样本晋级，所有执行 gate 真正 fail-closed；恢复 `us-open-timing-*` Research Ledger 链路并按分钟多时点记录/结算等待是否获得更优价，将盘中“更好买点概率”降级为明确未校准的启发式评分，并以语义价格区间抑制无实质变化的重复邮件。
 - [新功能] V7 美股预测与盘中择时架构将证据覆盖与预测置信度分离，新增 1D/5D/10D/20D 校准概率、期望收益/Alpha、收益分布与 MFE/MAE、严格 no-lookahead 的 Regime/Champion-Challenger Outcome 学习，并将开盘邮件升级为可持续复查的“现在买/等更好买点/等确认/不买/失效”状态机；等待或行情不足状态会在后续盘中候选继续评估，未变化状态自动抑制重复邮件，现有止损、失效、R:R 与仓位硬约束保持优先。
 - [修复] V6 最终统一日报过滤 `MARKET` 大盘复盘伪标的和“暂无已验证的近期证据”中性占位，稳定邮件 HTML 表格的独立表头/列布局；只调整融合输入与展示，不改变 `FinalDecisionPacket` 决策口径、机会/风险评分或执行授权。
 - [改进] 结构化 LiteLLM 恢复仅对原始响应已包含闭合 JSON 根对象的语法漂移执行本地 `json_repair`，并继续要求原 validator 通过；缺括号、未闭合字符串等疑似截断输出禁止本地自动补全，改走一次 evidence-aware 模型修复，避免不完整分析被误判成功。

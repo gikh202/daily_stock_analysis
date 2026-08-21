@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import sitecustomize
 from scripts.run_us_open_confirmation_safe import _near_open_retry_seconds
+from scripts.run_us_open_timing import _semantic_price_state, _should_notify
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,3 +104,34 @@ def test_safe_runner_has_quote_outage_fallback_and_nonterminal_state() -> None:
     assert 'action="DATA_UNAVAILABLE"' in timing
     assert "terminal=False" in timing
     assert "follow_up_needed" in timing
+
+
+def test_unchanged_timing_state_is_not_resent_just_because_an_hour_passed() -> None:
+    previous = {
+        "state_signature": "same",
+        "generated_at": "2026-08-20T09:35:00-04:00",
+    }
+    assert _should_notify(
+        previous,
+        signature="same",
+        generated_at=datetime(2026, 8, 20, 12, 0, tzinfo=NY),
+        force=False,
+    ) is False
+    assert _should_notify(
+        previous,
+        signature="changed",
+        generated_at=datetime(2026, 8, 20, 9, 45, tzinfo=NY),
+        force=False,
+    ) is True
+
+
+def test_semantic_price_state_ignores_ten_cent_noise_inside_entry_zone() -> None:
+    assert _semantic_price_state(100.00, 99.0, 101.0, 95.0) == "inside_entry"
+    assert _semantic_price_state(100.10, 99.0, 101.0, 95.0) == "inside_entry"
+    assert _semantic_price_state(101.70, 99.0, 101.0, 95.0) == "above_entry_0_5_1pct"
+
+
+def test_open_timing_report_labels_better_entry_metric_as_uncalibrated_score() -> None:
+    text = TIMING_RUNNER.read_text(encoding="utf-8")
+    assert "更好买点启发式评分（未校准）" in text
+    assert '"semantics":"heuristic_score"' in text

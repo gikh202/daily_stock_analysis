@@ -49,7 +49,7 @@ V7 默认 Champion 是 `calibrated_ensemble`，同时记录 `momentum_challenger
 
 Champion 与 Challenger 必须分别使用自己的历史概率序列进行分桶和 Brier/Log Loss 统计。旧 V6 历史可以用于 Champion 冷启动校准，但由于历史里没有 Challenger 概率，不能伪装成 Challenger 样本。
 
-Challenger 只有在 forward-only 样本达到最低门槛，且 Brier Score 相比 Champion 有明确改善时才允许晋级。晋级后，active probability、历史收益分布、校准样本数和 forecast confidence 都切换到 Challenger 对应校准结果，而不是只替换一个概率数字。
+Challenger 只有在 **Champion 与 Challenger 同时存在原生预测的 paired forward-only 样本**达到最低门槛，且 Brier Score 相比 Champion 有明确改善时才允许晋级；旧 V6 Champion-only 样本不得进入 Promotion 比赛。每个 1D / 5D / 10D / 20D horizon 独立选择 Champion，5D 晋级不能自动接管其他周期。晋级后，active probability、历史收益分布、校准样本数和 forecast confidence 都切换到对应 horizon 的 Challenger 校准结果，而不是只替换一个概率数字。
 
 ## 5. Decision Layer
 
@@ -62,7 +62,7 @@ Forecast Decision Policy 使用：
 - deterministic risk score；
 - forecast confidence。
 
-风险硬门仍优先于方向预测。Decision Layer 只产生 BUY_SETUP / WATCH / WAIT / AVOID 和最大风险仓位；Trade Plan 再根据 support / resistance / ATR 构造确定性入场区间、止损和目标位，并继续执行最低 R:R 约束。
+风险硬门仍优先于方向预测。`prior_only`、预测可信度不足、非正 Alpha 或分布 R:R 不足都属于真正的执行门：存在这些 gate 时只能 WAIT/零新仓，不能仅把 gate 写进诊断后继续生成 BUY_SETUP/WATCH 仓位。Decision Layer 只产生 BUY_SETUP / WATCH / WAIT / AVOID 和最大风险仓位；Trade Plan 再根据 support / resistance / ATR 构造确定性入场区间、止损和目标位，并继续执行最低 R:R 约束。
 
 ## 6. Intraday Timing Layer
 
@@ -75,7 +75,7 @@ Forecast Decision Policy 使用：
 - 1D / 5D 上涨概率；
 - 当前价格相对风险入场区间的位置；
 
-估计 `better_entry_probability`、预计改善幅度和参考更优价。
+当前盘中公式输出 `better_entry_score`（兼容保留旧字段 `better_entry_probability`），它是 **未校准的启发式评分**，同时给出预计改善幅度和参考更优价；在 Research Ledger 积累并验证足够多时点 outcome 之前，不得把该 score 表述为历史胜率或校准概率。
 
 最终状态：
 
@@ -89,7 +89,7 @@ Forecast Decision Policy 使用：
 
 现有 normalized forecast/outcome 数据库继续保存 future return、MFE、MAE、benchmark return 和 excess alpha。V7 的 horizon payload 额外保存 Champion/Challenger 概率，所以后续 outcome 成熟后可以直接重新计算校准误差和模型表现，不需要 LLM 参与反馈学习。
 
-生产 outcome horizon 已扩展为 1D / 5D / 10D / 20D，使盘中择时使用的 1D 概率也可以形成真实 forward-only 校准样本，而不是长期停留在先验状态。
+生产 outcome horizon 已扩展为 1D / 5D / 10D / 20D，使盘中择时使用的 1D 概率也可以形成真实 forward-only 校准样本，而不是长期停留在先验状态。盘中 Research Ledger v2 以 `session_date + symbol + policy + source_run + signal_bar_time` 记录同一标的一天内的多次新鲜评估，并在次日结算 `WAIT_BETTER_ENTRY` 的参考更优价是否真正触达、最大可改善幅度和触达时间；这条 outcome 链路只用于验证/未来校准，不把启发式 score 预先包装成概率。
 
 学习闭环遵循：
 
@@ -99,7 +99,7 @@ Forecast Decision Policy 使用：
 
 ## 8. 兼容性
 
-现阶段保留 `V6DailyEngine`、`v6_daily_latest.json`、`FinalDecisionPacket v1` 和既有 Artifact 名称，作为外部接口兼容层；其内部生产 Forecast Engine 已升级到 `v7.0-forecast.1`。这样 GitHub Actions、审计存储和现有报告消费者可以渐进迁移，而不是一次破坏所有下游接口。
+现阶段保留 `V6DailyEngine`、`v6_daily_latest.json`、`FinalDecisionPacket v1` 和既有 Artifact 名称，作为外部接口兼容层；其内部生产 Forecast Engine 已升级到 `v7.1-forecast.1`。这样 GitHub Actions、审计存储和现有报告消费者可以渐进迁移，而不是一次破坏所有下游接口。
 
 ## 9. 合并门禁
 
