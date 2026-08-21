@@ -100,7 +100,7 @@ jobs:
           import scripts.backtest_wait_better_entry as backtest
 
           db_path = sys.argv[1]
-          cutoff = date.today() - timedelta(days=29)
+          cutoff = date.today() - timedelta(days=14)
           original_loader = backtest.load_candidates
 
           def recent_candidates(path):
@@ -114,8 +114,10 @@ jobs:
           payload = backtest.run_backtest(db_path)
           payload['candidate_cutoff'] = cutoff.isoformat()
           payload['provider_scope'] = (
-              'Yahoo/yfinance 1m research window is intentionally bounded to the most recent '
-              '29 calendar days; Research Ledger is the authoritative long-run accumulator.'
+              'Yahoo/yfinance 1m research candidates are intentionally bounded to the most recent '
+              '14 calendar days. A prior successful production backtest in this repository exposed '
+              'nine actual sessions from 2026-08-10 through 2026-08-20; actual_session_start/end in '
+              'this artifact remain authoritative. Research Ledger is the long-run accumulator.'
           )
           Path('wait_better_entry_backtest.json').write_text(
               json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
