@@ -1,0 +1,851 @@
+name: Apply V7 post-merge audit fixes
+
+on:
+  push:
+    branches: [fix/v7-post-merge-audit]
+    paths: ['.github/workflows/zz-v7-post-merge-hotfix.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/v7-post-merge-audit
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Apply audited fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def load(path):
+              return Path(path).read_text(encoding='utf-8')
+
+          def save(path, text):
+              Path(path).write_text(text, encoding='utf-8')
+
+          def replace(path, old, new, count=1):
+              text = load(path)
+              actual = text.count(old)
+              if actual < count:
+                  raise SystemExit(f'{path}: expected at least {count} occurrence(s), found {actual}: {old[:100]!r}')
+              save(path, text.replace(old, new, count))
+
+          def regex_replace(path, pattern, new):
+              text = load(path)
+              text2, count = re.subn(pattern, new, text, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f'{path}: regex replacement count={count}: {pattern[:100]!r}')
+              save(path, text2)
+
+          # 1) Strict no-lookahead: invalid/missing source dates are never eligible.
+          replace(
+              'src/forecasting/history.py',
+              """                    WHERE o.horizon_days=? AND o.end_trade_date < ?
+                      AND COALESCE(f.effective_trade_date, '') < ?
+""",
+              """                    WHERE o.horizon_days=?
+                      AND date(o.end_trade_date) IS NOT NULL
+                      AND date(o.end_trade_date) < date(?)
+                      AND date(f.effective_trade_date) IS NOT NULL
+                      AND date(f.effective_trade_date) < date(?)
+""",
+          )
+
+          paired_selection = r'''    def paired_model_metrics(
+        self,
+        *,
+        as_of_date: str | None,
+        horizon_days: int,
+        regime: str | None = None,
+    ) -> Dict[str, Any]:
+        """Compare Champion/Challenger only on rows where both predictions exist."""
+        if _valid_date(as_of_date) is None:
+            return {
+                "samples": 0,
+                "champion_brier_score": None,
+                "challenger_brier_score": None,
+                "champion_log_loss": None,
+                "challenger_log_loss": None,
+            }
+        rows = self._rows(as_of_date=as_of_date, horizon_days=horizon_days)
+        if regime:
+            key = str(regime).strip().lower()
+            rows = [
+                row for row in rows
+                if str(row["market_regime"] or "unknown").strip().lower() == key
+            ]
+        paired: list[tuple[float, float, int]] = []
+        for row in rows:
+            champion_p = self._row_probability(row, "probability_up")
+            challenger_p = self._row_probability(row, "challenger_probability_up")
+            ret = _finite(row["return_pct"])
+            if champion_p is None or challenger_p is None or ret is None:
+                continue
+            paired.append((champion_p, challenger_p, int(ret > 0.0)))
+        if not paired:
+            return {
+                "samples": 0,
+                "champion_brier_score": None,
+                "challenger_brier_score": None,
+                "champion_log_loss": None,
+                "challenger_log_loss": None,
+            }
+        return {
+            "samples": len(paired),
+            "champion_brier_score": statistics.fmean((p-y)**2 for p, _, y in paired),
+            "challenger_brier_score": statistics.fmean((p-y)**2 for _, p, y in paired),
+            "champion_log_loss": statistics.fmean(_log_loss(p, y) for p, _, y in paired),
+            "challenger_log_loss": statistics.fmean(_log_loss(p, y) for _, p, y in paired),
+        }
+
+    def select_champion(
+        self,
+        *,
+        as_of_date: str | None,
+        horizon_days: int,
+        regime: str,
+        min_promotion_samples: int = 200,
+        min_brier_improvement: float = 0.01,
+    ) -> Dict[str, Any]:
+        paired = self.paired_model_metrics(
+            as_of_date=as_of_date,
+            horizon_days=horizon_days,
+            regime=regime,
+        )
+        champion = {
+            "samples": paired["samples"],
+            "brier_score": paired["champion_brier_score"],
+            "log_loss": paired["champion_log_loss"],
+        }
+        challenger = {
+            "samples": paired["samples"],
+            "brier_score": paired["challenger_brier_score"],
+            "log_loss": paired["challenger_log_loss"],
+        }
+        promote = bool(
+            paired["samples"] >= int(min_promotion_samples)
+            and champion["brier_score"] is not None
+            and challenger["brier_score"] is not None
+            and challenger["brier_score"]
+            <= champion["brier_score"] - float(min_brier_improvement)
+        )
+        return {
+            "champion_model": "momentum_challenger" if promote else "calibrated_ensemble",
+            "challenger_model": "calibrated_ensemble" if promote else "momentum_challenger",
+            "status": "promoted" if promote else ("observing" if paired["samples"] else "cold_start"),
+            "promotion_min_samples": int(min_promotion_samples),
+            "min_brier_improvement": float(min_brier_improvement),
+            "evaluation_basis": "paired_forward_only",
+            "paired_samples": paired["samples"],
+            "champion_metrics": champion,
+            "challenger_metrics": challenger,
+        }
+'''
+          regex_replace(
+              'src/forecasting/history.py',
+              r'    def select_champion\(.*\Z',
+              paired_selection,
+          )
+
+          # 2) Forecast version bump and per-horizon Champion/Challenger selection.
+          replace('src/forecasting/engine.py', 'V7_FORECAST_VERSION = "v7.0-forecast.1"', 'V7_FORECAST_VERSION = "v7.1-forecast.1"')
+          replace('src/v6_daily/engine.py', 'V6_ENGINE_VERSION = "v7.0-forecast.1"', 'V6_ENGINE_VERSION = "v7.1-forecast.1"')
+          replace(
+              'src/forecasting/engine.py',
+              """        selection = self.history.select_champion(
+            as_of_date=as_of,
+            horizon_days=5,
+            regime=regime,
+        )
+        selected_champion = str(selection["champion_model"])
+        selected_challenger = str(selection["challenger_model"])
+        challenger_active = selected_champion == "momentum_challenger"
+
+        horizons: Dict[str, ForecastHorizon] = {}
+        for horizon in FORECAST_HORIZONS:
+""",
+              """        selections: Dict[int, Dict[str, Any]] = {}
+        horizons: Dict[str, ForecastHorizon] = {}
+        for horizon in FORECAST_HORIZONS:
+            selection = self.history.select_champion(
+                as_of_date=as_of,
+                horizon_days=horizon,
+                regime=regime,
+            )
+            selections[horizon] = selection
+            selected_champion = str(selection["champion_model"])
+            selected_challenger = str(selection["challenger_model"])
+            challenger_active = selected_champion == "momentum_challenger"
+""",
+          )
+          replace(
+              'src/forecasting/engine.py',
+              """        coverage = sum(item.evidence_coverage for item in horizons.values()) / len(horizons)
+        return ForecastBundle(
+            str(symbol or "").strip().upper(),
+            str(instrument_type or "STOCK").strip().upper(),
+            effective_trade_date,
+            regime,
+            self.version,
+            horizons,
+            "5d",
+            selected_champion,
+            selected_challenger,
+            str(selection["status"]),
+            round(coverage, 4),
+            {
+                "history_available": self.history.available,
+                "realized_vol_20d_pct": realized_vol,
+                "daily_volatility_pct": round(daily_vol, 4),
+                "champion_selection": selection,
+                "numeric_llm_influence": "none",
+""",
+              """        coverage = sum(item.evidence_coverage for item in horizons.values()) / len(horizons)
+        primary_selection = selections[5]
+        return ForecastBundle(
+            str(symbol or "").strip().upper(),
+            str(instrument_type or "STOCK").strip().upper(),
+            effective_trade_date,
+            regime,
+            self.version,
+            horizons,
+            "5d",
+            str(primary_selection["champion_model"]),
+            str(primary_selection["challenger_model"]),
+            str(primary_selection["status"]),
+            round(coverage, 4),
+            {
+                "history_available": self.history.available,
+                "realized_vol_20d_pct": realized_vol,
+                "daily_volatility_pct": round(daily_vol, 4),
+                "champion_selection_by_horizon": {
+                    f"{horizon}d": selections[horizon]
+                    for horizon in FORECAST_HORIZONS
+                },
+                "numeric_llm_influence": "none",
+""",
+          )
+
+          # 3) Decision gates are authoritative: no calibration / low confidence / no alpha / poor R:R => no new exposure.
+          old_decision = """        constructive = bool(h5.probability_up >= 0.58 and h5.expected_return_pct > 0.35 and h5.expected_alpha_vs_spy_pct > 0.0 and h20.probability_up >= 0.52 and h20.expected_return_pct >= 0.0 and reward_risk >= 1.15 and confidence >= 0.50 and risk <= 60.0)
+        watchable = bool(h5.probability_up >= 0.52 and h5.expected_return_pct > 0.0 and h20.probability_up >= 0.48 and risk <= 68.0)
+        bearish = bool(h5.probability_up <= 0.42 and h5.expected_return_pct < 0.0 and h20.probability_up <= 0.47)
+        if constructive:
+            decision = "BUY_SETUP"
+            rationale = f"5D calibrated P(up)={h5.probability_up:.1%}, expected return {h5.expected_return_pct:+.2f}%, expected alpha {h5.expected_alpha_vs_spy_pct:+.2f}%, distribution R/R={reward_risk:.2f}"
+        elif bearish:
+            decision = "AVOID"
+            rationale = f"5D/20D calibrated probabilities are bearish ({h5.probability_up:.1%}/{h20.probability_up:.1%}) with negative expected return"
+        elif watchable:
+            decision = "WATCH"
+            rationale = f"forecast is constructive but edge is not strong enough for immediate setup: 5D P(up)={h5.probability_up:.1%}, return={h5.expected_return_pct:+.2f}%, alpha={h5.expected_alpha_vs_spy_pct:+.2f}%"
+        else:
+            decision = "WAIT"
+            rationale = f"forecast edge is insufficient: 5D P(up)={h5.probability_up:.1%}, return={h5.expected_return_pct:+.2f}%, alpha={h5.expected_alpha_vs_spy_pct:+.2f}%"
+"""
+          new_decision = """        bearish = bool(h5.probability_up <= 0.42 and h5.expected_return_pct < 0.0 and h20.probability_up <= 0.47)
+        constructive = bool(h5.probability_up >= 0.58 and h5.expected_return_pct > 0.35 and h5.expected_alpha_vs_spy_pct > 0.0 and h20.probability_up >= 0.52 and h20.expected_return_pct >= 0.0 and reward_risk >= 1.15 and confidence >= 0.50 and risk <= 60.0)
+        watchable = bool(h5.probability_up >= 0.52 and h5.expected_return_pct > 0.0 and h20.probability_up >= 0.48 and risk <= 68.0)
+        if bearish:
+            decision = "AVOID"
+            rationale = f"5D/20D calibrated probabilities are bearish ({h5.probability_up:.1%}/{h20.probability_up:.1%}) with negative expected return"
+        elif gates:
+            decision = "WAIT"
+            rationale = "execution gates block new exposure: " + ", ".join(gates)
+        elif constructive:
+            decision = "BUY_SETUP"
+            rationale = f"5D calibrated P(up)={h5.probability_up:.1%}, expected return {h5.expected_return_pct:+.2f}%, expected alpha {h5.expected_alpha_vs_spy_pct:+.2f}%, distribution R/R={reward_risk:.2f}"
+        elif watchable:
+            decision = "WATCH"
+            rationale = f"forecast is constructive but edge is not strong enough for immediate setup: 5D P(up)={h5.probability_up:.1%}, return={h5.expected_return_pct:+.2f}%, alpha={h5.expected_alpha_vs_spy_pct:+.2f}%"
+        else:
+            decision = "WAIT"
+            rationale = f"forecast edge is insufficient: 5D P(up)={h5.probability_up:.1%}, return={h5.expected_return_pct:+.2f}%, alpha={h5.expected_alpha_vs_spy_pct:+.2f}%"
+"""
+          replace('src/forecasting/decision.py', old_decision, new_decision)
+
+          # 4) Better-entry output is explicitly an uncalibrated heuristic score until the ledger supports calibration.
+          replace('src/forecasting/timing.py', '    version = "v7.0-intraday-timing.1"', '    version = "v7.1-intraday-timing.1"\n    better_entry_metric = "heuristic_score_v1"')
+          replace('src/forecasting/timing.py', 'f"near-term pullback probability {better:.1%} with estimated {expected_improvement:.2f}% price improvement; expected value favors waiting"', 'f"near-term better-entry heuristic score {better:.1%} with estimated {expected_improvement:.2f}% price improvement; expected value favors waiting"')
+          replace('src/forecasting/timing.py', 'f"waiting edge is not material (better-entry probability {better:.1%}, estimated improvement {expected_improvement:.2f}%); current setup remains executable"', 'f"waiting edge is not material (better-entry heuristic score {better:.1%}, estimated improvement {expected_improvement:.2f}%); current setup remains executable"')
+
+          replace('scripts/run_us_open_timing.py', 'POLICY_VERSION="us-open-timing-v7.0"', 'POLICY_VERSION="us-open-timing-v7.1"')
+          replace('scripts/run_us_open_timing.py', 'forecast_confidence:float|None; better_entry_probability:float;', 'forecast_confidence:float|None; better_entry_score:float; better_entry_probability:float;')
+          replace('scripts/run_us_open_timing.py', 'starter_position_pct=0.0,better_entry_probability=0.0,expected_better_price=None', 'starter_position_pct=0.0,better_entry_score=0.0,better_entry_probability=0.0,expected_better_price=None')
+          replace('scripts/run_us_open_timing.py', 'starter_position_pct=base.starter_position_pct if timing.action=="BUY_NOW" else 0.0,better_entry_probability=timing.better_entry_probability,expected_better_price=', 'starter_position_pct=base.starter_position_pct if timing.action=="BUY_NOW" else 0.0,better_entry_score=timing.better_entry_probability,better_entry_probability=timing.better_entry_probability,expected_better_price=')
+          replace('scripts/run_us_open_timing.py', '更好买点概率 | 预计更优价', '更好买点评分* | 预计更优价')
+          replace('scripts/run_us_open_timing.py', '_pct(x.better_entry_probability,probability=True)', '_pct(x.better_entry_score,probability=True)')
+          replace('scripts/run_us_open_timing.py', '未来近端出现更好买点概率 {_pct(x.better_entry_probability,probability=True)}', '更好买点启发式评分（未校准） {_pct(x.better_entry_score,probability=True)}')
+          replace(
+              'scripts/run_us_open_timing.py',
+              '"- 概率和期望收益是基于历史校准的估计，不是收益保证。",""]',
+              '"- 收盘层上涨概率和期望收益来自历史校准，不是收益保证。","- `更好买点评分` 当前是盘中启发式 score，不是校准概率；Research Ledger 会按多时点 outcome 验证，样本不足前不得表述为胜率。",""]',
+          )
+
+          signature_code = r'''def _semantic_price_state(current_price:float|None,entry_low:float|None,entry_high:float|None,stop_loss:float|None)->str:
+    price=_finite(current_price); low=_finite(entry_low); high=_finite(entry_high); stop=_finite(stop_loss)
+    if price is None:return "unknown"
+    if stop is not None and price<=stop:return "at_or_below_stop"
+    if low is not None and high is not None:
+        if price<low:return "below_entry"
+        if price<=high:return "inside_entry"
+        premium=(price/high-1.0)*100.0 if high>0 else 0.0
+        if premium<0.5:return "above_entry_lt_0_5pct"
+        if premium<1.0:return "above_entry_0_5_1pct"
+        if premium<2.0:return "above_entry_1_2pct"
+        return "above_entry_ge_2pct"
+    return "priced"
+
+def _signature(decisions:Sequence[OpenTimingDecision])->str:
+    compact=[{"symbol":x.symbol,"action":x.action,"better_bucket":min(9,max(0,int(x.better_entry_score*10.0))),"price_state":_semantic_price_state(x.current_price,x.entry_low,x.entry_high,x.stop_loss)} for x in decisions]
+    return hashlib.sha256(json.dumps(compact,sort_keys=True,ensure_ascii=False).encode()).hexdigest()[:16]
+'''
+          regex_replace('scripts/run_us_open_timing.py', r'def _signature\(decisions:Sequence\[OpenTimingDecision\]\)->str:.*?(?=\ndef _read_previous)', signature_code)
+          regex_replace(
+              'scripts/run_us_open_timing.py',
+              r'def _should_notify\(previous:Mapping\[str,Any\]\|None,\*,signature:str,generated_at:datetime,force:bool\)->bool:.*?(?=\ndef _notify)',
+              '''def _should_notify(previous:Mapping[str,Any]|None,*,signature:str,generated_at:datetime,force:bool)->bool:\n    del generated_at\n    if force or not previous:return True\n    return str(previous.get("state_signature") or "")!=signature\n''',
+          )
+          replace(
+              'scripts/run_us_open_timing.py',
+              'payload={"version":"us-open-timing-v7","policy_version":POLICY_VERSION,',
+              'payload={"version":"us-open-timing-v7.1","policy_version":POLICY_VERSION,"better_entry_metric":{"field":"better_entry_score","legacy_alias":"better_entry_probability","semantics":"heuristic_score","calibrated":False},',
+          )
+
+          # 5) Research ledger v2: restore V7 artifact chain, capture every fresh bar, learn whether waiting found a better entry.
+          replace('scripts/us_open_research_ledger.py', 'SCHEMA_VERSION = "us-open-research-ledger-v1"', 'SCHEMA_VERSION = "us-open-research-ledger-v2"')
+          regex_replace(
+              'scripts/us_open_research_ledger.py',
+              r'def connect\(path: str \| Path\) -> sqlite3.Connection:.*?(?=\ndef signal_key)',
+              r'''def connect(path: str | Path) -> sqlite3.Connection:
+    db = Path(path)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db), timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS us_open_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schema_version TEXT NOT NULL,
+            signal_key TEXT NOT NULL UNIQUE,
+            session_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            source_run_id TEXT,
+            source_trade_date TEXT,
+            evaluated_at TEXT NOT NULL,
+            signal_bar_time TEXT NOT NULL,
+            signal_price REAL NOT NULL,
+            decision_status TEXT NOT NULL,
+            packet_json TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            decision_json TEXT NOT NULL,
+            settled_at TEXT,
+            close_return_pct REAL,
+            return_60m_pct REAL,
+            mfe_pct REAL,
+            mae_pct REAL,
+            stop_hit INTEGER,
+            target1_hit INTEGER,
+            first_touch TEXT,
+            modeled_exit_return_pct REAL,
+            better_entry_hit INTEGER,
+            best_future_improvement_pct REAL,
+            minutes_to_reference_better_price REAL,
+            outcome_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS ix_us_open_signals_date_symbol
+            ON us_open_signals(session_date, symbol, id);
+        CREATE INDEX IF NOT EXISTS ix_us_open_signals_status_settled
+            ON us_open_signals(decision_status, settled_at, session_date);
+        """
+    )
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(us_open_signals)")}
+    for name, ddl in {
+        "better_entry_hit": "INTEGER",
+        "best_future_improvement_pct": "REAL",
+        "minutes_to_reference_better_price": "REAL",
+    }.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE us_open_signals ADD COLUMN {name} {ddl}")
+    return conn
+''',
+          )
+          regex_replace(
+              'scripts/us_open_research_ledger.py',
+              r'def signal_key\(.*?(?=\ndef record_signal)',
+              r'''def signal_key(*, session_date: str, symbol: str, policy_version: str, source_run_id: str | None, signal_bar_time: str | None = None) -> str:
+    return "|".join(
+        [
+            session_date,
+            symbol.strip().upper(),
+            policy_version.strip(),
+            str(source_run_id or "").strip(),
+            str(signal_bar_time or "").strip(),
+        ]
+    )
+''',
+          )
+          replace(
+              'scripts/us_open_research_ledger.py',
+              'source_run_id=source_run_id,\n    )',
+              'source_run_id=source_run_id,\n        signal_bar_time=bar_time.isoformat(),\n    )',
+          )
+          replace('scripts/us_open_research_ledger.py', 'str(decision.get("status") or ""),', 'str(decision.get("action") or decision.get("status") or ""),')
+
+          regex_replace(
+              'scripts/us_open_research_ledger.py',
+              r'def compute_outcome\(row: Mapping\[str, Any\], frame: Any\) -> dict\[str, Any\] \| None:.*?(?=\ndef settle_pending)',
+              r'''def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None:
+    frame = _normalize_frame(frame)
+    if frame is None or frame.empty:
+        return None
+    signal_time = _parse_dt(row.get("signal_bar_time"))
+    signal_price = _finite(row.get("signal_price"))
+    if signal_time is None or signal_price is None or signal_price <= 0:
+        return None
+    session = frame[frame.index.date == signal_time.date()].between_time("09:30", "16:00")
+    future = session[session.index > signal_time]
+    if future.empty:
+        return None
+    close_price = _finite(session.iloc[-1].get("Close"))
+    if close_price is None or close_price <= 0:
+        return None
+
+    future_high = float(future["High"].max())
+    future_low = float(future["Low"].min())
+    close_return = (close_price / signal_price - 1.0) * 100.0
+    mfe = (future_high / signal_price - 1.0) * 100.0
+    mae = (future_low / signal_price - 1.0) * 100.0
+    best_future_improvement = max(0.0, (signal_price - future_low) / signal_price * 100.0)
+
+    cutoff = signal_time + timedelta(minutes=60)
+    first_hour = future[future.index <= cutoff]
+    return_60m = None
+    if not first_hour.empty:
+        hour_price = _finite(first_hour.iloc[-1].get("Close"))
+        if hour_price is not None and hour_price > 0:
+            return_60m = (hour_price / signal_price - 1.0) * 100.0
+
+    try:
+        packet = json.loads(str(row.get("packet_json") or "{}"))
+    except json.JSONDecodeError:
+        packet = {}
+    try:
+        decision = json.loads(str(row.get("decision_json") or "{}"))
+    except json.JSONDecodeError:
+        decision = {}
+    stop, target1 = _execution_levels(packet)
+    reference_better_price = _finite(decision.get("expected_better_price"))
+    better_entry_hit = None
+    minutes_to_reference = None
+    if reference_better_price is not None and 0 < reference_better_price < signal_price:
+        matching = future[future["Low"] <= reference_better_price]
+        better_entry_hit = not matching.empty
+        if better_entry_hit:
+            first_time = matching.index[0]
+            minutes_to_reference = max(0.0, (first_time - signal_time).total_seconds() / 60.0)
+
+    stop_hit = False
+    target1_hit = False
+    first_touch = "close"
+    modeled_exit = close_return
+    for _, bar in future.iterrows():
+        low = _finite(bar.get("Low"))
+        high = _finite(bar.get("High"))
+        stop_here = bool(stop is not None and low is not None and low <= stop)
+        target_here = bool(target1 is not None and high is not None and high >= target1)
+        stop_hit = stop_hit or stop_here
+        target1_hit = target1_hit or target_here
+        if stop_here and target_here:
+            first_touch = "ambiguous_stop_target_same_bar"
+            modeled_exit = None
+            break
+        if stop_here:
+            first_touch = "stop"
+            modeled_exit = (stop / signal_price - 1.0) * 100.0 if stop is not None else None
+            break
+        if target_here:
+            first_touch = "target1"
+            modeled_exit = (target1 / signal_price - 1.0) * 100.0 if target1 is not None else None
+            break
+
+    return {
+        "close_return_pct": close_return,
+        "return_60m_pct": return_60m,
+        "mfe_pct": mfe,
+        "mae_pct": mae,
+        "stop_hit": stop_hit,
+        "target1_hit": target1_hit,
+        "first_touch": first_touch,
+        "modeled_exit_return_pct": modeled_exit,
+        "better_entry_hit": better_entry_hit,
+        "best_future_improvement_pct": best_future_improvement,
+        "minutes_to_reference_better_price": minutes_to_reference,
+    }
+''',
+          )
+          regex_replace(
+              'scripts/us_open_research_ledger.py',
+              r'def settle_pending\(.*?(?=\ndef summary)',
+              r'''def settle_pending(
+    path: str | Path,
+    *,
+    as_of_date: date,
+    history_fetcher: Callable[[str, date], Any] = fetch_session_history,
+) -> dict[str, int]:
+    settled = 0
+    failed = 0
+    with connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM us_open_signals
+            WHERE settled_at IS NULL AND session_date < ?
+            ORDER BY session_date, symbol, id
+            """,
+            (as_of_date.isoformat(),),
+        ).fetchall()
+        for raw in rows:
+            row = dict(raw)
+            try:
+                session_date = date.fromisoformat(str(row["session_date"]))
+                frame = history_fetcher(str(row["symbol"]), session_date)
+                outcome = compute_outcome(row, frame)
+                if outcome is None:
+                    failed += 1
+                    continue
+                conn.execute(
+                    """
+                    UPDATE us_open_signals
+                    SET settled_at=?, close_return_pct=?, return_60m_pct=?,
+                        mfe_pct=?, mae_pct=?, stop_hit=?, target1_hit=?,
+                        first_touch=?, modeled_exit_return_pct=?,
+                        better_entry_hit=?, best_future_improvement_pct=?,
+                        minutes_to_reference_better_price=?, outcome_json=?
+                    WHERE id=?
+                    """,
+                    (
+                        datetime.now(NY).isoformat(),
+                        outcome["close_return_pct"],
+                        outcome["return_60m_pct"],
+                        outcome["mfe_pct"],
+                        outcome["mae_pct"],
+                        int(bool(outcome["stop_hit"])),
+                        int(bool(outcome["target1_hit"])),
+                        outcome["first_touch"],
+                        outcome["modeled_exit_return_pct"],
+                        None if outcome["better_entry_hit"] is None else int(bool(outcome["better_entry_hit"])),
+                        outcome["best_future_improvement_pct"],
+                        outcome["minutes_to_reference_better_price"],
+                        _json(outcome),
+                        int(row["id"]),
+                    ),
+                )
+                settled += 1
+            except Exception:
+                failed += 1
+    return {"settled": settled, "failed": failed, "pending_scanned": settled + failed}
+''',
+          )
+          regex_replace(
+              'scripts/us_open_research_ledger.py',
+              r'def summary\(path: str \| Path\) -> dict\[str, Any\]:.*?(?=\ndef export_summary)',
+              r'''def summary(path: str | Path) -> dict[str, Any]:
+    with connect(path) as conn:
+        total = int(conn.execute("SELECT COUNT(*) FROM us_open_signals").fetchone()[0])
+        settled = int(conn.execute("SELECT COUNT(*) FROM us_open_signals WHERE settled_at IS NOT NULL").fetchone()[0])
+        buy_rows = conn.execute(
+            """
+            SELECT close_return_pct, return_60m_pct, mae_pct, modeled_exit_return_pct
+            FROM us_open_signals
+            WHERE decision_status='BUY_NOW' AND settled_at IS NOT NULL
+            ORDER BY session_date, symbol, id
+            """
+        ).fetchall()
+        wait_rows = conn.execute(
+            """
+            SELECT better_entry_hit, best_future_improvement_pct,
+                   minutes_to_reference_better_price
+            FROM us_open_signals
+            WHERE decision_status='WAIT_BETTER_ENTRY' AND settled_at IS NOT NULL
+            ORDER BY session_date, symbol, id
+            """
+        ).fetchall()
+    close_returns = [float(row[0]) for row in buy_rows if row[0] is not None]
+    hour_returns = [float(row[1]) for row in buy_rows if row[1] is not None]
+    maes = [float(row[2]) for row in buy_rows if row[2] is not None]
+    modeled = [float(row[3]) for row in buy_rows if row[3] is not None]
+    wait_hits = [int(row[0]) for row in wait_rows if row[0] is not None]
+    wait_improvements = [float(row[1]) for row in wait_rows if row[1] is not None]
+    wait_minutes = [float(row[2]) for row in wait_rows if row[2] is not None]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "signals": total,
+        "settled": settled,
+        "pending": total - settled,
+        "settled_buy_now": len(buy_rows),
+        "buy_close_win_rate": sum(value > 0 for value in close_returns) / len(close_returns) if close_returns else None,
+        "buy_avg_close_return_pct": mean(close_returns) if close_returns else None,
+        "buy_avg_60m_return_pct": mean(hour_returns) if hour_returns else None,
+        "buy_avg_mae_pct": mean(maes) if maes else None,
+        "buy_avg_modeled_exit_return_pct": mean(modeled) if modeled else None,
+        "settled_wait_better_entry": len(wait_rows),
+        "wait_better_entry_hit_rate": sum(wait_hits) / len(wait_hits) if wait_hits else None,
+        "wait_avg_best_future_improvement_pct": mean(wait_improvements) if wait_improvements else None,
+        "wait_avg_minutes_to_reference_better_price": mean(wait_minutes) if wait_minutes else None,
+        "better_entry_metric_status": "collecting_outcomes" if len(wait_rows) < 30 else "eligible_for_calibration_research",
+    }
+''',
+          )
+
+          replace('.github/workflows/02b-us-open-research-ledger.yml', "startsWith('us-open-confirmation-')", "startsWith('us-open-timing-')")
+          replace('.github/workflows/02b-us-open-research-ledger.yml', 'pattern: us-open-confirmation-*', 'pattern: us-open-timing-*')
+
+          # 6) Regression tests for all post-merge findings.
+          replace(
+              'tests/test_us_open_research_workflow_contract.py',
+              'assert "startsWith(\'us-open-confirmation-\')" in text',
+              'assert "startsWith(\'us-open-timing-\')" in text\n    assert "pattern: us-open-timing-*" in text',
+          )
+          replace('tests/test_us_open_research_ledger.py', 'def _decision(status="BUY_NOW"):\n    return {\n        "symbol": "TEST",\n        "status": status,', 'def _decision(status="BUY_NOW"):\n    return {\n        "symbol": "TEST",\n        "action": status,')
+          replace('tests/test_us_open_research_ledger.py', '        "volume_ratio": 1.1,\n    }', '        "volume_ratio": 1.1,\n        "better_entry_score": 0.7,\n        "better_entry_probability": 0.7,\n        "expected_better_price": 99.5,\n    }', count=1)
+          ledger_tests = r'''
+
+def test_record_signal_keeps_multiple_intraday_observations(tmp_path):
+    db = tmp_path / "research.db"
+    first_snapshot = _snapshot()
+    first_decision = _decision("WAIT_BETTER_ENTRY")
+    second_snapshot = dict(first_snapshot, current_price=99.8, last_bar_time="2026-08-14T10:00:00-04:00")
+    second_decision = dict(first_decision, current_price=99.8, source_last_bar_time="2026-08-14T10:00:00-04:00")
+    common = dict(packet=_packet(), evaluated_at=datetime(2026, 8, 14, 10, 1, tzinfo=NY), policy_version="us-open-timing-v7.1", source_run_id="123")
+    assert record_signal(db, snapshot=first_snapshot, decision=first_decision, **common) is True
+    assert record_signal(db, snapshot=first_snapshot, decision=first_decision, **common) is False
+    assert record_signal(db, snapshot=second_snapshot, decision=second_decision, **common) is True
+    assert summary(db)["signals"] == 2
+
+
+def test_wait_better_entry_outcome_learns_reference_price_hit():
+    row = {
+        "signal_bar_time": "2026-08-14T09:44:00-04:00",
+        "signal_price": 100.0,
+        "packet_json": json.dumps(_packet(stop=98.0, target=104.0)),
+        "decision_json": json.dumps(_decision("WAIT_BETTER_ENTRY")),
+    }
+    frame = _frame([
+        ("2026-08-14 09:44", 100.0, 100.1, 99.9, 100.0, 1000),
+        ("2026-08-14 09:50", 100.0, 100.2, 99.4, 99.7, 1200),
+        ("2026-08-14 16:00", 101.0, 101.2, 100.8, 101.0, 1000),
+    ])
+    outcome = compute_outcome(row, frame)
+    assert outcome is not None
+    assert outcome["better_entry_hit"] is True
+    assert outcome["best_future_improvement_pct"] == pytest.approx(0.6)
+    assert outcome["minutes_to_reference_better_price"] == pytest.approx(6.0)
+'''
+          text = load('tests/test_us_open_research_ledger.py')
+          if 'test_record_signal_keeps_multiple_intraday_observations' not in text:
+              save('tests/test_us_open_research_ledger.py', text + ledger_tests)
+
+          replace(
+              'tests/test_v7_forecast_calibration.py',
+              'from src.forecasting.history import ForecastHistory',
+              'from src.alpha_engine.models import AlphaFeatures\nfrom src.forecasting.decision import ForecastDecisionPolicy\nfrom src.forecasting.engine import V7ForecastEngine\nfrom src.forecasting.history import CalibrationProfile, ForecastHistory\nfrom src.forecasting.models import ForecastBundle, ForecastHorizon',
+          )
+          forecast_tests = r'''
+
+def test_history_rows_reject_missing_or_invalid_source_dates(tmp_path: Path) -> None:
+    path = tmp_path / "forecast.db"
+    _db(path)
+    conn = sqlite3.connect(path)
+    for idx, effective in ((1001, None), (1002, "not-a-date")):
+        conn.execute("INSERT INTO v6_forecast_runs VALUES (?,?,?,?)", (idx, "v7-test", "risk_on", effective))
+        conn.execute("INSERT INTO v6_horizon_forecasts(forecast_run_id,horizon_days,score,payload_json) VALUES (?,?,?,?)", (idx, 5, 90.0, json.dumps({"probability_up": .9, "challenger_probability_up": .9})))
+        conn.execute("INSERT INTO v6_forecast_outcomes(forecast_run_id,horizon_days,end_trade_date,return_pct,mfe_pct,mae_pct,excess_vs_spy_pct) VALUES (?,?,?,?,?,?,?)", (idx, 5, "2026-02-10", 50.0, 50.0, -1.0, 49.0))
+    conn.commit(); conn.close()
+    rows = ForecastHistory(str(path))._rows(as_of_date="2026-03-01", horizon_days=5)
+    assert len(rows) == 40
+    assert all(row["effective_trade_date"] for row in rows)
+
+
+def test_promotion_metrics_use_only_paired_forward_predictions(tmp_path: Path) -> None:
+    path = tmp_path / "forecast.db"
+    _db(path)
+    conn = sqlite3.connect(path)
+    for idx in range(41, 141):
+        conn.execute("INSERT INTO v6_forecast_runs VALUES (?,?,?,?)", (idx, "legacy-v6", "risk_on", "2026-01-10"))
+        conn.execute("INSERT INTO v6_horizon_forecasts(forecast_run_id,horizon_days,score,payload_json) VALUES (?,?,?,?)", (idx, 5, 60.0, json.dumps({"probability_up": .6})))
+        conn.execute("INSERT INTO v6_forecast_outcomes(forecast_run_id,horizon_days,end_trade_date,return_pct,mfe_pct,mae_pct,excess_vs_spy_pct) VALUES (?,?,?,?,?,?,?)", (idx, 5, "2026-02-10", 1.0, 2.0, -1.0, .5))
+    conn.commit(); conn.close()
+    selection = ForecastHistory(str(path)).select_champion(as_of_date="2026-03-01", horizon_days=5, regime="risk_on", min_promotion_samples=20)
+    assert selection["evaluation_basis"] == "paired_forward_only"
+    assert selection["paired_samples"] == 40
+    assert selection["champion_metrics"]["samples"] == 40
+    assert selection["challenger_metrics"]["samples"] == 40
+
+
+class _PerHorizonHistory:
+    available = True
+    def select_champion(self, *, horizon_days, **kwargs):
+        promoted = horizon_days == 5
+        return {"champion_model": "momentum_challenger" if promoted else "calibrated_ensemble", "challenger_model": "calibrated_ensemble" if promoted else "momentum_challenger", "status": "promoted" if promoted else "observing", "paired_samples": 250}
+    def calibration(self, *, raw_probability_up, probability_key, **kwargs):
+        return CalibrationProfile("mature", 250, 250, raw_probability_up, 1.0, .5, 2.0, -1.0, -1.0, 1.0, 3.0, .20, .50, .05, probability_key)
+
+
+def test_champion_selection_is_independent_per_horizon() -> None:
+    bundle = V7ForecastEngine(history=_PerHorizonHistory()).forecast(symbol="TEST", instrument_type="STOCK", effective_trade_date="2026-08-20", context={}, features=AlphaFeatures(trend=70, momentum=65, relative_strength=60, volume_confirmation=60, market_regime=60), market_regime="risk_on", atr=2.0, current_price=100.0)
+    assert bundle.horizons["1d"].champion_model == "calibrated_ensemble"
+    assert bundle.horizons["5d"].champion_model == "momentum_challenger"
+    assert bundle.horizons["10d"].champion_model == "calibrated_ensemble"
+    assert bundle.horizons["20d"].champion_model == "calibrated_ensemble"
+    assert bundle.champion_model == "momentum_challenger"
+
+
+def _forecast_horizon(days: int, *, status: str = "mature", confidence: float = .8) -> ForecastHorizon:
+    return ForecastHorizon(horizon_days=days, raw_probability_up=.7, probability_up=.7, expected_return_pct=1.2, expected_alpha_vs_spy_pct=.6, p10_return_pct=-1.0, p50_return_pct=1.2, p90_return_pct=3.0, expected_mfe_pct=2.0, expected_mae_pct=-.8, evidence_coverage=.9, forecast_confidence=confidence, calibration_samples=50 if status != "prior_only" else 0, calibration_status=status, regime="risk_on", champion_model="calibrated_ensemble", challenger_model="momentum_challenger", challenger_probability_up=.65, direction="bullish", score=70.0)
+
+
+def _bundle(*, status: str = "mature", confidence: float = .8) -> ForecastBundle:
+    horizons = {f"{days}d": _forecast_horizon(days, status=status if days == 5 else "mature", confidence=confidence) for days in (1, 5, 20)}
+    return ForecastBundle("TEST", "STOCK", "2026-08-20", "risk_on", "test", horizons, "5d", "calibrated_ensemble", "momentum_challenger", "observing", .9)
+
+
+def test_prior_only_forecast_cannot_authorize_new_exposure() -> None:
+    policy = ForecastDecisionPolicy()
+    decision = policy.decide(_bundle(status="prior_only"), risk_score=20, opportunity_score=80)
+    assert decision.decision == "WAIT"
+    assert decision.max_position_fraction == 0.0
+    assert "probability_not_yet_calibrated" in decision.gates
+    plan = policy.build_trade_plan(decision, risk_score=20, current_price=100, support=98, resistance=106, atr=2)
+    assert plan["entry_zone"] is None
+    assert plan["max_position_pct"] == 0.0
+
+
+def test_low_confidence_gate_cannot_leave_watch_position_authorized() -> None:
+    decision = ForecastDecisionPolicy().decide(_bundle(confidence=.4), risk_score=20, opportunity_score=80)
+    assert decision.decision == "WAIT"
+    assert decision.max_position_fraction == 0.0
+    assert "forecast_confidence_below_50pct" in decision.gates
+'''
+          text = load('tests/test_v7_forecast_calibration.py')
+          if 'test_history_rows_reject_missing_or_invalid_source_dates' not in text:
+              save('tests/test_v7_forecast_calibration.py', text + forecast_tests)
+
+          replace(
+              'tests/test_notification_streamlining.py',
+              'from scripts.run_us_open_confirmation_safe import _near_open_retry_seconds',
+              'from scripts.run_us_open_confirmation_safe import _near_open_retry_seconds\nfrom scripts.run_us_open_timing import _semantic_price_state, _should_notify',
+          )
+          notify_tests = r'''
+
+def test_unchanged_timing_state_is_not_resent_just_because_an_hour_passed() -> None:
+    previous = {"state_signature": "same", "generated_at": "2026-08-20T09:35:00-04:00"}
+    assert _should_notify(previous, signature="same", generated_at=datetime(2026, 8, 20, 12, 0, tzinfo=NY), force=False) is False
+    assert _should_notify(previous, signature="changed", generated_at=datetime(2026, 8, 20, 9, 45, tzinfo=NY), force=False) is True
+
+
+def test_semantic_price_state_ignores_ten_cent_noise_inside_entry_zone() -> None:
+    assert _semantic_price_state(100.00, 99.0, 101.0, 95.0) == "inside_entry"
+    assert _semantic_price_state(100.10, 99.0, 101.0, 95.0) == "inside_entry"
+    assert _semantic_price_state(101.70, 99.0, 101.0, 95.0) == "above_entry_0_5_1pct"
+
+
+def test_open_timing_report_labels_better_entry_metric_as_uncalibrated_score() -> None:
+    text = TIMING_RUNNER.read_text(encoding="utf-8")
+    assert "更好买点启发式评分（未校准）" in text
+    assert '"semantics":"heuristic_score"' in text
+'''
+          text = load('tests/test_notification_streamlining.py')
+          if 'test_unchanged_timing_state_is_not_resent' not in text:
+              save('tests/test_notification_streamlining.py', text + notify_tests)
+
+          # 7) Documentation and changelog reflect the corrected contracts.
+          replace(
+              'docs/v7-forecast-architecture.md',
+              'Challenger 只有在 forward-only 样本达到最低门槛，且 Brier Score 相比 Champion 有明确改善时才允许晋级。晋级后，active probability、历史收益分布、校准样本数和 forecast confidence 都切换到 Challenger 对应校准结果，而不是只替换一个概率数字。',
+              'Challenger 只有在 **Champion 与 Challenger 同时存在原生预测的 paired forward-only 样本**达到最低门槛，且 Brier Score 相比 Champion 有明确改善时才允许晋级；旧 V6 Champion-only 样本不得进入 Promotion 比赛。每个 1D / 5D / 10D / 20D horizon 独立选择 Champion，5D 晋级不能自动接管其他周期。晋级后，active probability、历史收益分布、校准样本数和 forecast confidence 都切换到对应 horizon 的 Challenger 校准结果，而不是只替换一个概率数字。',
+          )
+          replace(
+              'docs/v7-forecast-architecture.md',
+              '风险硬门仍优先于方向预测。Decision Layer 只产生 BUY_SETUP / WATCH / WAIT / AVOID 和最大风险仓位；Trade Plan 再根据 support / resistance / ATR 构造确定性入场区间、止损和目标位，并继续执行最低 R:R 约束。',
+              '风险硬门仍优先于方向预测。`prior_only`、预测可信度不足、非正 Alpha 或分布 R:R 不足都属于真正的执行门：存在这些 gate 时只能 WAIT/零新仓，不能仅把 gate 写进诊断后继续生成 BUY_SETUP/WATCH 仓位。Decision Layer 只产生 BUY_SETUP / WATCH / WAIT / AVOID 和最大风险仓位；Trade Plan 再根据 support / resistance / ATR 构造确定性入场区间、止损和目标位，并继续执行最低 R:R 约束。',
+          )
+          replace(
+              'docs/v7-forecast-architecture.md',
+              '估计 `better_entry_probability`、预计改善幅度和参考更优价。',
+              '当前盘中公式输出 `better_entry_score`（兼容保留旧字段 `better_entry_probability`），它是 **未校准的启发式评分**，同时给出预计改善幅度和参考更优价；在 Research Ledger 积累并验证足够多时点 outcome 之前，不得把该 score 表述为历史胜率或校准概率。',
+          )
+          replace(
+              'docs/v7-forecast-architecture.md',
+              '生产 outcome horizon 已扩展为 1D / 5D / 10D / 20D，使盘中择时使用的 1D 概率也可以形成真实 forward-only 校准样本，而不是长期停留在先验状态。',
+              '生产 outcome horizon 已扩展为 1D / 5D / 10D / 20D，使盘中择时使用的 1D 概率也可以形成真实 forward-only 校准样本，而不是长期停留在先验状态。盘中 Research Ledger v2 以 `session_date + symbol + policy + source_run + signal_bar_time` 记录同一标的一天内的多次新鲜评估，并在次日结算 `WAIT_BETTER_ENTRY` 的参考更优价是否真正触达、最大可改善幅度和触达时间；这条 outcome 链路只用于验证/未来校准，不把启发式 score 预先包装成概率。',
+          )
+          replace('docs/v7-forecast-architecture.md', '其内部生产 Forecast Engine 已升级到 `v7.0-forecast.1`', '其内部生产 Forecast Engine 已升级到 `v7.1-forecast.1`')
+
+          replace('docs/us-open-runtime-confirmation.md', '`等更好买点` 会估计近端出现更优入场价格的概率、预计改善幅度和参考更优价；它不是看空，而是表示等待的期望值高于立即追入。', '`等更好买点` 会输出近端更优入场的**启发式评分（未校准）**、预计改善幅度和参考更优价；它不是看空，而是表示当前公式认为等待的期望值高于立即追入。Research Ledger 在足够 outcome 形成前不会把这个评分称为概率。')
+          replace('docs/us-open-runtime-confirmation.md', '状态发生实质变化或长时间未更新时才重新通知', '只有动作、启发式评分分档或相对入场/止损区间发生实质变化时才重新通知')
+          replace('docs/us-open-runtime-confirmation.md', '- 预测概率与证据覆盖率是两个独立概念。低历史样本时概率会做先验收缩并标明校准状态，不会把“数据齐全”伪装成“高胜率”。', '- 预测概率与证据覆盖率是两个独立概念。5D 仍为 `prior_only`、预测可信度不足、Alpha 非正或分布 R:R 不足时，执行层 fail-closed 为 WAIT/零新仓，不会只记录 gate 后继续授权仓位。\n- Research Ledger 使用 `us-open-timing-*` Artifact，并按分钟 bar 时间保存同一标的一天内的多次评估；次日结算等待是否真的获得参考更优价，为未来盘中评分校准提供真实样本。')
+
+          changelog = load('docs/CHANGELOG.md')
+          marker = '## [Unreleased]\n\n'
+          line = '- [修复] V7.1 修复 post-merge 审计发现的预测与盘中学习漏洞：strict no-lookahead 排除无效历史日期，Champion/Challenger 改为各 horizon 独立且仅用 paired forward-only 样本晋级，所有执行 gate 真正 fail-closed；恢复 `us-open-timing-*` Research Ledger 链路并按分钟多时点记录/结算等待是否获得更优价，将盘中“更好买点概率”降级为明确未校准的启发式评分，并以语义价格区间抑制无实质变化的重复邮件。\n'
+          if line not in changelog:
+              if marker not in changelog:
+                  raise SystemExit('docs/CHANGELOG.md: Unreleased marker missing')
+              save('docs/CHANGELOG.md', changelog.replace(marker, marker + line, 1))
+
+          # Remove this one-shot workflow from the final diff.
+          Path('.github/workflows/zz-v7-post-merge-hotfix.yml').unlink()
+          PY
+
+      - name: Targeted validation
+        shell: bash
+        run: |
+          python -m pip install -q pytest pandas yfinance python-dotenv
+          python -m py_compile \
+            src/forecasting/history.py src/forecasting/engine.py src/forecasting/decision.py src/forecasting/timing.py \
+            src/v6_daily/engine.py scripts/run_us_open_timing.py scripts/us_open_research_ledger.py scripts/capture_us_open_research.py
+          python -m pytest -q --noconftest \
+            tests/test_v7_forecast_calibration.py \
+            tests/test_v7_intraday_timing.py \
+            tests/test_us_open_research_ledger.py \
+            tests/test_us_open_research_workflow_contract.py \
+            tests/test_notification_streamlining.py
+
+      - name: Commit audited fixes
+        shell: bash
+        run: |
+          git config user.name 'gikh202'
+          git config user.email 'gikh202@gmail.com'
+          git add -- \
+            src/forecasting/history.py \
+            src/forecasting/engine.py \
+            src/forecasting/decision.py \
+            src/forecasting/timing.py \
+            src/v6_daily/engine.py \
+            scripts/run_us_open_timing.py \
+            scripts/us_open_research_ledger.py \
+            .github/workflows/02b-us-open-research-ledger.yml \
+            tests/test_v7_forecast_calibration.py \
+            tests/test_us_open_research_ledger.py \
+            tests/test_us_open_research_workflow_contract.py \
+            tests/test_notification_streamlining.py \
+            docs/v7-forecast-architecture.md \
+            docs/us-open-runtime-confirmation.md \
+            docs/CHANGELOG.md \
+            .github/workflows/zz-v7-post-merge-hotfix.yml
+          git diff --cached --check
+          git commit -m 'fix: harden V7 forecast and intraday learning'
+          git push origin HEAD:fix/v7-post-merge-audit
