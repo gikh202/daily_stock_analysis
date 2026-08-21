@@ -24,7 +24,6 @@ jobs:
         run: |
           python - <<'EXTRACT'
           from pathlib import Path
-          import textwrap
 
           source = Path('.github/workflows/zz-v7-post-merge-hotfix.yml').read_text(encoding='utf-8')
           start_marker = "          python - <<'PY'\n"
@@ -32,7 +31,11 @@ jobs:
           if start_marker not in source or end_marker not in source:
               raise SystemExit('unable to locate audited patch body')
           body = source.split(start_marker, 1)[1].split(end_marker, 1)[0]
-          body = textwrap.dedent(body)
+          prefix = "          "
+          lines = body.splitlines()
+          if not lines or any(line and not line.startswith(prefix) for line in lines):
+              raise SystemExit('unexpected embedded patch indentation')
+          body = "\n".join(line[len(prefix):] if line else "" for line in lines) + "\n"
           exec(compile(body, 'v7_post_merge_hotfix', 'exec'), {})
           EXTRACT
       - name: Targeted validation
