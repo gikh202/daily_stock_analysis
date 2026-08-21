@@ -140,11 +140,11 @@ def test_high_risk_shadow_matches_current_renderer() -> None:
     )
 
 
-def test_wait_shadow_matches_current_renderer() -> None:
+def test_constructive_wait_shadow_matches_v72_conditional_renderer() -> None:
     _assert_shadow_matches_report(
         _payload(decision="WAIT", direction="neutral", active_plan=False),
         _record(),
-        FinalVerdict.WAIT,
+        FinalVerdict.CONDITIONAL_BUY,
     )
 
 
