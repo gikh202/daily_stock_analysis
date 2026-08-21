@@ -43,7 +43,10 @@ def _frame(future_low: float) -> pd.DataFrame:
 def _signal_snapshot(frame: pd.DataFrame) -> dict:
     return reconstruct_snapshot_from_frame(
         symbol="TEST",
-        decision={"source_last_bar_time":"2026-08-14T09:44:00-04:00"},
+        decision={
+            "source_last_bar_time":"2026-08-14T09:44:00-04:00",
+            "current_price":100.1,
+        },
         frame=frame,
     )
 
