@@ -25,7 +25,7 @@ ACTION_LABELS={"BUY_NOW":"现在可以买（首仓）","WAIT_BETTER_ENTRY":"等�
 
 @dataclass(frozen=True)
 class OpenTimingDecision:
-    symbol:str; action:str; label:str; reason:str; current_price:float|None; entry_low:float|None; entry_high:float|None; stop_loss:float|None; targets:tuple[float,...]; starter_position_pct:float; max_position_pct:float; return_from_open_pct:float|None; volume_ratio:float|None; probability_up_1d:float|None; probability_up_5d:float|None; probability_up_20d:float|None; expected_return_5d_pct:float|None; expected_alpha_5d_pct:float|None; forecast_confidence:float|None; better_entry_score:float; better_entry_probability:float; expected_better_price:float|None; expected_improvement_pct:float; recheck_minutes:int; terminal:bool; source_trade_date:str|None; source_last_bar_time:str|None
+    symbol:str; action:str; label:str; reason:str; current_price:float|None; entry_low:float|None; entry_high:float|None; stop_loss:float|None; targets:tuple[float,...]; starter_position_pct:float; max_position_pct:float; return_from_open_pct:float|None; volume_ratio:float|None; probability_up_1d:float|None; probability_up_5d:float|None; probability_up_20d:float|None; expected_return_5d_pct:float|None; expected_alpha_5d_pct:float|None; forecast_confidence:float|None; better_entry_score:float; better_entry_probability:float; expected_better_price:float|None; expected_wait_minutes:int; better_entry_reason:str|None; expected_improvement_pct:float; recheck_minutes:int; terminal:bool; source_trade_date:str|None; source_last_bar_time:str|None
 
 def _finite(value: Any) -> float|None:
     try: number=float(value)
@@ -58,7 +58,17 @@ def _extended_intraday(symbol: str, now: datetime, base: LiveSnapshot) -> dict[s
         if getattr(frame.index,"tz",None) is None: frame.index=frame.index.tz_localize("UTC").tz_convert(NY)
         else: frame.index=frame.index.tz_convert(NY)
         session=frame[frame.index.date==now.date()]
-        if session.empty: raise RuntimeError("empty regular session")
+        cutoff=now
+        raw_cutoff=str(getattr(base,"last_bar_time","") or "").strip()
+        if raw_cutoff:
+            try:
+                cutoff=datetime.fromisoformat(raw_cutoff.replace("Z","+00:00"))
+                if cutoff.tzinfo is None: cutoff=cutoff.replace(tzinfo=NY)
+                cutoff=cutoff.astimezone(NY)
+            except ValueError:
+                cutoff=now
+        session=session[session.index<=cutoff]
+        if session.empty: raise RuntimeError("empty causal regular session")
         volumes=session["Volume"].fillna(0); typical=(session["High"]+session["Low"]+session["Close"])/3.0; total=float(volumes.sum()); vwap=float((typical*volumes).sum()/total) if total>0 else None
         closes=[float(v) for v in session["Close"].dropna().tolist()]; last5=(closes[-1]/closes[-6]-1.0)*100.0 if len(closes)>=6 and closes[-6]>0 else None
         minute_returns=[(closes[i]/closes[i-1]-1.0)*100.0 for i in range(1,len(closes)) if closes[i-1]>0]
@@ -73,10 +83,10 @@ def _to_open_decision(packet: Mapping[str,Any], base: ConfirmationDecision, snap
     forecast=_extract_forecast(packet)
     common=dict(symbol=base.symbol,current_price=base.current_price,entry_low=base.entry_low,entry_high=base.entry_high,stop_loss=base.stop_loss,targets=base.targets,max_position_pct=base.max_position_pct,return_from_open_pct=base.return_from_open_pct,volume_ratio=base.volume_ratio,probability_up_1d=forecast["p1"],probability_up_5d=forecast["p5"],probability_up_20d=forecast["p20"],expected_return_5d_pct=forecast["return5"],expected_alpha_5d_pct=forecast["alpha5"],forecast_confidence=forecast["confidence"],source_trade_date=base.source_trade_date,source_last_bar_time=base.source_last_bar_time)
     if snapshot is None:
-        return OpenTimingDecision(action="DATA_UNAVAILABLE",label=ACTION_LABELS["DATA_UNAVAILABLE"],reason=base.reason,starter_position_pct=0.0,better_entry_score=0.0,better_entry_probability=0.0,expected_better_price=None,expected_improvement_pct=0.0,recheck_minutes=15,terminal=False,**common)
+        return OpenTimingDecision(action="DATA_UNAVAILABLE",label=ACTION_LABELS["DATA_UNAVAILABLE"],reason=base.reason,starter_position_pct=0.0,better_entry_score=0.0,better_entry_probability=0.0,expected_better_price=None,expected_wait_minutes=0,better_entry_reason=None,expected_improvement_pct=0.0,recheck_minutes=15,terminal=False,**common)
     ext=_extended_intraday(base.symbol,evaluated_at,snapshot); timing=IntradayTimingModel().assess(base_status=base.status,current_price=snapshot.current_price,entry_low=base.entry_low,entry_high=base.entry_high,stop_loss=base.stop_loss,session_low=snapshot.session_low,session_high=snapshot.session_high,session_vwap=_finite(ext["session_vwap"]),last_5m_return_pct=_finite(ext["last_5m_return_pct"]),intraday_volatility_pct=_finite(ext["intraday_volatility_pct"]),minutes_since_open=int(ext["minutes_since_open"] or 0),probability_up_1d=forecast["p1"],probability_up_5d=forecast["p5"])
     reason=base.reason if timing.action in {"NO_BUY","INVALIDATED","DATA_UNAVAILABLE"} else f"{base.reason}；择时判断：{timing.rationale}"
-    return OpenTimingDecision(action=timing.action,label=ACTION_LABELS.get(timing.action,timing.action),reason=reason,starter_position_pct=base.starter_position_pct if timing.action=="BUY_NOW" else 0.0,better_entry_score=timing.better_entry_probability,better_entry_probability=timing.better_entry_probability,expected_better_price=timing.expected_better_price,expected_improvement_pct=timing.expected_improvement_pct,recheck_minutes=timing.recheck_minutes,terminal=timing.terminal,**common)
+    return OpenTimingDecision(action=timing.action,label=ACTION_LABELS.get(timing.action,timing.action),reason=reason,starter_position_pct=base.starter_position_pct if timing.action=="BUY_NOW" else 0.0,better_entry_score=timing.better_entry_probability,better_entry_probability=timing.better_entry_probability,expected_better_price=timing.expected_better_price,expected_wait_minutes=timing.expected_wait_minutes,better_entry_reason=timing.better_entry_reason,expected_improvement_pct=timing.expected_improvement_pct,recheck_minutes=timing.recheck_minutes,terminal=timing.terminal,**common)
 
 def _money(value:float|None)->str: return "N/A" if value is None else f"${value:.2f}"
 def _pct(value:float|None,*,probability:bool=False)->str:
