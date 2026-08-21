@@ -134,4 +134,5 @@ def test_semantic_price_state_ignores_ten_cent_noise_inside_entry_zone() -> None
 def test_open_timing_report_labels_better_entry_metric_as_uncalibrated_score() -> None:
     text = TIMING_RUNNER.read_text(encoding="utf-8")
     assert "更好买点启发式评分（未校准）" in text
-    assert '"semantics":"heuristic_score"' in text
+    compact = "".join(text.split())
+    assert '"semantics":"heuristic_score"' in compact
