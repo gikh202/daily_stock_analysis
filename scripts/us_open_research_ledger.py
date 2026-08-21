@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
-SCHEMA_VERSION = "us-open-research-ledger-v2"
+SCHEMA_VERSION = "us-open-research-ledger-v3"
 
 
 def _json(value: Any) -> str:
@@ -80,6 +80,11 @@ def connect(path: str | Path) -> sqlite3.Connection:
             better_entry_hit INTEGER,
             best_future_improvement_pct REAL,
             minutes_to_reference_better_price REAL,
+            actual_entry_price REAL,
+            price_improvement_pct REAL,
+            wait_close_return_pct REAL,
+            wait_mfe_pct REAL,
+            wait_mae_pct REAL,
             outcome_json TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_us_open_signals_date_symbol
@@ -96,10 +101,16 @@ def connect(path: str | Path) -> sqlite3.Connection:
         "better_entry_hit": "INTEGER",
         "best_future_improvement_pct": "REAL",
         "minutes_to_reference_better_price": "REAL",
+        "actual_entry_price": "REAL",
+        "price_improvement_pct": "REAL",
+        "wait_close_return_pct": "REAL",
+        "wait_mfe_pct": "REAL",
+        "wait_mae_pct": "REAL",
     }.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE us_open_signals ADD COLUMN {name} {ddl}")
     return conn
+
 
 def signal_key(
     *,
@@ -118,6 +129,7 @@ def signal_key(
             str(signal_bar_time or "").strip(),
         ]
     )
+
 
 def record_signal(
     path: str | Path,
@@ -213,6 +225,12 @@ def _execution_levels(packet: Mapping[str, Any]) -> tuple[float | None, float | 
     return stop, (targets[0] if targets else None)
 
 
+def _wait_minutes(decision: Mapping[str, Any]) -> int:
+    raw = _finite(decision.get("expected_wait_minutes"))
+    value = int(round(raw)) if raw is not None else 30
+    return max(1, min(240, value))
+
+
 def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None:
     frame = _normalize_frame(frame)
     if frame is None or frame.empty:
@@ -221,6 +239,7 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
     signal_price = _finite(row.get("signal_price"))
     if signal_time is None or signal_price is None or signal_price <= 0:
         return None
+
     session = frame[frame.index.date == signal_time.date()].between_time("09:30", "16:00")
     future = session[session.index > signal_time]
     if future.empty:
@@ -228,23 +247,6 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
     close_price = _finite(session.iloc[-1].get("Close"))
     if close_price is None or close_price <= 0:
         return None
-
-    future_high = float(future["High"].max())
-    future_low = float(future["Low"].min())
-    close_return = (close_price / signal_price - 1.0) * 100.0
-    mfe = (future_high / signal_price - 1.0) * 100.0
-    mae = (future_low / signal_price - 1.0) * 100.0
-    best_future_improvement = max(
-        0.0, (signal_price - future_low) / signal_price * 100.0
-    )
-
-    cutoff = signal_time + timedelta(minutes=60)
-    first_hour = future[future.index <= cutoff]
-    return_60m = None
-    if not first_hour.empty:
-        hour_price = _finite(first_hour.iloc[-1].get("Close"))
-        if hour_price is not None and hour_price > 0:
-            return_60m = (hour_price / signal_price - 1.0) * 100.0
 
     try:
         packet = json.loads(str(row.get("packet_json") or "{}"))
@@ -254,18 +256,59 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
         decision = json.loads(str(row.get("decision_json") or "{}"))
     except json.JSONDecodeError:
         decision = {}
+
+    future_high = float(future["High"].max())
+    future_low = float(future["Low"].min())
+    close_return = (close_price / signal_price - 1.0) * 100.0
+    mfe = (future_high / signal_price - 1.0) * 100.0
+    mae = (future_low / signal_price - 1.0) * 100.0
+
+    hour_cutoff = signal_time + timedelta(minutes=60)
+    first_hour = future[future.index <= hour_cutoff]
+    return_60m = None
+    if not first_hour.empty:
+        hour_price = _finite(first_hour.iloc[-1].get("Close"))
+        if hour_price is not None and hour_price > 0:
+            return_60m = (hour_price / signal_price - 1.0) * 100.0
+
     stop, target1 = _execution_levels(packet)
     reference_better_price = _finite(decision.get("expected_better_price"))
+    wait_minutes = _wait_minutes(decision)
+    wait_cutoff = signal_time + timedelta(minutes=wait_minutes)
+    wait_future = future[future.index <= wait_cutoff]
+
     better_entry_hit = None
     minutes_to_reference = None
+    actual_entry_price = None
+    price_improvement_pct = None
+    wait_close_return = None
+    wait_mfe = None
+    wait_mae = None
+
+    best_future_improvement = None
+    if not wait_future.empty:
+        wait_low = float(wait_future["Low"].min())
+        best_future_improvement = max(
+            0.0, (signal_price - wait_low) / signal_price * 100.0
+        )
+
     if reference_better_price is not None and 0 < reference_better_price < signal_price:
-        matching = future[future["Low"] <= reference_better_price]
+        matching = wait_future[wait_future["Low"] <= reference_better_price]
         better_entry_hit = not matching.empty
         if better_entry_hit:
             first_time = matching.index[0]
             minutes_to_reference = max(
                 0.0, (first_time - signal_time).total_seconds() / 60.0
             )
+            actual_entry_price = reference_better_price
+            price_improvement_pct = (
+                (signal_price - actual_entry_price) / signal_price * 100.0
+            )
+            post_entry = session[session.index >= first_time]
+            if not post_entry.empty:
+                wait_close_return = (close_price / actual_entry_price - 1.0) * 100.0
+                wait_mfe = (float(post_entry["High"].max()) / actual_entry_price - 1.0) * 100.0
+                wait_mae = (float(post_entry["Low"].min()) / actual_entry_price - 1.0) * 100.0
 
     stop_hit = False
     target1_hit = False
@@ -309,7 +352,14 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
         "better_entry_hit": better_entry_hit,
         "best_future_improvement_pct": best_future_improvement,
         "minutes_to_reference_better_price": minutes_to_reference,
+        "actual_entry_price": actual_entry_price,
+        "price_improvement_pct": price_improvement_pct,
+        "wait_close_return_pct": wait_close_return,
+        "wait_mfe_pct": wait_mfe,
+        "wait_mae_pct": wait_mae,
+        "expected_wait_minutes": wait_minutes,
     }
+
 
 def settle_pending(
     path: str | Path,
@@ -344,7 +394,9 @@ def settle_pending(
                         mfe_pct=?, mae_pct=?, stop_hit=?, target1_hit=?,
                         first_touch=?, modeled_exit_return_pct=?,
                         better_entry_hit=?, best_future_improvement_pct=?,
-                        minutes_to_reference_better_price=?, outcome_json=?
+                        minutes_to_reference_better_price=?, actual_entry_price=?,
+                        price_improvement_pct=?, wait_close_return_pct=?,
+                        wait_mfe_pct=?, wait_mae_pct=?, outcome_json=?
                     WHERE id=?
                     """,
                     (
@@ -357,13 +409,14 @@ def settle_pending(
                         int(bool(outcome["target1_hit"])),
                         outcome["first_touch"],
                         outcome["modeled_exit_return_pct"],
-                        (
-                            None
-                            if outcome["better_entry_hit"] is None
-                            else int(bool(outcome["better_entry_hit"]))
-                        ),
+                        None if outcome["better_entry_hit"] is None else int(bool(outcome["better_entry_hit"])),
                         outcome["best_future_improvement_pct"],
                         outcome["minutes_to_reference_better_price"],
+                        outcome["actual_entry_price"],
+                        outcome["price_improvement_pct"],
+                        outcome["wait_close_return_pct"],
+                        outcome["wait_mfe_pct"],
+                        outcome["wait_mae_pct"],
                         _json(outcome),
                         int(row["id"]),
                     ),
@@ -377,17 +430,14 @@ def settle_pending(
         "pending_scanned": settled + failed,
     }
 
+
 def summary(path: str | Path) -> dict[str, Any]:
     with connect(path) as conn:
         total = int(conn.execute("SELECT COUNT(*) FROM us_open_signals").fetchone()[0])
-        settled = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM us_open_signals WHERE settled_at IS NOT NULL"
-            ).fetchone()[0]
-        )
+        settled = int(conn.execute("SELECT COUNT(*) FROM us_open_signals WHERE settled_at IS NOT NULL").fetchone()[0])
         buy_rows = conn.execute(
             """
-            SELECT close_return_pct, return_60m_pct, mae_pct,
+            SELECT close_return_pct, return_60m_pct, mfe_pct, mae_pct,
                    modeled_exit_return_pct
             FROM us_open_signals
             WHERE decision_status='BUY_NOW' AND settled_at IS NOT NULL
@@ -397,50 +447,60 @@ def summary(path: str | Path) -> dict[str, Any]:
         wait_rows = conn.execute(
             """
             SELECT better_entry_hit, best_future_improvement_pct,
-                   minutes_to_reference_better_price
+                   minutes_to_reference_better_price, price_improvement_pct,
+                   wait_close_return_pct, wait_mfe_pct, wait_mae_pct,
+                   close_return_pct
             FROM us_open_signals
             WHERE decision_status='WAIT_BETTER_ENTRY' AND settled_at IS NOT NULL
             ORDER BY session_date, symbol, id
             """
         ).fetchall()
+
     close_returns = [float(row[0]) for row in buy_rows if row[0] is not None]
     hour_returns = [float(row[1]) for row in buy_rows if row[1] is not None]
-    maes = [float(row[2]) for row in buy_rows if row[2] is not None]
-    modeled = [float(row[3]) for row in buy_rows if row[3] is not None]
+    mfes = [float(row[2]) for row in buy_rows if row[2] is not None]
+    maes = [float(row[3]) for row in buy_rows if row[3] is not None]
+    modeled = [float(row[4]) for row in buy_rows if row[4] is not None]
+
     wait_hits = [int(row[0]) for row in wait_rows if row[0] is not None]
     wait_improvements = [float(row[1]) for row in wait_rows if row[1] is not None]
     wait_minutes = [float(row[2]) for row in wait_rows if row[2] is not None]
+    realized_improvements = [float(row[3]) for row in wait_rows if row[3] is not None]
+    wait_returns = [float(row[4]) for row in wait_rows if row[4] is not None]
+    wait_mfes = [float(row[5]) for row in wait_rows if row[5] is not None]
+    wait_maes = [float(row[6]) for row in wait_rows if row[6] is not None]
+    wait_immediate_returns = [float(row[7]) for row in wait_rows if row[7] is not None]
+
+    wait_alpha = None
+    if wait_returns and wait_immediate_returns:
+        wait_alpha = mean(wait_returns) - mean(wait_immediate_returns)
+
     return {
         "schema_version": SCHEMA_VERSION,
         "signals": total,
         "settled": settled,
         "pending": total - settled,
         "settled_buy_now": len(buy_rows),
-        "buy_close_win_rate": (
-            sum(value > 0 for value in close_returns) / len(close_returns)
-            if close_returns
-            else None
-        ),
+        "buy_close_win_rate": sum(value > 0 for value in close_returns) / len(close_returns) if close_returns else None,
         "buy_avg_close_return_pct": mean(close_returns) if close_returns else None,
         "buy_avg_60m_return_pct": mean(hour_returns) if hour_returns else None,
+        "buy_avg_mfe_pct": mean(mfes) if mfes else None,
         "buy_avg_mae_pct": mean(maes) if maes else None,
         "buy_avg_modeled_exit_return_pct": mean(modeled) if modeled else None,
         "settled_wait_better_entry": len(wait_rows),
-        "wait_better_entry_hit_rate": (
-            sum(wait_hits) / len(wait_hits) if wait_hits else None
-        ),
-        "wait_avg_best_future_improvement_pct": (
-            mean(wait_improvements) if wait_improvements else None
-        ),
-        "wait_avg_minutes_to_reference_better_price": (
-            mean(wait_minutes) if wait_minutes else None
-        ),
-        "better_entry_metric_status": (
-            "collecting_outcomes"
-            if len(wait_rows) < 30
-            else "eligible_for_calibration_research"
-        ),
+        "wait_better_entry_hit_rate": sum(wait_hits) / len(wait_hits) if wait_hits else None,
+        "wait_avg_best_future_improvement_pct": mean(wait_improvements) if wait_improvements else None,
+        "wait_avg_price_improvement_pct": mean(realized_improvements) if realized_improvements else None,
+        "wait_avg_minutes_to_reference_better_price": mean(wait_minutes) if wait_minutes else None,
+        "wait_avg_close_return_pct": mean(wait_returns) if wait_returns else None,
+        "wait_close_win_rate": sum(value > 0 for value in wait_returns) / len(wait_returns) if wait_returns else None,
+        "wait_avg_mfe_pct": mean(wait_mfes) if wait_mfes else None,
+        "wait_avg_mae_pct": mean(wait_maes) if wait_maes else None,
+        "wait_immediate_avg_close_return_pct": mean(wait_immediate_returns) if wait_immediate_returns else None,
+        "wait_alpha_vs_immediate_pct": wait_alpha,
+        "better_entry_metric_status": "collecting_outcomes" if len(wait_rows) < 30 else "eligible_for_calibration_research",
     }
+
 
 def export_summary(path: str | Path, output: str | Path) -> dict[str, Any]:
     payload = summary(path)
