@@ -13,12 +13,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.v6_daily.accuracy import HORIZON_BEARISH_THRESHOLD, HORIZON_BULLISH_THRESHOLD
 from src.v6_daily.accuracy_lab import wilson_interval
 from src.v6_daily.lab_replay import AccuracyReplayObservation, replay_accuracy_lab
 from src.v6_daily.replay import load_sqlite_series
 
 HORIZONS = (5, 10, 20)
-VARIANTS = ("baseline_5d", "confirm_10d", "confirm_10d_veto_20d")
+VARIANTS = (
+    "baseline_5d",
+    "confirm_10d",
+    "confirm_10d_margin_2pt",
+    "confirm_10d_veto_20d",
+    "confirm_10d_strict_20d",
+)
 
 
 def _direction(value: Any) -> str:
@@ -37,6 +44,22 @@ def _aligned(observations: Sequence[AccuracyReplayObservation]) -> list[dict[int
     return sorted(result, key=lambda block: (block[5].code, block[5].as_of_index))
 
 
+def _margin_points(item: AccuracyReplayObservation) -> float | None:
+    try:
+        score = float(item.score)
+    except (TypeError, ValueError):
+        return None
+    direction = _direction(item.direction)
+    horizon = int(item.horizon_days)
+    if direction == "bullish":
+        threshold = HORIZON_BULLISH_THRESHOLD.get(horizon)
+        return None if threshold is None else score - float(threshold)
+    if direction == "bearish":
+        threshold = HORIZON_BEARISH_THRESHOLD.get(horizon)
+        return None if threshold is None else float(threshold) - score
+    return None
+
+
 def _qualifies(block: Mapping[int, AccuracyReplayObservation], variant: str) -> bool:
     five, ten, twenty = block[5], block[10], block[20]
     d5, d10, d20 = map(_direction, (five.direction, ten.direction, twenty.direction))
@@ -48,6 +71,11 @@ def _qualifies(block: Mapping[int, AccuracyReplayObservation], variant: str) -> 
         return False
     if variant == "confirm_10d":
         return True
+    if variant == "confirm_10d_margin_2pt":
+        margin = _margin_points(ten)
+        return margin is not None and margin >= 2.0
+    if variant == "confirm_10d_strict_20d":
+        return d20 == d5
     opposite = "bearish" if d5 == "bullish" else "bullish"
     return d20 != opposite
 
@@ -170,7 +198,7 @@ def evaluate(
             "worst_year_avg_alpha_pct": min((row["avg_alpha_trade_return_pct"] for row in yearly if row["avg_alpha_trade_return_pct"] is not None), default=None),
         })
     return {
-        "method": "same_asof_multihorizon_confirmation_research_v1",
+        "method": "same_asof_multihorizon_confirmation_research_v2",
         "filter_contract": "filters use same-as-of champion directions only; future outcomes/MFE/MAE are evaluation-only",
         "execution_horizon_days": 5,
         "non_overlap_method": "per-symbol greedy 5D spacing after filtering",
