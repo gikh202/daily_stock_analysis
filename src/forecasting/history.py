@@ -105,8 +105,11 @@ class ForecastHistory:
                     JOIN v6_forecast_runs f ON f.id=o.forecast_run_id
                     LEFT JOIN v6_horizon_forecasts h
                       ON h.forecast_run_id=f.id AND h.horizon_days=o.horizon_days
-                    WHERE o.horizon_days=? AND o.end_trade_date < ?
-                      AND COALESCE(f.effective_trade_date, '') < ?
+                    WHERE o.horizon_days=?
+                      AND date(o.end_trade_date) IS NOT NULL
+                      AND date(o.end_trade_date) < date(?)
+                      AND date(f.effective_trade_date) IS NOT NULL
+                      AND date(f.effective_trade_date) < date(?)
                     ORDER BY o.end_trade_date ASC, o.id ASC
                     """,
                     (int(horizon_days), as_of, as_of),
@@ -122,13 +125,48 @@ class ForecastHistory:
             payload = parsed if isinstance(parsed, dict) else {}
         except (TypeError, ValueError, json.JSONDecodeError):
             payload = {}
-        value = _finite(payload.get(key))
-        if value is not None:
-            return _clamp(value, 0.01, 0.99)
-        # Legacy V6 rows may bootstrap only the production/Champion series from
-        # score/100. They never contained a Challenger probability, so missing
-        # Challenger evidence must stay missing instead of copying Champion data.
-        if key != "probability_up":
+
+        target_model = {
+            "probability_up": "calibrated_ensemble",
+            "challenger_probability_up": "momentum_challenger",
+        }.get(key)
+        if target_model is not None:
+            champion_model = str(payload.get("champion_model") or "").strip()
+            challenger_model = str(payload.get("challenger_model") or "").strip()
+            if champion_model or challenger_model:
+                if champion_model == target_model:
+                    value = _finite(payload.get("probability_up"))
+                    return (
+                        None
+                        if value is None
+                        else _clamp(value, 0.01, 0.99)
+                    )
+                if challenger_model == target_model:
+                    value = _finite(payload.get("challenger_probability_up"))
+                    return (
+                        None
+                        if value is None
+                        else _clamp(value, 0.01, 0.99)
+                    )
+                return None
+
+            # Pre-label V7 fixtures/rows used fixed field semantics: active
+            # ensemble in probability_up and momentum shadow in the challenger
+            # field. Preserve that interpretation only when model labels are
+            # absent; promoted rows always carry labels and are normalized above.
+            value = _finite(payload.get(key))
+            if value is not None:
+                return _clamp(value, 0.01, 0.99)
+        else:
+            value = _finite(payload.get(key))
+            if value is not None:
+                return _clamp(value, 0.01, 0.99)
+
+        # Legacy V6 rows may bootstrap only the calibrated-ensemble series from
+        # score/100. They never contained a momentum Challenger probability, so
+        # missing Challenger evidence must stay missing instead of copying the
+        # production score.
+        if target_model != "calibrated_ensemble":
             return None
         score = _finite(row["score"])
         return None if score is None else _clamp(score / 100.0, 0.01, 0.99)
@@ -251,6 +289,62 @@ class ForecastHistory:
             "log_loss": statistics.fmean(_log_loss(p,y) for p,y in samples),
         }
 
+    def paired_model_metrics(
+        self,
+        *,
+        as_of_date: str | None,
+        horizon_days: int,
+        regime: str | None = None,
+    ) -> Dict[str, Any]:
+        """Compare Champion and Challenger only on paired native predictions."""
+        if _valid_date(as_of_date) is None:
+            return {
+                "samples": 0,
+                "champion_brier_score": None,
+                "challenger_brier_score": None,
+                "champion_log_loss": None,
+                "challenger_log_loss": None,
+            }
+        rows = self._rows(as_of_date=as_of_date, horizon_days=horizon_days)
+        if regime:
+            key = str(regime).strip().lower()
+            rows = [
+                row
+                for row in rows
+                if str(row["market_regime"] or "unknown").strip().lower() == key
+            ]
+        paired: list[tuple[float, float, int]] = []
+        for row in rows:
+            champion_p = self._row_probability(row, "probability_up")
+            challenger_p = self._row_probability(row, "challenger_probability_up")
+            ret = _finite(row["return_pct"])
+            if champion_p is None or challenger_p is None or ret is None:
+                continue
+            paired.append((champion_p, challenger_p, int(ret > 0.0)))
+        if not paired:
+            return {
+                "samples": 0,
+                "champion_brier_score": None,
+                "challenger_brier_score": None,
+                "champion_log_loss": None,
+                "challenger_log_loss": None,
+            }
+        return {
+            "samples": len(paired),
+            "champion_brier_score": statistics.fmean(
+                (p - y) ** 2 for p, _, y in paired
+            ),
+            "challenger_brier_score": statistics.fmean(
+                (p - y) ** 2 for _, p, y in paired
+            ),
+            "champion_log_loss": statistics.fmean(
+                _log_loss(p, y) for p, _, y in paired
+            ),
+            "challenger_log_loss": statistics.fmean(
+                _log_loss(p, y) for _, p, y in paired
+            ),
+        }
+
     def select_champion(
         self,
         *,
@@ -260,31 +354,44 @@ class ForecastHistory:
         min_promotion_samples: int = 200,
         min_brier_improvement: float = 0.01,
     ) -> Dict[str, Any]:
-        champion = self.model_metrics(
+        paired = self.paired_model_metrics(
             as_of_date=as_of_date,
             horizon_days=horizon_days,
-            probability_key="probability_up",
             regime=regime,
         )
-        challenger = self.model_metrics(
-            as_of_date=as_of_date,
-            horizon_days=horizon_days,
-            probability_key="challenger_probability_up",
-            regime=regime,
-        )
+        champion = {
+            "samples": paired["samples"],
+            "brier_score": paired["champion_brier_score"],
+            "log_loss": paired["champion_log_loss"],
+        }
+        challenger = {
+            "samples": paired["samples"],
+            "brier_score": paired["challenger_brier_score"],
+            "log_loss": paired["challenger_log_loss"],
+        }
         promote = bool(
-            challenger["samples"] >= int(min_promotion_samples)
+            paired["samples"] >= int(min_promotion_samples)
             and champion["brier_score"] is not None
             and challenger["brier_score"] is not None
             and challenger["brier_score"]
             <= champion["brier_score"] - float(min_brier_improvement)
         )
         return {
-            "champion_model": "momentum_challenger" if promote else "calibrated_ensemble",
-            "challenger_model": "calibrated_ensemble" if promote else "momentum_challenger",
-            "status": "promoted" if promote else ("observing" if challenger["samples"] else "cold_start"),
+            "champion_model": (
+                "momentum_challenger" if promote else "calibrated_ensemble"
+            ),
+            "challenger_model": (
+                "calibrated_ensemble" if promote else "momentum_challenger"
+            ),
+            "status": (
+                "promoted"
+                if promote
+                else ("observing" if paired["samples"] else "cold_start")
+            ),
             "promotion_min_samples": int(min_promotion_samples),
             "min_brier_improvement": float(min_brier_improvement),
+            "evaluation_basis": "paired_forward_only",
+            "paired_samples": paired["samples"],
             "champion_metrics": champion,
             "challenger_metrics": challenger,
         }

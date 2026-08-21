@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
-SCHEMA_VERSION = "us-open-research-ledger-v1"
+SCHEMA_VERSION = "us-open-research-ledger-v2"
 
 
 def _json(value: Any) -> str:
@@ -77,6 +77,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
             target1_hit INTEGER,
             first_touch TEXT,
             modeled_exit_return_pct REAL,
+            better_entry_hit INTEGER,
+            best_future_improvement_pct REAL,
+            minutes_to_reference_better_price REAL,
             outcome_json TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_us_open_signals_date_symbol
@@ -85,19 +88,36 @@ def connect(path: str | Path) -> sqlite3.Connection:
             ON us_open_signals(decision_status, settled_at, session_date);
         """
     )
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(us_open_signals)")
+    }
+    for name, ddl in {
+        "better_entry_hit": "INTEGER",
+        "best_future_improvement_pct": "REAL",
+        "minutes_to_reference_better_price": "REAL",
+    }.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE us_open_signals ADD COLUMN {name} {ddl}")
     return conn
 
-
-def signal_key(*, session_date: str, symbol: str, policy_version: str, source_run_id: str | None) -> str:
+def signal_key(
+    *,
+    session_date: str,
+    symbol: str,
+    policy_version: str,
+    source_run_id: str | None,
+    signal_bar_time: str | None = None,
+) -> str:
     return "|".join(
         [
             session_date,
             symbol.strip().upper(),
             policy_version.strip(),
             str(source_run_id or "").strip(),
+            str(signal_bar_time or "").strip(),
         ]
     )
-
 
 def record_signal(
     path: str | Path,
@@ -121,6 +141,7 @@ def record_signal(
         symbol=symbol,
         policy_version=policy_version,
         source_run_id=source_run_id,
+        signal_bar_time=bar_time.isoformat(),
     )
     with connect(path) as conn:
         cursor = conn.execute(
@@ -143,7 +164,7 @@ def record_signal(
                 evaluated_at.astimezone(NY).isoformat(),
                 bar_time.isoformat(),
                 signal_price,
-                str(decision.get("status") or ""),
+                str(decision.get("action") or decision.get("status") or ""),
                 _json(packet),
                 _json(snapshot),
                 _json(decision),
@@ -213,6 +234,9 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
     close_return = (close_price / signal_price - 1.0) * 100.0
     mfe = (future_high / signal_price - 1.0) * 100.0
     mae = (future_low / signal_price - 1.0) * 100.0
+    best_future_improvement = max(
+        0.0, (signal_price - future_low) / signal_price * 100.0
+    )
 
     cutoff = signal_time + timedelta(minutes=60)
     first_hour = future[future.index <= cutoff]
@@ -226,12 +250,27 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
         packet = json.loads(str(row.get("packet_json") or "{}"))
     except json.JSONDecodeError:
         packet = {}
+    try:
+        decision = json.loads(str(row.get("decision_json") or "{}"))
+    except json.JSONDecodeError:
+        decision = {}
     stop, target1 = _execution_levels(packet)
+    reference_better_price = _finite(decision.get("expected_better_price"))
+    better_entry_hit = None
+    minutes_to_reference = None
+    if reference_better_price is not None and 0 < reference_better_price < signal_price:
+        matching = future[future["Low"] <= reference_better_price]
+        better_entry_hit = not matching.empty
+        if better_entry_hit:
+            first_time = matching.index[0]
+            minutes_to_reference = max(
+                0.0, (first_time - signal_time).total_seconds() / 60.0
+            )
+
     stop_hit = False
     target1_hit = False
     first_touch = "close"
     modeled_exit = close_return
-
     for _, bar in future.iterrows():
         low = _finite(bar.get("Low"))
         high = _finite(bar.get("High"))
@@ -245,11 +284,17 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
             break
         if stop_here:
             first_touch = "stop"
-            modeled_exit = (stop / signal_price - 1.0) * 100.0 if stop is not None else None
+            modeled_exit = (
+                (stop / signal_price - 1.0) * 100.0 if stop is not None else None
+            )
             break
         if target_here:
             first_touch = "target1"
-            modeled_exit = (target1 / signal_price - 1.0) * 100.0 if target1 is not None else None
+            modeled_exit = (
+                (target1 / signal_price - 1.0) * 100.0
+                if target1 is not None
+                else None
+            )
             break
 
     return {
@@ -261,8 +306,10 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
         "target1_hit": target1_hit,
         "first_touch": first_touch,
         "modeled_exit_return_pct": modeled_exit,
+        "better_entry_hit": better_entry_hit,
+        "best_future_improvement_pct": best_future_improvement,
+        "minutes_to_reference_better_price": minutes_to_reference,
     }
-
 
 def settle_pending(
     path: str | Path,
@@ -295,7 +342,9 @@ def settle_pending(
                     UPDATE us_open_signals
                     SET settled_at=?, close_return_pct=?, return_60m_pct=?,
                         mfe_pct=?, mae_pct=?, stop_hit=?, target1_hit=?,
-                        first_touch=?, modeled_exit_return_pct=?, outcome_json=?
+                        first_touch=?, modeled_exit_return_pct=?,
+                        better_entry_hit=?, best_future_improvement_pct=?,
+                        minutes_to_reference_better_price=?, outcome_json=?
                     WHERE id=?
                     """,
                     (
@@ -308,6 +357,13 @@ def settle_pending(
                         int(bool(outcome["target1_hit"])),
                         outcome["first_touch"],
                         outcome["modeled_exit_return_pct"],
+                        (
+                            None
+                            if outcome["better_entry_hit"] is None
+                            else int(bool(outcome["better_entry_hit"]))
+                        ),
+                        outcome["best_future_improvement_pct"],
+                        outcome["minutes_to_reference_better_price"],
                         _json(outcome),
                         int(row["id"]),
                     ),
@@ -315,20 +371,35 @@ def settle_pending(
                 settled += 1
             except Exception:
                 failed += 1
-    return {"settled": settled, "failed": failed, "pending_scanned": settled + failed}
-
+    return {
+        "settled": settled,
+        "failed": failed,
+        "pending_scanned": settled + failed,
+    }
 
 def summary(path: str | Path) -> dict[str, Any]:
     with connect(path) as conn:
         total = int(conn.execute("SELECT COUNT(*) FROM us_open_signals").fetchone()[0])
         settled = int(
-            conn.execute("SELECT COUNT(*) FROM us_open_signals WHERE settled_at IS NOT NULL").fetchone()[0]
+            conn.execute(
+                "SELECT COUNT(*) FROM us_open_signals WHERE settled_at IS NOT NULL"
+            ).fetchone()[0]
         )
         buy_rows = conn.execute(
             """
-            SELECT close_return_pct, return_60m_pct, mae_pct, modeled_exit_return_pct
+            SELECT close_return_pct, return_60m_pct, mae_pct,
+                   modeled_exit_return_pct
             FROM us_open_signals
             WHERE decision_status='BUY_NOW' AND settled_at IS NOT NULL
+            ORDER BY session_date, symbol, id
+            """
+        ).fetchall()
+        wait_rows = conn.execute(
+            """
+            SELECT better_entry_hit, best_future_improvement_pct,
+                   minutes_to_reference_better_price
+            FROM us_open_signals
+            WHERE decision_status='WAIT_BETTER_ENTRY' AND settled_at IS NOT NULL
             ORDER BY session_date, symbol, id
             """
         ).fetchall()
@@ -336,6 +407,9 @@ def summary(path: str | Path) -> dict[str, Any]:
     hour_returns = [float(row[1]) for row in buy_rows if row[1] is not None]
     maes = [float(row[2]) for row in buy_rows if row[2] is not None]
     modeled = [float(row[3]) for row in buy_rows if row[3] is not None]
+    wait_hits = [int(row[0]) for row in wait_rows if row[0] is not None]
+    wait_improvements = [float(row[1]) for row in wait_rows if row[1] is not None]
+    wait_minutes = [float(row[2]) for row in wait_rows if row[2] is not None]
     return {
         "schema_version": SCHEMA_VERSION,
         "signals": total,
@@ -343,14 +417,30 @@ def summary(path: str | Path) -> dict[str, Any]:
         "pending": total - settled,
         "settled_buy_now": len(buy_rows),
         "buy_close_win_rate": (
-            sum(value > 0 for value in close_returns) / len(close_returns) if close_returns else None
+            sum(value > 0 for value in close_returns) / len(close_returns)
+            if close_returns
+            else None
         ),
         "buy_avg_close_return_pct": mean(close_returns) if close_returns else None,
         "buy_avg_60m_return_pct": mean(hour_returns) if hour_returns else None,
         "buy_avg_mae_pct": mean(maes) if maes else None,
         "buy_avg_modeled_exit_return_pct": mean(modeled) if modeled else None,
+        "settled_wait_better_entry": len(wait_rows),
+        "wait_better_entry_hit_rate": (
+            sum(wait_hits) / len(wait_hits) if wait_hits else None
+        ),
+        "wait_avg_best_future_improvement_pct": (
+            mean(wait_improvements) if wait_improvements else None
+        ),
+        "wait_avg_minutes_to_reference_better_price": (
+            mean(wait_minutes) if wait_minutes else None
+        ),
+        "better_entry_metric_status": (
+            "collecting_outcomes"
+            if len(wait_rows) < 30
+            else "eligible_for_calibration_research"
+        ),
     }
-
 
 def export_summary(path: str | Path, output: str | Path) -> dict[str, Any]:
     payload = summary(path)

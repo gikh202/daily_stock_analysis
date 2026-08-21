@@ -43,15 +43,18 @@ class ForecastDecisionPolicy:
         if reward_risk < 1.15:
             gates.append("insufficient_distribution_reward_risk")
 
+        bearish = bool(h5.probability_up <= 0.42 and h5.expected_return_pct < 0.0 and h20.probability_up <= 0.47)
         constructive = bool(h5.probability_up >= 0.58 and h5.expected_return_pct > 0.35 and h5.expected_alpha_vs_spy_pct > 0.0 and h20.probability_up >= 0.52 and h20.expected_return_pct >= 0.0 and reward_risk >= 1.15 and confidence >= 0.50 and risk <= 60.0)
         watchable = bool(h5.probability_up >= 0.52 and h5.expected_return_pct > 0.0 and h20.probability_up >= 0.48 and risk <= 68.0)
-        bearish = bool(h5.probability_up <= 0.42 and h5.expected_return_pct < 0.0 and h20.probability_up <= 0.47)
-        if constructive:
-            decision = "BUY_SETUP"
-            rationale = f"5D calibrated P(up)={h5.probability_up:.1%}, expected return {h5.expected_return_pct:+.2f}%, expected alpha {h5.expected_alpha_vs_spy_pct:+.2f}%, distribution R/R={reward_risk:.2f}"
-        elif bearish:
+        if bearish:
             decision = "AVOID"
             rationale = f"5D/20D calibrated probabilities are bearish ({h5.probability_up:.1%}/{h20.probability_up:.1%}) with negative expected return"
+        elif gates:
+            decision = "WAIT"
+            rationale = "execution gates block new exposure: " + ", ".join(gates)
+        elif constructive:
+            decision = "BUY_SETUP"
+            rationale = f"5D calibrated P(up)={h5.probability_up:.1%}, expected return {h5.expected_return_pct:+.2f}%, expected alpha {h5.expected_alpha_vs_spy_pct:+.2f}%, distribution R/R={reward_risk:.2f}"
         elif watchable:
             decision = "WATCH"
             rationale = f"forecast is constructive but edge is not strong enough for immediate setup: 5D P(up)={h5.probability_up:.1%}, return={h5.expected_return_pct:+.2f}%, alpha={h5.expected_alpha_vs_spy_pct:+.2f}%"

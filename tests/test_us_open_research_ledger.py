@@ -42,11 +42,14 @@ def _packet(stop=98.0, target=104.0):
 def _decision(status="BUY_NOW"):
     return {
         "symbol": "TEST",
-        "status": status,
+        "action": status,
         "current_price": 100.0,
         "source_last_bar_time": "2026-08-14T09:44:00-04:00",
         "return_from_open_pct": 0.4,
         "volume_ratio": 1.1,
+        "better_entry_score": 0.7,
+        "better_entry_probability": 0.7,
+        "expected_better_price": 99.5,
     }
 
 
@@ -190,3 +193,56 @@ def test_reconstruct_snapshot_does_not_peek_after_signal_bar():
     assert snapshot["session_high"] == pytest.approx(100.2)
     assert snapshot["session_low"] == pytest.approx(99.8)
     assert snapshot["bar_count"] == 15
+
+
+def test_record_signal_keeps_multiple_intraday_observations(tmp_path):
+    db = tmp_path / "research.db"
+    first_snapshot = _snapshot()
+    first_decision = _decision("WAIT_BETTER_ENTRY")
+    second_snapshot = dict(
+        first_snapshot,
+        current_price=99.8,
+        last_bar_time="2026-08-14T10:00:00-04:00",
+    )
+    second_decision = dict(
+        first_decision,
+        current_price=99.8,
+        source_last_bar_time="2026-08-14T10:00:00-04:00",
+    )
+    common = dict(
+        packet=_packet(),
+        evaluated_at=datetime(2026, 8, 14, 10, 1, tzinfo=NY),
+        policy_version="us-open-timing-v7.1",
+        source_run_id="123",
+    )
+    assert record_signal(
+        db, snapshot=first_snapshot, decision=first_decision, **common
+    ) is True
+    assert record_signal(
+        db, snapshot=first_snapshot, decision=first_decision, **common
+    ) is False
+    assert record_signal(
+        db, snapshot=second_snapshot, decision=second_decision, **common
+    ) is True
+    assert summary(db)["signals"] == 2
+
+
+def test_wait_better_entry_outcome_learns_reference_price_hit():
+    row = {
+        "signal_bar_time": "2026-08-14T09:44:00-04:00",
+        "signal_price": 100.0,
+        "packet_json": json.dumps(_packet(stop=98.0, target=104.0)),
+        "decision_json": json.dumps(_decision("WAIT_BETTER_ENTRY")),
+    }
+    frame = _frame(
+        [
+            ("2026-08-14 09:44", 100.0, 100.1, 99.9, 100.0, 1000),
+            ("2026-08-14 09:50", 100.0, 100.2, 99.4, 99.7, 1200),
+            ("2026-08-14 16:00", 101.0, 101.2, 100.8, 101.0, 1000),
+        ]
+    )
+    outcome = compute_outcome(row, frame)
+    assert outcome is not None
+    assert outcome["better_entry_hit"] is True
+    assert outcome["best_future_improvement_pct"] == pytest.approx(0.6)
+    assert outcome["minutes_to_reference_better_price"] == pytest.approx(6.0)

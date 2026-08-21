@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Check triggering run has confirmation evidence
+      - name: Check triggering run has timing evidence
         id: evidence
         uses: actions/github-script@v7
         with:
@@ -34,11 +34,11 @@ jobs:
               per_page: 100,
             });
             const matches = (artifacts.data.artifacts || [])
-              .filter((item) => String(item.name || '').startsWith('us-open-confirmation-'));
+              .filter((item) => String(item.name || '').startsWith('us-open-timing-'));
             const capture = matches.length > 0;
             core.info(capture
-              ? `Found ${matches.length} open-confirmation artifact(s); capture research evidence.`
-              : 'Triggering run was a successful skip/retry with no confirmation artifact; research capture is skipped.');
+              ? `Found ${matches.length} open-timing artifact(s); capture research evidence.`
+              : 'Triggering run was a successful skip/retry with no timing artifact; research capture is skipped.');
             core.setOutput('capture', capture ? 'true' : 'false');
 
       - name: Checkout exact production code
@@ -60,17 +60,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas
 
-      - name: Download triggering open-confirmation artifact
+      - name: Download triggering open-timing artifact
         if: ${{ steps.evidence.outputs.capture == 'true' }}
         uses: actions/download-artifact@v5
         with:
-          pattern: us-open-confirmation-*
+          pattern: us-open-timing-*
           path: triggering_open
           merge-multiple: true
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Locate confirmation and source V6 run
+      - name: Locate timing decision and source V6 run
         id: source
         if: ${{ steps.evidence.outputs.capture == 'true' }}
         shell: bash
@@ -78,7 +78,7 @@ jobs:
           set -euo pipefail
           JSON="$(find triggering_open -type f -name 'us_open_confirmation_latest.json' -print | sort | tail -n 1 || true)"
           if [ -z "$JSON" ]; then
-            echo '::error::Triggering open-confirmation artifact is missing JSON evidence.'
+            echo '::error::Triggering open-timing artifact is missing JSON evidence.'
             exit 2
           fi
           SOURCE_RUN="$(python - "$JSON" <<'PY'
@@ -88,7 +88,7 @@ jobs:
           PY
           )"
           if [ -z "$SOURCE_RUN" ]; then
-            echo '::error::Open confirmation JSON has no source_run_id.'
+            echo '::error::Open timing JSON has no source_run_id.'
             exit 2
           fi
           echo "confirmation_json=$JSON" >> "$GITHUB_OUTPUT"
@@ -187,4 +187,4 @@ jobs:
 
       - name: Report skipped research capture
         if: ${{ steps.evidence.outputs.capture != 'true' }}
-        run: echo 'No open-confirmation Artifact on triggering run; nothing to persist.'
+        run: echo 'No open-timing artifact on triggering run; nothing to persist.'
