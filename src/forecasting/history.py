@@ -125,13 +125,48 @@ class ForecastHistory:
             payload = parsed if isinstance(parsed, dict) else {}
         except (TypeError, ValueError, json.JSONDecodeError):
             payload = {}
-        value = _finite(payload.get(key))
-        if value is not None:
-            return _clamp(value, 0.01, 0.99)
-        # Legacy V6 rows may bootstrap only the production/Champion series from
-        # score/100. They never contained a Challenger probability, so missing
-        # Challenger evidence must stay missing instead of copying Champion data.
-        if key != "probability_up":
+
+        target_model = {
+            "probability_up": "calibrated_ensemble",
+            "challenger_probability_up": "momentum_challenger",
+        }.get(key)
+        if target_model is not None:
+            champion_model = str(payload.get("champion_model") or "").strip()
+            challenger_model = str(payload.get("challenger_model") or "").strip()
+            if champion_model or challenger_model:
+                if champion_model == target_model:
+                    value = _finite(payload.get("probability_up"))
+                    return (
+                        None
+                        if value is None
+                        else _clamp(value, 0.01, 0.99)
+                    )
+                if challenger_model == target_model:
+                    value = _finite(payload.get("challenger_probability_up"))
+                    return (
+                        None
+                        if value is None
+                        else _clamp(value, 0.01, 0.99)
+                    )
+                return None
+
+            # Pre-label V7 fixtures/rows used fixed field semantics: active
+            # ensemble in probability_up and momentum shadow in the challenger
+            # field. Preserve that interpretation only when model labels are
+            # absent; promoted rows always carry labels and are normalized above.
+            value = _finite(payload.get(key))
+            if value is not None:
+                return _clamp(value, 0.01, 0.99)
+        else:
+            value = _finite(payload.get(key))
+            if value is not None:
+                return _clamp(value, 0.01, 0.99)
+
+        # Legacy V6 rows may bootstrap only the calibrated-ensemble series from
+        # score/100. They never contained a momentum Challenger probability, so
+        # missing Challenger evidence must stay missing instead of copying the
+        # production score.
+        if target_model != "calibrated_ensemble":
             return None
         score = _finite(row["score"])
         return None if score is None else _clamp(score / 100.0, 0.01, 0.99)
