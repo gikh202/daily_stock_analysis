@@ -90,7 +90,7 @@ jobs:
 
       - name: Run causal WAIT vs immediate A/B backtest
         run: |
-          python scripts/backtest_wait_better_entry.py \
+          python -m scripts.backtest_wait_better_entry \
             --v6-db '${{ steps.db.outputs.path }}' \
             --output wait_better_entry_backtest.json
 
