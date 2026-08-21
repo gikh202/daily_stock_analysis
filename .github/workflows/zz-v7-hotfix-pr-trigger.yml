@@ -19,25 +19,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Apply audited patch embedded in one-shot workflow
-        shell: bash
-        run: |
-          python - <<'EXTRACT'
-          from pathlib import Path
-
-          source = Path('.github/workflows/zz-v7-post-merge-hotfix.yml').read_text(encoding='utf-8')
-          start_marker = "          python - <<'PY'\n"
-          end_marker = "\n          PY\n\n      - name: Targeted validation"
-          if start_marker not in source or end_marker not in source:
-              raise SystemExit('unable to locate audited patch body')
-          body = source.split(start_marker, 1)[1].split(end_marker, 1)[0]
-          prefix = "          "
-          body = "\n".join(
-              line[len(prefix):] if line.startswith(prefix) else line
-              for line in body.splitlines()
-          ) + "\n"
-          exec(compile(body, 'v7_post_merge_hotfix', 'exec'), {})
-          EXTRACT
+      - name: Apply audited V7 patch
+        run: python .github/scripts/apply_v7_post_merge_hotfix.py
       - name: Targeted validation
         shell: bash
         run: |
@@ -51,13 +34,16 @@ jobs:
             tests/test_us_open_research_ledger.py \
             tests/test_us_open_research_workflow_contract.py \
             tests/test_notification_streamlining.py
-      - name: Commit audited fixes and remove one-shot workflows
+      - name: Commit audited fixes and remove temporary tooling
         shell: bash
         run: |
-          rm -f .github/workflows/zz-v7-post-merge-hotfix.yml .github/workflows/zz-v7-hotfix-pr-trigger.yml
+          rm -f \
+            .github/workflows/zz-v7-post-merge-hotfix.yml \
+            .github/workflows/zz-v7-hotfix-pr-trigger.yml \
+            .github/scripts/apply_v7_post_merge_hotfix.py
           git config user.name 'gikh202'
           git config user.email 'gikh202@gmail.com'
-          git add -- \
+          git add -A -- \
             src/forecasting/history.py \
             src/forecasting/engine.py \
             src/forecasting/decision.py \
@@ -74,7 +60,8 @@ jobs:
             docs/us-open-runtime-confirmation.md \
             docs/CHANGELOG.md \
             .github/workflows/zz-v7-post-merge-hotfix.yml \
-            .github/workflows/zz-v7-hotfix-pr-trigger.yml
+            .github/workflows/zz-v7-hotfix-pr-trigger.yml \
+            .github/scripts/apply_v7_post_merge_hotfix.py
           git diff --cached --check
           git commit -m 'fix: harden V7 forecast and intraday learning'
           git push origin HEAD:fix/v7-post-merge-audit
