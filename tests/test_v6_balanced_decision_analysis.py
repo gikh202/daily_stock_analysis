@@ -159,9 +159,10 @@ def test_wait_keeps_bull_case_as_conditional_but_not_executable_yet() -> None:
         report_date="2026-08-11",
     )
 
+    # This raw fusion renderer owns verdict/evidence prose only. Final execution
+    # authorization and executable-position lines are injected and validated by
+    # final_decision_renderer.apply_final_decision_contract().
     assert "**是否值得买**：**条件式可买**" in report
-    assert "**当前执行授权**：**否**" in report
-    assert "**当前可执行仓位上限**：**0.0%**" in report
     assert "多头排列且相对强弱领先" in report
     assert "RSI超买且上涨缩量" in report
     assert "看多逻辑仍保留" in report
