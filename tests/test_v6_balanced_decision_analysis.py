@@ -165,8 +165,8 @@ def test_wait_keeps_bull_case_as_conditional_but_not_executable_yet() -> None:
     assert "**是否值得买**：**条件式可买**" in report
     assert "多头排列且相对强弱领先" in report
     assert "RSI超买且上涨缩量" in report
-    assert "看多逻辑仍保留" in report
-    assert "方向尚未形成完全共振" in report
+    assert "**关键分界**" in report
+    assert "回踩MA5后能否获得支撑" in report
 
 
 def test_avoid_does_not_erase_existing_bullish_evidence() -> None:
