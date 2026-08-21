@@ -45,8 +45,34 @@ def _row():
 def test_wait_expected_price_hit():
     result = compute_outcome(_row(), _frame(98.0))
     assert result["better_entry_hit"] is True
+    assert result["actual_entry_price"] == 99.0
+    assert result["price_improvement_pct"] == 1.0
 
 
 def test_wait_expected_price_miss():
     result = compute_outcome(_row(), _frame(100.5))
     assert result["better_entry_hit"] is False
+    assert result["actual_entry_price"] is None
+
+
+def test_late_session_low_does_not_count_as_wait_hit():
+    rows = [
+        ("2026-08-14 09:44", 100.0, 100.2, 99.8, 100.0, 1000),
+        ("2026-08-14 10:10", 100.0, 100.8, 100.2, 100.5, 1000),
+        ("2026-08-14 10:15", 100.5, 100.7, 98.0, 98.5, 1000),
+        ("2026-08-14 16:00", 101.0, 101.2, 100.8, 101.0, 1000),
+    ]
+    idx = pd.DatetimeIndex([pd.Timestamp(x[0], tz="America/New_York") for x in rows])
+    frame = pd.DataFrame(
+        {
+            "Open": [x[1] for x in rows],
+            "High": [x[2] for x in rows],
+            "Low": [x[3] for x in rows],
+            "Close": [x[4] for x in rows],
+            "Volume": [x[5] for x in rows],
+        },
+        index=idx,
+    )
+    result = compute_outcome(_row(), frame)
+    assert result["better_entry_hit"] is False
+    assert result["minutes_to_reference_better_price"] is None
