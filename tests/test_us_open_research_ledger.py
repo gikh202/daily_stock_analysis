@@ -39,7 +39,7 @@ def _packet(stop=98.0, target=104.0):
     }
 
 
-def _decision(status="BUY_NOW"):
+def _decision(status="BUY_NOW", expected_better_price=99.5):
     return {
         "symbol": "TEST",
         "action": status,
@@ -49,7 +49,9 @@ def _decision(status="BUY_NOW"):
         "volume_ratio": 1.1,
         "better_entry_score": 0.7,
         "better_entry_probability": 0.7,
-        "expected_better_price": 99.5,
+        "expected_better_price": expected_better_price,
+        "expected_wait_minutes": 30,
+        "better_entry_reason": "atr_pullback",
     }
 
 
@@ -246,3 +248,41 @@ def test_wait_better_entry_outcome_learns_reference_price_hit():
     assert outcome["better_entry_hit"] is True
     assert outcome["best_future_improvement_pct"] == pytest.approx(0.6)
     assert outcome["minutes_to_reference_better_price"] == pytest.approx(6.0)
+
+
+def test_wait_settlement_marks_target_hit_when_future_low_crosses_expected_price():
+    row = {
+        "signal_bar_time": "2026-08-14T09:44:00-04:00",
+        "signal_price": 100.0,
+        "packet_json": json.dumps(_packet()),
+        "decision_json": json.dumps(_decision("WAIT_BETTER_ENTRY", expected_better_price=99.0)),
+    }
+    frame = _frame(
+        [
+            ("2026-08-14 09:44", 100.0, 100.1, 99.9, 100.0, 1000),
+            ("2026-08-14 09:50", 100.0, 100.2, 98.0, 98.5, 1200),
+            ("2026-08-14 16:00", 101.0, 101.2, 100.8, 101.0, 1000),
+        ]
+    )
+    outcome = compute_outcome(row, frame)
+    assert outcome is not None
+    assert outcome["better_entry_hit"] is True
+
+
+def test_wait_settlement_marks_target_miss_when_future_low_stays_above_expected_price():
+    row = {
+        "signal_bar_time": "2026-08-14T09:44:00-04:00",
+        "signal_price": 100.0,
+        "packet_json": json.dumps(_packet()),
+        "decision_json": json.dumps(_decision("WAIT_BETTER_ENTRY", expected_better_price=99.0)),
+    }
+    frame = _frame(
+        [
+            ("2026-08-14 09:44", 100.0, 100.1, 99.9, 100.0, 1000),
+            ("2026-08-14 09:50", 100.6, 101.0, 100.5, 100.8, 1200),
+            ("2026-08-14 16:00", 101.0, 101.2, 100.5, 101.0, 1000),
+        ]
+    )
+    outcome = compute_outcome(row, frame)
+    assert outcome is not None
+    assert outcome["better_entry_hit"] is False
