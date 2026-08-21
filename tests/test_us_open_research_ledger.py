@@ -50,6 +50,8 @@ def _decision(status="BUY_NOW"):
         "better_entry_score": 0.7,
         "better_entry_probability": 0.7,
         "expected_better_price": 99.5,
+        "expected_wait_minutes": 30,
+        "better_entry_reason": "intraday_volatility_pullback",
     }
 
 
@@ -246,3 +248,29 @@ def test_wait_better_entry_outcome_learns_reference_price_hit():
     assert outcome["better_entry_hit"] is True
     assert outcome["best_future_improvement_pct"] == pytest.approx(0.6)
     assert outcome["minutes_to_reference_better_price"] == pytest.approx(6.0)
+
+
+
+def test_wait_better_entry_does_not_count_hit_after_promised_wait_window():
+    decision = _decision("WAIT_BETTER_ENTRY")
+    decision["expected_wait_minutes"] = 15
+    row = {
+        "signal_bar_time": "2026-08-14T09:44:00-04:00",
+        "signal_price": 100.0,
+        "packet_json": json.dumps(_packet(stop=98.0, target=104.0)),
+        "decision_json": json.dumps(decision),
+    }
+    frame = _frame(
+        [
+            ("2026-08-14 09:44", 100.0, 100.1, 99.9, 100.0, 1000),
+            ("2026-08-14 09:50", 100.0, 100.4, 99.8, 100.2, 1200),
+            ("2026-08-14 10:30", 100.2, 100.3, 99.4, 99.7, 1200),
+            ("2026-08-14 16:00", 101.0, 101.2, 100.8, 101.0, 1000),
+        ]
+    )
+    outcome = compute_outcome(row, frame)
+    assert outcome is not None
+    assert outcome["better_entry_hit"] is False
+    assert outcome["minutes_to_reference_better_price"] is None
+    assert outcome["expected_wait_minutes"] == 15
+    assert outcome["best_future_improvement_pct"] == pytest.approx(0.2)
