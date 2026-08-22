@@ -216,6 +216,7 @@ def classify_confirmation(
     worth_buying_raw = assessment.get("worth_buying")
     prior_worth_buying = worth_buying_raw if isinstance(worth_buying_raw, bool) else None
     prior_execution_authorized = bool(assessment.get("execution_authorized"))
+    prior_execution_status = str(assessment.get("execution_status") or "").strip().upper()
 
     entry = _float_pair(execution.get("entry_zone"))
     stop = _finite(execution.get("stop_loss"))
@@ -271,6 +272,15 @@ def classify_confirmation(
         volume_ratio=snapshot.volume_ratio,
         source_last_bar_time=snapshot.last_bar_time,
     )
+
+    if prior_execution_status == "REJECTED":
+        return ConfirmationDecision(
+            status="NO_BUY",
+            label=STATUS_LABELS["NO_BUY"],
+            reason="昨晚执行状态为 REJECTED；盘中确认器不能绕过收盘风险拒绝。",
+            **live,
+            **base,
+        )
 
     if prior_verdict == "avoid" or prior_worth_buying is False:
         return ConfirmationDecision(

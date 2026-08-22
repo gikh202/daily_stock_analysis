@@ -321,6 +321,26 @@ def _to_open_decision(
     )
 
 
+
+def _enforce_execution_contract(decision: OpenTimingDecision) -> OpenTimingDecision:
+    """Final fail-safe: only explicit REJECTED may veto a confirmed BUY_NOW.
+
+    CONDITIONAL_APPROVED can become executable after the confirmation layer proves
+    its declared price/confirmation condition has been satisfied intraday.
+    """
+    if decision.action != "BUY_NOW" or decision.execution_status != "REJECTED":
+        return decision
+    payload = asdict(decision)
+    payload.update(
+        action="NO_BUY",
+        label=ACTION_LABELS["NO_BUY"],
+        reason=decision.reason + "；收盘风险层已明确 REJECTED，盘中不得绕过。",
+        starter_position_pct=0.0,
+        terminal=True,
+    )
+    return OpenTimingDecision(**payload)
+
+
 def _money(value: float | None) -> str:
     return "N/A" if value is None else f"${value:.2f}"
 
@@ -583,9 +603,10 @@ def run(
             data_error=error,
             **v2_policy,
         )
-        decisions.append(
-            _to_open_decision(packet, base, snapshot, evaluated_at=generated_at)
+        decision = _to_open_decision(
+            packet, base, snapshot, evaluated_at=generated_at
         )
+        decisions.append(_enforce_execution_contract(decision))
     if not decisions:
         raise RuntimeError("no symbols available in prior final decision payload")
     if live_success == 0 and not allow_all_unavailable:
