@@ -1,15 +1,17 @@
 name: Temporary pipeline volume-price codemod
 
 on:
-  push:
+  pull_request:
+    types: [synchronize]
     branches:
-      - refactor/pipeline-volume-price-stage
+      - main
 
 permissions:
   contents: write
 
 jobs:
   codemod:
+    if: github.head_ref == 'refactor/pipeline-volume-price-stage'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
