@@ -154,7 +154,7 @@ def test_optional_dependencies_fail_open_and_keep_default_profile_and_logs() -> 
 
 def test_pipeline_composition_root_delegates_optional_fail_open_policy() -> None:
     tree = ast.parse(
-        Path("src/core/pipeline_dependencies.py").read_text(encoding="utf-8")
+        Path("src/bootstrap/pipeline_dependencies.py").read_text(encoding="utf-8")
     )
 
     imported_modules = {
@@ -169,7 +169,7 @@ def test_pipeline_composition_root_delegates_optional_fail_open_policy() -> None
         and node.name == "build_pipeline_dependencies"
     )
 
-    assert "src.core.pipeline_optional_dependencies" in imported_modules
+    assert "src.bootstrap.pipeline_optional_dependencies" in imported_modules
     assert not any(isinstance(node, ast.Try) for node in ast.walk(build_function))
     calls = [
         node

@@ -64,7 +64,9 @@ def test_pipeline_accepts_prebuilt_dependencies_without_reassembly() -> None:
 
 
 def test_pipeline_init_delegates_concrete_assembly_to_composition_root() -> None:
-    tree = ast.parse(Path("src/core/pipeline.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        Path("src/application/analysis/pipeline_impl.py").read_text(encoding="utf-8")
+    )
     pipeline_class = next(
         node
         for node in tree.body

@@ -107,7 +107,9 @@ def test_market_data_stage_uses_injected_logger() -> None:
 
 
 def test_pipeline_market_data_entrypoint_stays_a_thin_stage_delegate() -> None:
-    tree = ast.parse(Path("src/core/pipeline.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        Path("src/application/analysis/pipeline_impl.py").read_text(encoding="utf-8")
+    )
     pipeline_class = next(
         node
         for node in tree.body
