@@ -1,30 +1,35 @@
 # -*- coding: utf-8 -*-
-"""
-===================================
-分析服务层
-===================================
+"""Application service for API-triggered stock analysis.
 
-职责：
-1. 封装股票分析逻辑
-2. 调用 analyzer 和 pipeline 执行分析
-3. 保存分析结果到数据库
+The service owns request/response adaptation and diagnostics.  Pipeline
+construction and configuration lookup are injected through small callables so
+unit tests do not need to import or instantiate the full orchestration graph.
 """
 
-import logging
+from __future__ import annotations
+
 import copy
+import logging
 import uuid
-from typing import Optional, Dict, Any, Callable, List
+from typing import Any, Callable, Dict, List, Optional
 
+from src.enums import ReportType
+from src.market_phase_summary import extract_market_phase_summary
 from src.repositories.analysis_repo import AnalysisRepository
 from src.report_language import (
-    get_sentiment_label,
     get_localized_stock_name,
+    get_sentiment_label,
     localize_operation_advice,
     localize_trend_prediction,
     normalize_report_language,
 )
-from src.market_phase_summary import extract_market_phase_summary
 from src.schemas.decision_action import build_action_fields
+from src.services.pipeline_factory import (
+    ConfigProvider,
+    PipelineFactory,
+    create_analysis_pipeline,
+    get_analysis_config,
+)
 from src.services.run_diagnostics import (
     activate_run_diagnostic_context,
     build_run_diagnostic_summary,
@@ -36,17 +41,26 @@ logger = logging.getLogger(__name__)
 
 
 class AnalysisService:
-    """
-    分析服务
-    
-    封装股票分析相关的业务逻辑
-    """
-    
-    def __init__(self):
-        """初始化分析服务"""
-        self.repo = AnalysisRepository()
+    """Application-level stock-analysis use case."""
+
+    def __init__(
+        self,
+        repository: Optional[AnalysisRepository] = None,
+        config_provider: ConfigProvider = get_analysis_config,
+        pipeline_factory: PipelineFactory = create_analysis_pipeline,
+    ) -> None:
+        """Initialize explicit service dependencies.
+
+        Defaults preserve the existing runtime behavior.  Tests and alternate
+        entry points can inject light-weight fakes without patching
+        ``src.core.pipeline`` or the global configuration singleton.
+        """
+
+        self.repo = repository if repository is not None else AnalysisRepository()
+        self._config_provider = config_provider
+        self._pipeline_factory = pipeline_factory
         self.last_error: Optional[str] = None
-    
+
     def analyze_stock(
         self,
         stock_code: str,
@@ -62,54 +76,36 @@ class AnalysisService:
         portfolio_context: Optional[Dict[str, Any]] = None,
         report_language: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """
-        执行股票分析
-        
-        Args:
-            stock_code: 股票代码
-            report_type: 报告类型 (simple/detailed)
-            force_refresh: 是否强制刷新
-            query_id: 查询 ID（可选）
-            send_notification: 是否发送通知（API 触发默认发送）
-            analysis_phase: 请求的分析阶段覆盖（auto/premarket/intraday/postmarket）
-            
-        Returns:
-            分析结果字典，包含:
-            - stock_code: 股票代码
-            - stock_name: 股票名称
-            - report: 分析报告
-        """
+        """Execute one stock-analysis request and adapt it for API consumers."""
+
+        del force_refresh  # Retained for backward-compatible API signatures.
+
+        diag_token = None
         try:
             self.last_error = None
-            # 导入分析相关模块
-            from src.config import get_config
-            from src.core.pipeline import StockAnalysisPipeline
-            from src.enums import ReportType
-            
-            # 生成 query_id
-            if query_id is None:
-                query_id = uuid.uuid4().hex
-            effective_trace_id = trace_id or query_id
-            diag_token = None
+            effective_query_id = query_id or uuid.uuid4().hex
+            effective_trace_id = trace_id or effective_query_id
+
             if get_current_diagnostic_context() is None:
                 diag_token = activate_run_diagnostic_context(
                     trace_id=effective_trace_id,
-                    query_id=query_id,
+                    query_id=effective_query_id,
                     stock_code=stock_code,
                     trigger_source=query_source or "api",
                 )
-            
-            # 获取配置
-            config = get_config()
-            normalized_report_language = normalize_report_language(report_language, default="")
+
+            config = self._config_provider()
+            normalized_report_language = normalize_report_language(
+                report_language,
+                default="",
+            )
             if normalized_report_language:
                 config = copy.copy(config)
                 config.report_language = normalized_report_language
-            
-            # 创建分析流水线
-            pipeline = StockAnalysisPipeline(
+
+            pipeline = self._pipeline_factory(
                 config=config,
-                query_id=query_id,
+                query_id=effective_query_id,
                 trace_id=effective_trace_id,
                 query_source=query_source or "api",
                 progress_callback=progress_callback,
@@ -117,64 +113,62 @@ class AnalysisService:
                 analysis_phase=analysis_phase,
                 portfolio_context=portfolio_context,
             )
-            
-            # 确定报告类型 (API: simple/detailed/full/brief -> ReportType)
-            rt = ReportType.from_str(report_type)
-            
-            # 执行分析
+
+            normalized_report_type = ReportType.from_str(report_type)
             result = pipeline.process_single_stock(
                 code=stock_code,
                 skip_analysis=False,
                 single_stock_notify=send_notification,
-                report_type=rt,
+                report_type=normalized_report_type,
             )
-            
+
             if result is None:
-                logger.warning(f"分析股票 {stock_code} 返回空结果")
+                logger.warning("分析股票 %s 返回空结果", stock_code)
                 self.last_error = self.last_error or f"分析股票 {stock_code} 返回空结果"
                 return None
 
             if not getattr(result, "success", True):
-                self.last_error = getattr(result, "error_message", None) or f"分析股票 {stock_code} 失败"
-                logger.warning(f"分析股票 {stock_code} 未成功完成: {self.last_error}")
+                self.last_error = (
+                    getattr(result, "error_message", None)
+                    or f"分析股票 {stock_code} 失败"
+                )
+                logger.warning("分析股票 %s 未成功完成: %s", stock_code, self.last_error)
                 return None
-            
-            # 构建响应
-            return self._build_analysis_response(result, query_id, report_type=rt.value)
-            
-        except Exception as e:
-            self.last_error = str(e)
-            logger.error(f"分析股票 {stock_code} 失败: {e}", exc_info=True)
+
+            return self._build_analysis_response(
+                result,
+                effective_query_id,
+                report_type=normalized_report_type.value,
+            )
+
+        except Exception as exc:
+            self.last_error = str(exc)
+            logger.error("分析股票 %s 失败: %s", stock_code, exc, exc_info=True)
             return None
         finally:
-            reset_run_diagnostic_context(locals().get("diag_token"))
-    
+            reset_run_diagnostic_context(diag_token)
+
     def _build_analysis_response(
-        self, 
-        result: Any, 
+        self,
+        result: Any,
         query_id: str,
         report_type: str = "detailed",
     ) -> Dict[str, Any]:
-        """
-        构建分析响应
-        
-        Args:
-            result: AnalysisResult 对象
-            query_id: 查询 ID
-            report_type: 归一化后的报告类型
-            
-        Returns:
-            格式化的响应字典
-        """
-        # 获取狙击点位
+        """Build the stable API response from an analyzer result."""
+
         sniper_points = {}
-        if hasattr(result, 'get_sniper_points'):
+        if hasattr(result, "get_sniper_points"):
             sniper_points = result.get_sniper_points() or {}
-        
-        # 计算情绪标签
-        report_language = normalize_report_language(getattr(result, "report_language", "zh"))
+
+        report_language = normalize_report_language(
+            getattr(result, "report_language", "zh")
+        )
         sentiment_label = get_sentiment_label(result.sentiment_score, report_language)
-        stock_name = get_localized_stock_name(getattr(result, "name", None), result.code, report_language)
+        stock_name = get_localized_stock_name(
+            getattr(result, "name", None),
+            result.code,
+            report_language,
+        )
         action_fields = build_action_fields(
             operation_advice=getattr(result, "operation_advice", None),
             explicit_action=getattr(result, "action", None),
@@ -184,11 +178,21 @@ class AnalysisService:
             guardrail_reason=getattr(result, "guardrail_reason", None),
             align_with_score=True,
         )
+
         diagnostic_context = get_current_diagnostic_context()
         trace_id = diagnostic_context.trace_id if diagnostic_context is not None else query_id
-        diagnostic_snapshot = diagnostic_context.snapshot() if diagnostic_context is not None else None
-        diagnostic_context_snapshot = getattr(result, "diagnostic_context_snapshot", None)
-        market_phase_summary = extract_market_phase_summary(diagnostic_context_snapshot)
+        diagnostic_snapshot = (
+            diagnostic_context.snapshot() if diagnostic_context is not None else None
+        )
+        diagnostic_context_snapshot = getattr(
+            result,
+            "diagnostic_context_snapshot",
+            None,
+        )
+        market_phase_summary = extract_market_phase_summary(
+            diagnostic_context_snapshot
+        )
+
         if isinstance(diagnostic_context_snapshot, dict):
             context_snapshot = dict(diagnostic_context_snapshot)
             if diagnostic_snapshot is not None:
@@ -197,15 +201,16 @@ class AnalysisService:
             context_snapshot = {"diagnostics": diagnostic_snapshot}
         else:
             context_snapshot = None
+
+        raw_result_payload = result.to_dict() if hasattr(result, "to_dict") else None
         diagnostic_summary = build_run_diagnostic_summary(
             context_snapshot=context_snapshot,
-            raw_result=result.to_dict() if hasattr(result, "to_dict") else None,
+            raw_result=raw_result_payload,
             report_saved=True,
             query_id=query_id,
             stock_code=result.code,
         )
-        
-        # 构建报告结构
+
         report = {
             "meta": {
                 "query_id": query_id,
@@ -221,10 +226,16 @@ class AnalysisService:
             },
             "summary": {
                 "analysis_summary": result.analysis_summary,
-                "operation_advice": localize_operation_advice(result.operation_advice, report_language),
+                "operation_advice": localize_operation_advice(
+                    result.operation_advice,
+                    report_language,
+                ),
                 "action": action_fields["action"],
                 "action_label": action_fields["action_label"],
-                "trend_prediction": localize_trend_prediction(result.trend_prediction, report_language),
+                "trend_prediction": localize_trend_prediction(
+                    result.trend_prediction,
+                    report_language,
+                ),
                 "sentiment_score": result.sentiment_score,
                 "sentiment_label": sentiment_label,
             },
@@ -239,12 +250,10 @@ class AnalysisService:
                 "technical_analysis": result.technical_analysis,
                 "fundamental_analysis": result.fundamental_analysis,
                 "risk_warning": result.risk_warning,
-            }
+            },
         }
-        if hasattr(result, "to_dict"):
-            raw_result_payload = result.to_dict()
-            if isinstance(raw_result_payload, dict):
-                report["details"]["raw_result"] = raw_result_payload
+        if isinstance(raw_result_payload, dict):
+            report["details"]["raw_result"] = raw_result_payload
 
         return {
             "query_id": query_id,
