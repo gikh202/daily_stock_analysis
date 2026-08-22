@@ -41,6 +41,41 @@ def test_resolve_pipeline_factory_keeps_unknown_name_failure_contract(monkeypatc
         registry.resolve_pipeline_factory("not-a-pipeline-factory")
 
 
+def test_resolve_pipeline_factories_preserves_historical_resolution_order(monkeypatch) -> None:
+    resolved_names = []
+
+    def fake_resolver(name: str):
+        resolved_names.append(name)
+        return f"factory:{name}"
+
+    monkeypatch.setattr(registry, "resolve_pipeline_factory", fake_resolver)
+
+    factories = registry.resolve_pipeline_factories()
+
+    assert resolved_names == [
+        "get_db",
+        "DataFetcherManager",
+        "MarketRegimeAdapter",
+        "StockTrendAnalyzer",
+        "GeminiAnalyzer",
+        "NotificationService",
+        "SearchService",
+        "MarketStructureService",
+        "MarketHotspotService",
+        "SocialSentimentService",
+    ]
+    assert factories.get_db == "factory:get_db"
+    assert factories.data_fetcher_manager == "factory:DataFetcherManager"
+    assert factories.market_regime_adapter == "factory:MarketRegimeAdapter"
+    assert factories.stock_trend_analyzer == "factory:StockTrendAnalyzer"
+    assert factories.gemini_analyzer == "factory:GeminiAnalyzer"
+    assert factories.notification_service == "factory:NotificationService"
+    assert factories.search_service == "factory:SearchService"
+    assert factories.market_structure_service == "factory:MarketStructureService"
+    assert factories.market_hotspot_service == "factory:MarketHotspotService"
+    assert factories.social_sentiment_service == "factory:SocialSentimentService"
+
+
 def test_pipeline_dependency_composition_root_no_longer_owns_concrete_imports() -> None:
     tree = ast.parse(
         Path("src/core/pipeline_dependencies.py").read_text(encoding="utf-8")
@@ -67,3 +102,23 @@ def test_pipeline_dependency_composition_root_no_longer_owns_concrete_imports() 
 
     assert imported_modules.isdisjoint(blocked_modules)
     assert "src.core.pipeline_factory_registry" in imported_modules
+
+
+def test_pipeline_dependency_composition_root_consumes_factory_bundle() -> None:
+    tree = ast.parse(
+        Path("src/core/pipeline_dependencies.py").read_text(encoding="utf-8")
+    )
+    imported_names = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "src.core.pipeline_factory_registry"
+        for alias in node.names
+    }
+
+    assert "resolve_pipeline_factories" in imported_names
+    assert "resolve_pipeline_factory" not in imported_names
+
+    source = Path("src/core/pipeline_dependencies.py").read_text(encoding="utf-8")
+    assert "factories = resolve_pipeline_factories()" in source
+    assert 'resolve_pipeline_factory("' not in source
