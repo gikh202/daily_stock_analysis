@@ -94,7 +94,13 @@ class AnalysisService:
                     trigger_source=query_source or "api",
                 )
 
-            config = self._config_provider()
+            # Some legacy callers/tests construct this service via object.__new__
+            # and therefore bypass __init__. Keep that path compatible while
+            # normal instances continue to use explicitly injected dependencies.
+            config_provider = getattr(self, "_config_provider", get_analysis_config)
+            pipeline_factory = getattr(self, "_pipeline_factory", create_analysis_pipeline)
+
+            config = config_provider()
             normalized_report_language = normalize_report_language(
                 report_language,
                 default="",
@@ -103,7 +109,7 @@ class AnalysisService:
                 config = copy.copy(config)
                 config.report_language = normalized_report_language
 
-            pipeline = self._pipeline_factory(
+            pipeline = pipeline_factory(
                 config=config,
                 query_id=effective_query_id,
                 trace_id=effective_trace_id,
