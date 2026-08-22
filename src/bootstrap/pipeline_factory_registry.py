@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Canonical concrete factory registry for pipeline composition.
 
-This module owns the default constructors and their typed bundle.  It is
-intentionally unaware of the historical ``src.core.pipeline`` monkeypatch
-surface; that compatibility behavior lives in ``legacy_pipeline_factory_seams``.
+This module owns the default constructors and their typed bundle. It stays
+independent of the historical pipeline monkeypatch surface; compatibility
+behavior lives in ``legacy_pipeline_factory_seams``.
 """
 
 from __future__ import annotations
