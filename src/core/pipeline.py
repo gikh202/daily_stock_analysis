@@ -340,6 +340,7 @@ class StockAnalysisPipeline:
             fetcher_manager=self.fetcher_manager,
             db=self.db,
             resume_target_resolver=self._resolve_resume_target_date,
+            stage_logger=logger,
         ).run(
             code,
             force_refresh=force_refresh,
