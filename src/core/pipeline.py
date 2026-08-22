@@ -26,20 +26,16 @@ from typing import List, Dict, Any, Optional, Tuple, Callable
 import pandas as pd
 
 from src.config import FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT, get_config, Config
-from src.storage import get_db
-from data_provider import DataFetcherManager
 from data_provider.base import is_bse_code, normalize_stock_code
-from data_provider.market_regime_adapter import MarketRegimeAdapter
 from data_provider.realtime_types import ChipDistribution
 from src.analyzer import (
-    GeminiAnalyzer,
     AnalysisResult,
     fill_price_position_if_needed,
     normalize_chip_structure_availability,
     populate_decision_action_fields,
     stabilize_decision_with_structure,
 )
-from src.notification import NotificationService, NotificationChannel
+from src.notification import NotificationChannel
 from src.schemas.decision_action import normalize_decision_action
 from src.report_language import (
     get_placeholder_text,
@@ -68,7 +64,6 @@ from src.services.daily_market_context import (
     DailyMarketContextService,
     format_daily_market_context_prompt_section,
 )
-from src.services.social_sentiment_service import SocialSentimentService
 from src.services.intelligence_service import IntelligenceService
 from src.services.market_hotspot_service import MarketHotspotService
 from src.services.analysis_context_builder import (
@@ -93,7 +88,11 @@ from src.services.decision_signal_extractor import (
 )
 from src.services.decision_signal_summary import summarize_decision_signal
 from src.enums import ReportType
-from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
+from src.stock_analyzer import TrendAnalysisResult
+from src.core.pipeline_dependencies import (
+    PipelineDependencies,
+    build_pipeline_dependencies,
+)
 from src.core.trading_calendar import (
     build_market_phase_context,
     get_effective_trading_date,
@@ -227,6 +226,7 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         daily_market_context_enabled: Optional[bool] = None,
         daily_market_context_allow_generate: bool = True,
+        dependencies: Optional[PipelineDependencies] = None,
     ):
         """
         初始化调度器
@@ -234,6 +234,7 @@ class StockAnalysisPipeline:
         Args:
             config: 配置对象（可选，默认使用全局配置）
             max_workers: 最大并发线程数（可选，默认从配置读取）
+            dependencies: 预构建运行时依赖；为空时由组合根创建默认依赖
         """
         self.config = config or get_config()
         self.max_workers = max_workers or self.config.max_workers
@@ -254,51 +255,32 @@ class StockAnalysisPipeline:
             else bool(daily_market_context_enabled)
         )
         self.daily_market_context_allow_generate = daily_market_context_allow_generate
-        
-        # 初始化各模块
-        self.db = get_db()
-        self.fetcher_manager = DataFetcherManager()
-        self._market_regime_adapter = MarketRegimeAdapter()
+
+        runtime_dependencies = dependencies or build_pipeline_dependencies(
+            config=self.config,
+            source_message=source_message,
+            analysis_skills=self.analysis_skills,
+        )
+        self.db = runtime_dependencies.db
+        self.fetcher_manager = runtime_dependencies.fetcher_manager
+        self._market_regime_adapter = runtime_dependencies.market_regime_adapter
+        self.trend_analyzer = runtime_dependencies.trend_analyzer
+        self.analyzer = runtime_dependencies.analyzer
+        self.notifier = runtime_dependencies.notifier
+        self.market_structure_service = runtime_dependencies.market_structure_service
+        self.market_hotspot_service = runtime_dependencies.market_hotspot_service
+        self.search_service = runtime_dependencies.search_service
+        self.social_sentiment_service = runtime_dependencies.social_sentiment_service
+
         self._run_market_regime: Dict[str, Any] = {}
         self._run_prediction_contexts: Dict[str, Dict[str, Any]] = {}
-        # 不再单独创建 akshare_fetcher，统一使用 fetcher_manager 获取增强数据
-        self.trend_analyzer = StockTrendAnalyzer()  # 技术分析器
-        self.analyzer = GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
-        self.notifier = NotificationService(source_message=source_message)
-        self.market_structure_service = MarketStructureService(fetcher_manager=self.fetcher_manager)
-        self.market_hotspot_service: Optional[MarketHotspotService] = None
-        try:
-            self.market_hotspot_service = MarketHotspotService(
-                fetcher_manager=self.fetcher_manager,
-            )
-        except Exception as exc:
-            logger.debug("market hotspot service init failed (fail-open): %s", exc)
         self._single_stock_notify_lock = threading.Lock()
         self._daily_market_context_service_lock = threading.Lock()
         self._concept_rankings_cache_lock = threading.Lock()
         self._concept_rankings_cache: Dict[str, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
-        
-        # 初始化搜索服务（可选，初始化失败不应阻断主分析流程）
-        try:
-            self.search_service = SearchService(
-                bocha_keys=self.config.bocha_api_keys,
-                tavily_keys=self.config.tavily_api_keys,
-                anspire_keys=self.config.anspire_api_keys,
-                brave_keys=self.config.brave_api_keys,
-                serpapi_keys=self.config.serpapi_keys,
-                minimax_keys=self.config.minimax_api_keys,
-                searxng_base_urls=self.config.searxng_base_urls,
-                searxng_public_instances_enabled=self.config.searxng_public_instances_enabled,
-                news_max_age_days=self.config.news_max_age_days,
-                news_strategy_profile=getattr(self.config, "news_strategy_profile", "short"),
-            )
-        except Exception as exc:
-            logger.warning("搜索服务初始化失败，将以无搜索模式运行: %s", exc, exc_info=True)
-            self.search_service = None
-        
+
         logger.info(f"调度器初始化完成，最大并发数: {self.max_workers}")
         logger.info("已启用技术分析引擎（均线/趋势/量价指标）")
-        # 打印实时行情/筹码配置状态
         if self.config.enable_realtime_quote:
             logger.info(f"实时行情已启用 (优先级: {self.config.realtime_source_priority})")
         else:
@@ -313,22 +295,11 @@ class StockAnalysisPipeline:
             logger.info("搜索服务已启用")
         else:
             logger.warning("搜索服务未启用（未配置搜索能力）")
-
-        # 初始化社交舆情服务（仅美股，可选）
-        try:
-            self.social_sentiment_service = SocialSentimentService(
-                api_key=self.config.social_sentiment_api_key,
-                api_url=self.config.social_sentiment_api_url,
-            )
-            if self.social_sentiment_service.is_available:
-                logger.info("Social sentiment service enabled (Reddit/X/Polymarket, US stocks only)")
-        except Exception as exc:
-            logger.warning(
-                "社交舆情服务初始化失败，将跳过舆情分析: %s",
-                exc,
-                exc_info=True,
-            )
-            self.social_sentiment_service = None
+        if (
+            self.social_sentiment_service is not None
+            and self.social_sentiment_service.is_available
+        ):
+            logger.info("Social sentiment service enabled (Reddit/X/Polymarket, US stocks only)")
 
     def _emit_progress(self, progress: int, message: str) -> None:
         """Best-effort bridge from pipeline stages to task SSE progress."""
