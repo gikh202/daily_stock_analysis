@@ -98,6 +98,12 @@ from src.analysis_content_integrity import (
     apply_placeholder_fill as _apply_placeholder_fill_policy,
     check_content_integrity as _check_content_integrity_policy,
 )
+from src.quote_presentation_policy import (
+    _phase_aware_quote_labels as _phase_aware_quote_labels_policy,
+    _should_hide_regular_session_ohlc as _should_hide_regular_session_ohlc_policy,
+    _today_has_realtime_overlay as _today_has_realtime_overlay_policy,
+    _today_looks_complete_daily_bar as _today_looks_complete_daily_bar_policy,
+)
 from src.schemas.decision_action import build_action_fields
 from src.schemas.decision_scale import (
     CANONICAL_DECISION_SCALE_PROMPT_ZH,
@@ -148,74 +154,26 @@ def _normalize_risk_warning_values(value: Any) -> List[str]:
 
 
 def _today_has_realtime_overlay(today: Any) -> bool:
-    if not isinstance(today, dict):
-        return False
-    data_source = today.get("data_source") or today.get("dataSource")
-    if isinstance(data_source, str) and data_source.startswith("realtime:"):
-        return True
-    if today.get("is_partial_bar") is True or today.get("isPartialBar") is True:
-        return True
-    if today.get("is_estimated") is True or today.get("isEstimated") is True:
-        return True
-    return bool(today.get("estimated_fields") or today.get("estimatedFields"))
+    """Compatibility facade for realtime-overlay quote presentation policy."""
+    return _today_has_realtime_overlay_policy(today)
 
 
 def _today_looks_complete_daily_bar(
     context: Dict[str, Any],
     phase_context: Dict[str, Any],
 ) -> bool:
-    today = context.get("today")
-    if (
-        not isinstance(today, dict)
-        or today.get("close") in (None, "")
-        or _today_has_realtime_overlay(today)
-    ):
-        return False
-
-    effective_date = phase_context.get("effective_daily_bar_date")
-    today_date = today.get("date") or today.get("trade_date") or context.get("date")
-    if effective_date and today_date and str(today_date) != str(effective_date):
-        return False
-    return True
+    """Compatibility facade for complete-daily-bar quote presentation policy."""
+    return _today_looks_complete_daily_bar_policy(context, phase_context)
 
 
 def _phase_aware_quote_labels(context: Dict[str, Any]) -> Tuple[str, str]:
-    """Choose Chinese quote-table labels that do not conflict with phase context."""
-    phase_context = context.get("market_phase_context")
-    if not isinstance(phase_context, dict):
-        return "今日行情", "收盘价"
-
-    phase = str(phase_context.get("phase") or "").strip()
-    if phase in {"premarket", "non_trading"}:
-        today = context.get("today")
-        if _today_looks_complete_daily_bar(context, phase_context):
-            return "上一完整交易日行情", "上一完整交易日收盘价"
-        if _today_has_realtime_overlay(today):
-            return "最新行情", "实时估算价"
-        if isinstance(today, dict) and today.get("close") not in (None, ""):
-            return "最新行情", "最新价"
-        return "今日行情", "收盘价"
-
-    if (
-        phase in {"intraday", "lunch_break", "closing_auction"}
-        and phase_context.get("is_partial_bar") is True
-    ):
-        return "最新行情", "盘中估算价"
-
-    return "今日行情", "收盘价"
+    """Compatibility facade for market-phase-aware quote labels."""
+    return _phase_aware_quote_labels_policy(context)
 
 
 def _should_hide_regular_session_ohlc(context: Dict[str, Any]) -> bool:
-    phase_context = context.get("market_phase_context")
-    if not isinstance(phase_context, dict):
-        return False
-
-    phase = str(phase_context.get("phase") or "").strip()
-    return phase in {"premarket", "non_trading"} and not _today_looks_complete_daily_bar(
-        context,
-        phase_context,
-    )
-
+    """Compatibility facade for regular-session OHLC visibility policy."""
+    return _should_hide_regular_session_ohlc_policy(context)
 
 def _legacy_market_group(stock_code: Any) -> str:
     code = str(stock_code or "").strip()
