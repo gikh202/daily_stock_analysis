@@ -364,6 +364,18 @@ def classify_confirmation(
             **base,
         )
 
+    if not prior_execution_authorized:
+        return ConfirmationDecision(
+            status="WAIT_STABILIZE",
+            label=STATUS_LABELS["WAIT_STABILIZE"],
+            reason=(
+                "盘中条件满足，但昨晚执行授权未通过；禁止直接买入，等待收盘层重新给出完全授权。"
+            ),
+            starter_position_pct=0.0,
+            **live,
+            **{key: value for key, value in base.items() if key != "starter_position_pct"},
+        )
+
     starter_pct = min(max(0.0, starter_position_pct), plan_max_pct)
     return ConfirmationDecision(
         status="BUY_NOW",
