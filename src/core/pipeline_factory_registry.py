@@ -8,6 +8,7 @@ runtime construction remains outside ``StockAnalysisPipeline``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import sys
 from typing import Any, Optional
 
@@ -45,6 +46,22 @@ _DEFAULT_FACTORIES = {
 }
 
 
+@dataclass(frozen=True)
+class PipelineFactorySet:
+    """Resolved concrete constructors used by the pipeline composition root."""
+
+    get_db: Any
+    data_fetcher_manager: Any
+    market_regime_adapter: Any
+    stock_trend_analyzer: Any
+    gemini_analyzer: Any
+    notification_service: Any
+    search_service: Any
+    market_structure_service: Any
+    market_hotspot_service: Any
+    social_sentiment_service: Any
+
+
 def _pipeline_module() -> Optional[Any]:
     """Return the importing pipeline module when it is present."""
 
@@ -69,3 +86,20 @@ def resolve_pipeline_factory(name: str) -> Any:
     if pipeline_module is not None and hasattr(pipeline_module, name):
         return getattr(pipeline_module, name)
     return _DEFAULT_FACTORIES[name]
+
+
+def resolve_pipeline_factories() -> PipelineFactorySet:
+    """Resolve the complete factory set in the historical construction order."""
+
+    return PipelineFactorySet(
+        get_db=resolve_pipeline_factory("get_db"),
+        data_fetcher_manager=resolve_pipeline_factory("DataFetcherManager"),
+        market_regime_adapter=resolve_pipeline_factory("MarketRegimeAdapter"),
+        stock_trend_analyzer=resolve_pipeline_factory("StockTrendAnalyzer"),
+        gemini_analyzer=resolve_pipeline_factory("GeminiAnalyzer"),
+        notification_service=resolve_pipeline_factory("NotificationService"),
+        search_service=resolve_pipeline_factory("SearchService"),
+        market_structure_service=resolve_pipeline_factory("MarketStructureService"),
+        market_hotspot_service=resolve_pipeline_factory("MarketHotspotService"),
+        social_sentiment_service=resolve_pipeline_factory("SocialSentimentService"),
+    )
