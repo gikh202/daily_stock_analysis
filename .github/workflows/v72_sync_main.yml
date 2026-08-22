@@ -1,0 +1,36 @@
+name: V7.2 Sync Main
+
+on:
+  push:
+    branches:
+      - feature/v7.2-decision-engine-upgrade
+    paths:
+      - .github/workflows/v72_sync_main.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: feature/v7.2-decision-engine-upgrade
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Merge main
+        run: |
+          git fetch origin main
+          git merge --no-edit origin/main
+      - name: Validate execution-flow files
+        run: |
+          python -m py_compile scripts/us_open_research_ledger.py scripts/run_us_open_timing.py scripts/run_us_open_confirmation.py
+      - name: Cleanup and push
+        run: |
+          git rm .github/workflows/v72_sync_main.yml
+          git commit -m "chore: remove v7.2 sync workflow"
+          git push origin HEAD:feature/v7.2-decision-engine-upgrade
