@@ -696,8 +696,7 @@ class StockAnalysisPipeline:
                     )
                     news_result_count = total_results
                     logger.info(f"{stock_name}({code}) 情报搜索完成: 共 {total_results} 条结果")
-                    logger.debug(f"{stock_name}({code}) 情报搜索结果:\
-{news_context}")
+                    logger.debug(f"{stock_name}({code}) 情报搜索结果:\n{news_context}")
 
                     # 保存新闻情报到数据库（用于后续复盘与查询）
                     try:
@@ -724,9 +723,7 @@ class StockAnalysisPipeline:
                     if social_context:
                         logger.info(f"{stock_name}({code}) Social sentiment data retrieved")
                         if news_context:
-                            news_context = news_context + "\
-\
-" + social_context
+                            news_context = news_context + "\n\n" + social_context
                         else:
                             news_context = social_context
                 except Exception as e:
@@ -734,9 +731,7 @@ class StockAnalysisPipeline:
 
             if persisted_intelligence_context:
                 news_context = (
-                    f"{news_context}\
-\
-{persisted_intelligence_context}"
+                    f"{news_context}\n\n{persisted_intelligence_context}"
                     if news_context
                     else persisted_intelligence_context
                 )
@@ -999,13 +994,6 @@ class StockAnalysisPipeline:
                     forecast_before_guardrails=forecast_before_guardrails,
                 )
 
-                if isinstance(result.dashboard, dict):
-                    result.dashboard["forecast"] = copy.deepcopy(
-                        getattr(result, "forecast", None)
-                    )
-                    result.dashboard["execution"] = copy.deepcopy(result.execution)
-                    result.dashboard["decision_trace"] = copy.deepcopy(trace)
-
                 logger.info(
                     "[PredictionExecutionSplit] %s forecast10d=%s "
                     "execution_action=%s action_label=%s operation_advice=%s "
@@ -1125,7 +1113,7 @@ class StockAnalysisPipeline:
             trend_result: 趋势分析结果
             stock_name: 股票名称
             market_phase_context: 已构建的市场阶段上下文，用于标记盘中 partial bar
-        
+            
         Returns:
             增强后的上下文
         """
@@ -1853,9 +1841,7 @@ class StockAnalysisPipeline:
                     if social_context:
                         existing = initial_context.get("news_context")
                         if existing:
-                            initial_context["news_context"] = existing + "\
-\
-" + social_context
+                            initial_context["news_context"] = existing + "\n\n" + social_context
                         else:
                             initial_context["news_context"] = social_context
                         logger.info(f"[{code}] Agent mode: social sentiment data injected into news_context")
@@ -1870,9 +1856,7 @@ class StockAnalysisPipeline:
             if persisted_intelligence_context:
                 existing = initial_context.get("news_context")
                 initial_context["news_context"] = (
-                    f"{existing}\
-\
-{persisted_intelligence_context}"
+                    f"{existing}\n\n{persisted_intelligence_context}"
                     if existing
                     else persisted_intelligence_context
                 )
@@ -3353,8 +3337,7 @@ class StockAnalysisPipeline:
                     lines.append(f"   摘要：{summary[:220]}")
                 if url and not url.startswith("no-url:intel:"):
                     lines.append(f"   来源：{url}")
-            return "\
-".join(lines)
+            return "\n".join(lines)
         except Exception as exc:
             logger.debug("读取本地资讯证据失败（fail-open）: %s", exc)
             return None
@@ -3771,7 +3754,7 @@ class StockAnalysisPipeline:
                     f"评分 {result.sentiment_score}"
                 )
                 
-                # 单股推送模式（#55）：每分析完一只立即推送
+                # 单股推送模式（#55）：每分析完一只股票立即推送
                 if single_stock_notify:
                     self._send_single_stock_notification(
                         result,
@@ -4281,8 +4264,7 @@ class StockAnalysisPipeline:
                         else:
                             dashboard_content = self.notifier.generate_wechat_dashboard(results)
                         logger.info(f"企业微信仪表盘长度: {len(dashboard_content)} 字符")
-                        logger.debug(f"企业微信推送内容:\
-{dashboard_content}")
+                        logger.debug(f"企业微信推送内容:\n{dashboard_content}")
                         wechat_image_bytes = None
                         if NotificationChannel.WECHAT in channels_needing_image:
                             wechat_image_kwargs: Dict[str, Any] = {
@@ -4650,8 +4632,7 @@ class StockAnalysisPipeline:
             ):
                 self.notifier.release_noise_control(noise_decision)
             import traceback
-            logger.error(f"发送通知失败: {e}\
-{traceback.format_exc()}")
+            logger.error(f"发送通知失败: {e}\n{traceback.format_exc()}")
 
     def _generate_aggregate_report(
         self,
