@@ -9,7 +9,7 @@ from unittest.mock import patch
 import src.core.pipeline as pipeline
 import src.application.analysis.pipeline_impl as pipeline_impl
 from src.core.pipeline_factory_registry import resolve_pipeline_factory
-from src.core.stages.decision_trace import DecisionTraceStage
+from src.application.analysis.stages.decision_trace import DecisionTraceStage
 
 
 def test_pipeline_public_module_aliases_application_runtime() -> None:

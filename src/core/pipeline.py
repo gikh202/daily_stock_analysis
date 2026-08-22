@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Compatibility facade for the application analysis pipeline runtime.
+"""Stable compatibility facade for analysis-pipeline orchestration.
 
-``src.core.pipeline`` remains a stable import/monkeypatch surface while the
-orchestration implementation lives in the application layer.  New orchestration
-logic belongs under ``src.application.analysis`` rather than this facade.
+The concrete use-case implementation lives in ``src.application.analysis``.
+Historical constructor monkeypatch seams remain supported by the explicit
+bootstrap compatibility adapter; new orchestration belongs in the application
+layer rather than this module.
 """
 
 from __future__ import annotations
@@ -12,16 +13,11 @@ from importlib import import_module
 import logging
 import sys
 
-
 _PUBLIC_MODULE_NAME = __name__
 _IMPL_MODULE_NAME = "src.application.analysis.pipeline_impl"
 _public_module = sys.modules[_PUBLIC_MODULE_NAME]
 _impl = import_module(_IMPL_MODULE_NAME)
 
-# pipeline_dependencies installs historical constructor patch seams while the
-# public facade is still the object registered as src.core.pipeline. Transfer
-# those seams to the implementation module before replacing the module entry so
-# resolve_pipeline_factory() continues to honor existing monkeypatch targets.
 _LEGACY_FACTORY_SEAMS = (
     "get_db",
     "DataFetcherManager",
@@ -40,8 +36,7 @@ for _name in _LEGACY_FACTORY_SEAMS:
 
 _impl.logger = logging.getLogger(_PUBLIC_MODULE_NAME)
 
-# Decision trace bookkeeping now has one production implementation.
-from src.core.stages.decision_trace import DecisionTraceStage  # noqa: E402
+from src.application.analysis.stages.decision_trace import DecisionTraceStage  # noqa: E402
 
 
 def _decision_state_snapshot(result):
@@ -52,15 +47,7 @@ def _technical_prediction_snapshot(trend_result):
     return DecisionTraceStage.technical_prediction_snapshot(trend_result)
 
 
-def _append_guardrail_trace(
-    cls,
-    trace,
-    *,
-    name,
-    before,
-    after,
-    adjustments,
-):
+def _append_guardrail_trace(cls, trace, *, name, before, after, adjustments):
     del cls
     return DecisionTraceStage.append_guardrail_trace(
         trace,
@@ -99,8 +86,6 @@ _impl.StockAnalysisPipeline._finalize_prediction_execution_split = staticmethod(
     _finalize_prediction_execution_split
 )
 
-# Preserve historical introspection names for objects defined by the moved
-# implementation. Runtime globals remain the implementation module itself.
 for _value in list(vars(_impl).values()):
     if getattr(_value, "__module__", None) == _IMPL_MODULE_NAME:
         try:

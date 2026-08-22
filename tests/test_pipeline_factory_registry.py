@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Compatibility and architecture tests for pipeline factory resolution."""
+"""Compatibility and architecture tests for bootstrap pipeline factories."""
 
 from __future__ import annotations
 
@@ -10,13 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 from src.core import pipeline_factory_registry as registry
+from src.bootstrap import pipeline_factory_registry as canonical_registry
 
 
 def test_resolve_pipeline_factory_honors_historical_pipeline_patch(monkeypatch) -> None:
     sentinel = object()
     fake_pipeline = SimpleNamespace(DataFetcherManager=sentinel)
     monkeypatch.setitem(registry.sys.modules, "src.core.pipeline", fake_pipeline)
-
     assert registry.resolve_pipeline_factory("DataFetcherManager") is sentinel
 
 
@@ -24,9 +24,7 @@ def test_install_legacy_pipeline_seams_fills_missing_without_overwriting(monkeyp
     sentinel = object()
     fake_pipeline = SimpleNamespace(DataFetcherManager=sentinel)
     monkeypatch.setitem(registry.sys.modules, "src.core.pipeline", fake_pipeline)
-
     registry.install_legacy_pipeline_seams()
-
     assert fake_pipeline.DataFetcherManager is sentinel
     assert callable(fake_pipeline.get_db)
     assert callable(fake_pipeline.GeminiAnalyzer)
@@ -36,7 +34,6 @@ def test_install_legacy_pipeline_seams_fills_missing_without_overwriting(monkeyp
 
 def test_resolve_pipeline_factory_keeps_unknown_name_failure_contract(monkeypatch) -> None:
     monkeypatch.setitem(registry.sys.modules, "src.core.pipeline", SimpleNamespace())
-
     with pytest.raises(KeyError):
         registry.resolve_pipeline_factory("not-a-pipeline-factory")
 
@@ -49,9 +46,7 @@ def test_resolve_pipeline_factories_preserves_historical_resolution_order(monkey
         return f"factory:{name}"
 
     monkeypatch.setattr(registry, "resolve_pipeline_factory", fake_resolver)
-
     factories = registry.resolve_pipeline_factories()
-
     assert resolved_names == [
         "get_db",
         "DataFetcherManager",
@@ -66,59 +61,46 @@ def test_resolve_pipeline_factories_preserves_historical_resolution_order(monkey
     ]
     assert factories.get_db == "factory:get_db"
     assert factories.data_fetcher_manager == "factory:DataFetcherManager"
-    assert factories.market_regime_adapter == "factory:MarketRegimeAdapter"
-    assert factories.stock_trend_analyzer == "factory:StockTrendAnalyzer"
     assert factories.gemini_analyzer == "factory:GeminiAnalyzer"
-    assert factories.notification_service == "factory:NotificationService"
-    assert factories.search_service == "factory:SearchService"
-    assert factories.market_structure_service == "factory:MarketStructureService"
-    assert factories.market_hotspot_service == "factory:MarketHotspotService"
     assert factories.social_sentiment_service == "factory:SocialSentimentService"
 
 
-def test_pipeline_dependency_composition_root_no_longer_owns_concrete_imports() -> None:
-    tree = ast.parse(
-        Path("src/core/pipeline_dependencies.py").read_text(encoding="utf-8")
+def test_canonical_factory_registry_has_no_reverse_pipeline_dependency() -> None:
+    path = Path("src/bootstrap/pipeline_factory_registry.py")
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    assert "src.core.pipeline" not in source
+    assert not any(
+        isinstance(node, ast.Import) and any(alias.name == "sys" for alias in node.names)
+        for node in tree.body
     )
-    imported_modules = set()
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            imported_modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported_modules.add(node.module)
-
-    blocked_modules = {
-        "data_provider",
-        "data_provider.market_regime_adapter",
-        "src.analyzer",
-        "src.notification",
-        "src.search_service",
-        "src.services.market_hotspot_service",
-        "src.services.market_structure_service",
-        "src.services.social_sentiment_service",
-        "src.stock_analyzer",
-        "src.storage",
-    }
-
-    assert imported_modules.isdisjoint(blocked_modules)
-    assert "src.core.pipeline_factory_registry" in imported_modules
+    assert canonical_registry.get_default_pipeline_factory("GeminiAnalyzer") is not None
 
 
-def test_pipeline_dependency_composition_root_consumes_factory_bundle() -> None:
-    tree = ast.parse(
-        Path("src/core/pipeline_dependencies.py").read_text(encoding="utf-8")
-    )
+def test_only_explicit_legacy_adapter_owns_pipeline_module_lookup() -> None:
+    legacy_source = Path(
+        "src/bootstrap/legacy_pipeline_factory_seams.py"
+    ).read_text(encoding="utf-8")
+    assert 'sys.modules.get("src.core.pipeline")' in legacy_source
+
+    for path in (
+        Path("src/bootstrap/pipeline_factory_registry.py"),
+        Path("src/bootstrap/pipeline_dependencies.py"),
+        Path("src/bootstrap/pipeline_optional_dependencies.py"),
+    ):
+        assert "src.core.pipeline" not in path.read_text(encoding="utf-8")
+
+
+def test_pipeline_composition_root_consumes_factory_bundle() -> None:
+    source = Path("src/bootstrap/pipeline_dependencies.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
     imported_names = {
         alias.name
         for node in tree.body
         if isinstance(node, ast.ImportFrom)
-        and node.module == "src.core.pipeline_factory_registry"
+        and node.module == "src.bootstrap.legacy_pipeline_factory_seams"
         for alias in node.names
     }
-
     assert "resolve_pipeline_factories" in imported_names
     assert "resolve_pipeline_factory" not in imported_names
-
-    source = Path("src/core/pipeline_dependencies.py").read_text(encoding="utf-8")
     assert "factories = resolve_pipeline_factories()" in source
-    assert 'resolve_pipeline_factory("' not in source

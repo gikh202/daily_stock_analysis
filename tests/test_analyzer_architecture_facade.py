@@ -6,19 +6,22 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import src.analyzer as analyzer
-import src.legacy.analyzer_impl as analyzer_impl
-from src.chip_presentation_policy import (
+import src.infrastructure.llm.analyzer_impl as analyzer_impl
+from src.presentation.policies.chip import (
     fill_chip_structure_if_needed,
     normalize_chip_structure_availability,
 )
-from src.price_position_policy import fill_price_position_if_needed
-from src.structural_decision_policy import stabilize_decision_with_structure
-from src.trend_prompt_policy import _sanitize_trend_analysis_for_prompt
+from src.presentation.policies.price_position import fill_price_position_if_needed
+from src.domain.decision.structural import stabilize_decision_with_structure
+from src.infrastructure.llm.trend_prompt import _sanitize_trend_analysis_for_prompt
 
 
-def test_analyzer_public_module_aliases_isolated_runtime() -> None:
+def test_analyzer_public_module_aliases_infrastructure_runtime() -> None:
     assert analyzer is analyzer_impl
-    assert analyzer.__architecture_legacy_impl__ == "src.legacy.analyzer_impl"
+    assert (
+        analyzer.__architecture_infrastructure_impl__
+        == "src.infrastructure.llm.analyzer_impl"
+    )
     assert analyzer.__name__ == "src.analyzer"
 
 
@@ -36,7 +39,7 @@ def test_analyzer_policy_exports_are_single_runtime_sources_of_truth() -> None:
     )
 
 
-def test_analyzer_legacy_monkeypatch_seam_still_targets_runtime_globals() -> None:
+def test_analyzer_monkeypatch_seam_still_targets_runtime_globals() -> None:
     sentinel = object()
     with patch.object(analyzer, "Router", sentinel):
         assert analyzer_impl.Router is sentinel
