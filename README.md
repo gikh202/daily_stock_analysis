@@ -8,7 +8,7 @@
 [![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Ready-2088FF?logo=github-actions&logoColor=white)](https://github.com/gikh202/daily_stock_analysis/actions)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docs/full-guide.md#docker-部署)
 
-> 基于多源行情、新闻、基本面与大模型的多市场股票分析系统，并在本仓库中扩展了美股“收盘预测 → 开盘确认 → 真实结果回测 → 策略校准”的研究闭环。
+> 基于多源行情、新闻、基本面与大模型的多市场股票分析系统，并扩展了美股“收盘预测 → 开盘确认 → 真实结果回测 → 策略校准”的研究闭环。
 
 [**核心能力**](#-核心能力) · [**美股决策闭环**](#-美股决策闭环) · [**系统架构**](#-系统架构) · [**自动化工作流**](#-自动化工作流) · [**快速开始**](#-快速开始) · [**文档**](#-文档)
 
@@ -73,26 +73,25 @@ flowchart TD
 
 ### 三态执行语义
 
-美股开盘决策区分“可以执行”“等待更优入场”“今天不买/计划失效”等执行状态。其中 `WAIT_BETTER_ENTRY` 会携带可结算的研究字段，例如：
+美股开盘决策区分“可以执行”“等待更优入场”“今天不买/计划失效”等执行状态。其中 `WAIT_BETTER_ENTRY` 会携带可结算的研究字段。以下仅为示意值：假设当前价格约为 100，系统可能形成类似目标：
 
 ```json
 {
-  "expected_better_price": 0.0,
-  "expected_wait_minutes": 0,
-  "better_entry_reason": "..."
+  "expected_better_price": 99.0,
+  "expected_wait_minutes": 30,
+  "better_entry_reason": "等待价格向盘中参考支撑回落"
 }
 ```
 
-这些值只能由**决策当时可见的信息**推导，例如当前价、ATR、VWAP 偏离、支撑区域等；不能读取之后才出现的最低价、收盘价或未来 K 线。
+`expected_better_price` 与 `expected_wait_minutes` 不是固定阈值，必须由**决策当时可见的信息**推导，例如当前价、ATR、VWAP 偏离、支撑区域等；不能读取之后才出现的最低价、收盘价或未来 K 线。
 
 ### Research Ledger
 
-研究账本把“当时为什么这么判断”和“后来实际发生了什么”分开保存。核心研究指标包括：
+研究账本把“当时为什么这么判断”和“后来实际发生了什么”分开保存。账本字段及其 `decision_json` / settlement 派生研究指标包括：
 
 - `signal_time`
-- `current_price`
-- `expected_better_price`
-- `actual_entry_price`
+- `signal_price`
+- `decision_json.expected_better_price`
 - `better_entry_hit`
 - `best_future_improvement_pct`
 - `minutes_to_reference_better_price`
@@ -241,7 +240,7 @@ daily_stock_analysis/
 
 适合不想维护服务器、希望定时生成报告并接收通知的场景。
 
-1. Fork 本仓库。
+1. 使用本仓库，或按需复制/派生到你自己的仓库。
 2. 进入 `Settings → Secrets and variables → Actions`。
 3. 至少配置一个可用 AI 模型渠道。
 4. 配置 `STOCK_LIST`。
@@ -354,15 +353,11 @@ python -m py_compile main.py
 
 ---
 
-## 🙏 Upstream 与版权
+## 📄 License 与版权
 
-本仓库基于 [ZhuLinsen/daily_stock_analysis](https://github.com/ZhuLinsen/daily_stock_analysis) 的 MIT 开源项目持续开发，并保留其原始版权与许可证要求。
+本项目使用 [MIT License](LICENSE)。仓库继续保留原始许可证中的版权与许可声明；当前仓库作为独立仓库持续维护。
 
-本 fork 在原项目通用股票分析能力之上，维护了额外的美股开盘确认、research ledger、WAIT_BETTER_ENTRY 回测/校准和分层架构边界等工程化改动。
-
-## 📄 License
-
-本项目使用 [MIT License](LICENSE)。原始许可证版权声明为：
+原始许可证版权声明为：
 
 > Copyright (c) 2026 ZhuLinsen
 
