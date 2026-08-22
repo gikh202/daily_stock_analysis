@@ -25,7 +25,9 @@ def _top_level_functions(tree: ast.Module):
 
 
 def test_analyzer_imports_quote_presentation_policy_with_private_aliases() -> None:
-    tree = ast.parse(Path("src/analyzer.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        Path("src/infrastructure/llm/analyzer_impl.py").read_text(encoding="utf-8")
+    )
     imports = {
         alias.name: alias.asname
         for node in tree.body
@@ -38,7 +40,9 @@ def test_analyzer_imports_quote_presentation_policy_with_private_aliases() -> No
 
 
 def test_analyzer_keeps_thin_quote_presentation_facades() -> None:
-    tree = ast.parse(Path("src/analyzer.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        Path("src/infrastructure/llm/analyzer_impl.py").read_text(encoding="utf-8")
+    )
     functions = _top_level_functions(tree)
 
     assert set(functions) == set(_POLICY_ALIASES)

@@ -124,7 +124,9 @@ def test_phase_placeholder_language_remains_deterministic() -> None:
 
 
 def test_analyzer_keeps_thin_compatibility_facades() -> None:
-    tree = ast.parse(Path("src/analyzer.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        Path("src/infrastructure/llm/analyzer_impl.py").read_text(encoding="utf-8")
+    )
     imports = {
         alias.name: alias.asname
         for node in tree.body

@@ -69,7 +69,9 @@ def test_volume_price_stage_returns_none_for_unusable_input() -> None:
 
 
 def test_pipeline_volume_price_entrypoint_stays_a_thin_stage_delegate() -> None:
-    tree = ast.parse(Path("src/core/pipeline.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        Path("src/application/analysis/pipeline_impl.py").read_text(encoding="utf-8")
+    )
     pipeline_class = next(
         node
         for node in tree.body
