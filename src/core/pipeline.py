@@ -94,6 +94,7 @@ from src.core.pipeline_dependencies import (
     build_pipeline_dependencies,
 )
 from src.core.stages.market_data import MarketDataPersistenceStage
+from src.core.stages.volume_price import VolumePriceFeaturesStage
 from src.core.trading_calendar import (
     build_market_phase_context,
     get_effective_trading_date,
@@ -695,7 +696,8 @@ class StockAnalysisPipeline:
                     )
                     news_result_count = total_results
                     logger.info(f"{stock_name}({code}) 情报搜索完成: 共 {total_results} 条结果")
-                    logger.debug(f"{stock_name}({code}) 情报搜索结果:\n{news_context}")
+                    logger.debug(f"{stock_name}({code}) 情报搜索结果:\
+{news_context}")
 
                     # 保存新闻情报到数据库（用于后续复盘与查询）
                     try:
@@ -722,7 +724,9 @@ class StockAnalysisPipeline:
                     if social_context:
                         logger.info(f"{stock_name}({code}) Social sentiment data retrieved")
                         if news_context:
-                            news_context = news_context + "\n\n" + social_context
+                            news_context = news_context + "\
+\
+" + social_context
                         else:
                             news_context = social_context
                 except Exception as e:
@@ -730,7 +734,9 @@ class StockAnalysisPipeline:
 
             if persisted_intelligence_context:
                 news_context = (
-                    f"{news_context}\n\n{persisted_intelligence_context}"
+                    f"{news_context}\
+\
+{persisted_intelligence_context}"
                     if news_context
                     else persisted_intelligence_context
                 )
@@ -993,6 +999,13 @@ class StockAnalysisPipeline:
                     forecast_before_guardrails=forecast_before_guardrails,
                 )
 
+                if isinstance(result.dashboard, dict):
+                    result.dashboard["forecast"] = copy.deepcopy(
+                        getattr(result, "forecast", None)
+                    )
+                    result.dashboard["execution"] = copy.deepcopy(result.execution)
+                    result.dashboard["decision_trace"] = copy.deepcopy(trace)
+
                 logger.info(
                     "[PredictionExecutionSplit] %s forecast10d=%s "
                     "execution_action=%s action_label=%s operation_advice=%s "
@@ -1085,147 +1098,8 @@ class StockAnalysisPipeline:
     
     @staticmethod
     def _build_volume_price_features(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """
-        从完整日线计算用于 LLM 决策确认的量价特征。
-
-        设计原则：
-        1. RVOL 分母只使用“此前交易日”，避免把当日成交量放进分母稀释信号。
-        2. 不依赖实时 quote，适合收盘后/周末基于上一完整交易日分析。
-        3. 只作为趋势确认因子，不在这里直接修改买卖评分。
-        """
-        if df is None or df.empty:
-            return None
-
-        work = df.copy()
-        if "close" not in work.columns or "volume" not in work.columns:
-            return None
-
-        if "date" in work.columns:
-            try:
-                work = work.sort_values("date")
-            except Exception:
-                pass
-
-        work["close"] = pd.to_numeric(work["close"], errors="coerce")
-        work["volume"] = pd.to_numeric(work["volume"], errors="coerce")
-        work = work.dropna(subset=["close", "volume"])
-        work = work[(work["close"] > 0) & (work["volume"] >= 0)]
-        if len(work) < 2:
-            return None
-
-        latest = work.iloc[-1]
-        previous = work.iloc[:-1]
-        latest_close = float(latest["close"])
-        latest_volume = float(latest["volume"])
-
-        positive_previous_volume = previous.loc[previous["volume"] > 0, "volume"]
-        prev5 = positive_previous_volume.tail(5)
-        prev20 = positive_previous_volume.tail(20)
-
-        rvol5 = (
-            latest_volume / float(prev5.mean())
-            if latest_volume > 0 and len(prev5) >= 3 and float(prev5.mean()) > 0
-            else None
-        )
-        rvol20 = (
-            latest_volume / float(prev20.mean())
-            if latest_volume > 0 and len(prev20) >= 10 and float(prev20.mean()) > 0
-            else None
-        )
-
-        positive_all_volume = work.loc[work["volume"] > 0, "volume"]
-        current5 = positive_all_volume.tail(5)
-        current20 = positive_all_volume.tail(20)
-
-        volume_ma5 = float(current5.mean()) if len(current5) >= 3 else None
-        volume_ma20 = float(current20.mean()) if len(current20) >= 10 else None
-
-        previous_5_block = positive_all_volume.iloc[-10:-5] if len(positive_all_volume) >= 10 else pd.Series(dtype=float)
-        previous_5_avg = (
-            float(previous_5_block.mean())
-            if len(previous_5_block) >= 3 and float(previous_5_block.mean()) > 0
-            else None
-        )
-        volume_trend_5d_pct = (
-            (volume_ma5 / previous_5_avg - 1.0) * 100.0
-            if volume_ma5 is not None and previous_5_avg is not None
-            else None
-        )
-        volume_trend_vs20_pct = (
-            (volume_ma5 / volume_ma20 - 1.0) * 100.0
-            if volume_ma5 is not None and volume_ma20 is not None and volume_ma20 > 0
-            else None
-        )
-
-        previous_close = float(previous.iloc[-1]["close"]) if not previous.empty else None
-        price_change_pct = (
-            (latest_close / previous_close - 1.0) * 100.0
-            if previous_close is not None and previous_close > 0
-            else None
-        )
-
-        # 优先使用 20 日 RVOL 作为量能状态基准；样本不足时退化到 RVOL5。
-        volume_reference = rvol20 if rvol20 is not None else rvol5
-        if volume_reference is None:
-            volume_regime = "数据不足"
-        elif volume_reference >= 1.50:
-            volume_regime = "显著放量"
-        elif volume_reference >= 1.20:
-            volume_regime = "温和放量"
-        elif volume_reference >= 0.80:
-            volume_regime = "正常量能"
-        else:
-            volume_regime = "缩量"
-
-        # 价量组合只做“确认/削弱”描述，不在此处硬编码买卖分数。
-        price_volume_signal = "中性"
-        if price_change_pct is not None and volume_reference is not None:
-            if price_change_pct > 0.20 and volume_reference >= 1.20:
-                price_volume_signal = "上涨放量-多头确认增强"
-            elif price_change_pct > 0.20 and volume_reference < 0.80:
-                price_volume_signal = "上涨缩量-上涨确认不足"
-            elif price_change_pct < -0.20 and volume_reference >= 1.20:
-                price_volume_signal = "下跌放量-空头确认增强"
-            elif price_change_pct < -0.20 and volume_reference < 0.80:
-                price_volume_signal = "下跌缩量-下跌确认有限"
-            elif abs(price_change_pct) <= 0.20:
-                price_volume_signal = "价格横盘-量能作为突破预警"
-
-        trade_date = latest.get("date")
-        if hasattr(trade_date, "isoformat"):
-            try:
-                trade_date = trade_date.isoformat()
-            except Exception:
-                trade_date = str(trade_date)
-        elif trade_date is not None:
-            trade_date = str(trade_date)
-
-        return {
-            "trade_date": trade_date,
-            "rvol5": round(rvol5, 2) if rvol5 is not None else None,
-            "rvol20": round(rvol20, 2) if rvol20 is not None else None,
-            "volume_ma5": round(volume_ma5, 0) if volume_ma5 is not None else None,
-            "volume_ma20": round(volume_ma20, 0) if volume_ma20 is not None else None,
-            "volume_trend_5d_pct": (
-                round(volume_trend_5d_pct, 2)
-                if volume_trend_5d_pct is not None
-                else None
-            ),
-            "volume_trend_vs20_pct": (
-                round(volume_trend_vs20_pct, 2)
-                if volume_trend_vs20_pct is not None
-                else None
-            ),
-            "dollar_volume_proxy": round(latest_close * latest_volume, 0),
-            "price_change_pct": (
-                round(price_change_pct, 2)
-                if price_change_pct is not None
-                else None
-            ),
-            "volume_regime": volume_regime,
-            "price_volume_signal": price_volume_signal,
-            "source": "complete_daily_bars",
-        }
+        """Build complete-daily-bar volume/price confirmation features."""
+        return VolumePriceFeaturesStage.run(df)
 
     def _enhance_context(
         self,
@@ -1251,7 +1125,7 @@ class StockAnalysisPipeline:
             trend_result: 趋势分析结果
             stock_name: 股票名称
             market_phase_context: 已构建的市场阶段上下文，用于标记盘中 partial bar
-            
+        
         Returns:
             增强后的上下文
         """
@@ -1979,7 +1853,9 @@ class StockAnalysisPipeline:
                     if social_context:
                         existing = initial_context.get("news_context")
                         if existing:
-                            initial_context["news_context"] = existing + "\n\n" + social_context
+                            initial_context["news_context"] = existing + "\
+\
+" + social_context
                         else:
                             initial_context["news_context"] = social_context
                         logger.info(f"[{code}] Agent mode: social sentiment data injected into news_context")
@@ -1994,7 +1870,9 @@ class StockAnalysisPipeline:
             if persisted_intelligence_context:
                 existing = initial_context.get("news_context")
                 initial_context["news_context"] = (
-                    f"{existing}\n\n{persisted_intelligence_context}"
+                    f"{existing}\
+\
+{persisted_intelligence_context}"
                     if existing
                     else persisted_intelligence_context
                 )
@@ -3475,7 +3353,8 @@ class StockAnalysisPipeline:
                     lines.append(f"   摘要：{summary[:220]}")
                 if url and not url.startswith("no-url:intel:"):
                     lines.append(f"   来源：{url}")
-            return "\n".join(lines)
+            return "\
+".join(lines)
         except Exception as exc:
             logger.debug("读取本地资讯证据失败（fail-open）: %s", exc)
             return None
@@ -3892,7 +3771,7 @@ class StockAnalysisPipeline:
                     f"评分 {result.sentiment_score}"
                 )
                 
-                # 单股推送模式（#55）：每分析完一只股票立即推送
+                # 单股推送模式（#55）：每分析完一只立即推送
                 if single_stock_notify:
                     self._send_single_stock_notification(
                         result,
@@ -4402,7 +4281,8 @@ class StockAnalysisPipeline:
                         else:
                             dashboard_content = self.notifier.generate_wechat_dashboard(results)
                         logger.info(f"企业微信仪表盘长度: {len(dashboard_content)} 字符")
-                        logger.debug(f"企业微信推送内容:\n{dashboard_content}")
+                        logger.debug(f"企业微信推送内容:\
+{dashboard_content}")
                         wechat_image_bytes = None
                         if NotificationChannel.WECHAT in channels_needing_image:
                             wechat_image_kwargs: Dict[str, Any] = {
@@ -4770,7 +4650,8 @@ class StockAnalysisPipeline:
             ):
                 self.notifier.release_noise_control(noise_decision)
             import traceback
-            logger.error(f"发送通知失败: {e}\n{traceback.format_exc()}")
+            logger.error(f"发送通知失败: {e}\
+{traceback.format_exc()}")
 
     def _generate_aggregate_report(
         self,
