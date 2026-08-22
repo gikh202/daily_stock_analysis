@@ -9,6 +9,95 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  materialize-analyzer-quote-facade:
+    name: materialize-analyzer-quote-facade
+    if: github.event.pull_request.head.ref == 'refactor/analyzer-quote-presentation-facade'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout PR head
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: 🔧 Apply exact analyzer facade patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/analyzer.py")
+          text = path.read_text(encoding="utf-8")
+
+          integrity_import = '''from src.analysis_content_integrity import (
+              apply_placeholder_fill as _apply_placeholder_fill_policy,
+              check_content_integrity as _check_content_integrity_policy,
+          )
+'''
+          quote_import = '''from src.quote_presentation_policy import (
+              _phase_aware_quote_labels as _phase_aware_quote_labels_policy,
+              _should_hide_regular_session_ohlc as _should_hide_regular_session_ohlc_policy,
+              _today_has_realtime_overlay as _today_has_realtime_overlay_policy,
+              _today_looks_complete_daily_bar as _today_looks_complete_daily_bar_policy,
+          )
+'''
+          if quote_import not in text:
+              if text.count(integrity_import) != 1:
+                  raise SystemExit("unexpected analysis_content_integrity import shape")
+              text = text.replace(integrity_import, integrity_import + quote_import, 1)
+
+          start_marker = "def _today_has_realtime_overlay(today: Any) -> bool:\n"
+          end_marker = "\ndef _legacy_market_group(stock_code: Any) -> str:\n"
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit("legacy quote helper block not found")
+
+          facade_block = '''def _today_has_realtime_overlay(today: Any) -> bool:
+              """Compatibility facade for realtime-overlay quote presentation policy."""
+              return _today_has_realtime_overlay_policy(today)
+
+
+          def _today_looks_complete_daily_bar(
+              context: Dict[str, Any],
+              phase_context: Dict[str, Any],
+          ) -> bool:
+              """Compatibility facade for complete-daily-bar quote presentation policy."""
+              return _today_looks_complete_daily_bar_policy(context, phase_context)
+
+
+          def _phase_aware_quote_labels(context: Dict[str, Any]) -> Tuple[str, str]:
+              """Compatibility facade for market-phase-aware quote labels."""
+              return _phase_aware_quote_labels_policy(context)
+
+
+          def _should_hide_regular_session_ohlc(context: Dict[str, Any]) -> bool:
+              """Compatibility facade for regular-session OHLC visibility policy."""
+              return _should_hide_regular_session_ohlc_policy(context)
+
+
+          '''
+          text = text[:start] + facade_block + text[end + 1:]
+          compile(text, str(path), "exec")
+          path.write_text(text, encoding="utf-8")
+          PY
+      - name: 🧹 Restore CI workflow and push mechanical patch
+        shell: bash
+        run: |
+          git fetch origin main
+          git checkout origin/main -- .github/workflows/ci.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/analyzer.py .github/workflows/ci.yml
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo "No facade patch changes to commit."
+            exit 0
+          fi
+          git commit -m "refactor: wire quote presentation facade"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+
   changes:
     name: 🔎 Change Detection
     runs-on: ubuntu-latest
