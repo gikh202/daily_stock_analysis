@@ -97,7 +97,7 @@ def test_analysis_service_injects_config_and_pipeline_factory() -> None:
             "code": "AAPL",
             "skip_analysis": False,
             "single_stock_notify": False,
-            "report_type": ReportType.DETAILED,
+            "report_type": ReportType.FULL,
         }
     ]
 
