@@ -19,7 +19,7 @@ from typing import Any, Optional, Sequence
 
 from src.core.pipeline_factory_registry import (
     install_legacy_pipeline_seams,
-    resolve_pipeline_factory,
+    resolve_pipeline_factories,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,33 +60,24 @@ def build_pipeline_dependencies(
     and converted to ``None`` instead of aborting stock analysis.
     """
 
-    get_db = resolve_pipeline_factory("get_db")
-    data_fetcher_manager = resolve_pipeline_factory("DataFetcherManager")
-    market_regime_adapter_factory = resolve_pipeline_factory("MarketRegimeAdapter")
-    stock_trend_analyzer = resolve_pipeline_factory("StockTrendAnalyzer")
-    gemini_analyzer = resolve_pipeline_factory("GeminiAnalyzer")
-    notification_service = resolve_pipeline_factory("NotificationService")
-    search_service_factory = resolve_pipeline_factory("SearchService")
-    market_structure_service_factory = resolve_pipeline_factory("MarketStructureService")
-    market_hotspot_service_factory = resolve_pipeline_factory("MarketHotspotService")
-    social_sentiment_service_factory = resolve_pipeline_factory("SocialSentimentService")
+    factories = resolve_pipeline_factories()
 
-    db = get_db()
-    fetcher_manager = data_fetcher_manager()
-    market_regime_adapter = market_regime_adapter_factory()
-    trend_analyzer = stock_trend_analyzer()
-    analyzer = gemini_analyzer(
+    db = factories.get_db()
+    fetcher_manager = factories.data_fetcher_manager()
+    market_regime_adapter = factories.market_regime_adapter()
+    trend_analyzer = factories.stock_trend_analyzer()
+    analyzer = factories.gemini_analyzer(
         config=config,
         skills=list(analysis_skills) if analysis_skills is not None else None,
     )
-    notifier = notification_service(source_message=source_message)
-    market_structure_service = market_structure_service_factory(
+    notifier = factories.notification_service(source_message=source_message)
+    market_structure_service = factories.market_structure_service(
         fetcher_manager=fetcher_manager,
     )
 
     market_hotspot_service = None
     try:
-        market_hotspot_service = market_hotspot_service_factory(
+        market_hotspot_service = factories.market_hotspot_service(
             fetcher_manager=fetcher_manager,
         )
     except Exception as exc:
@@ -94,7 +85,7 @@ def build_pipeline_dependencies(
 
     search_service = None
     try:
-        search_service = search_service_factory(
+        search_service = factories.search_service(
             bocha_keys=config.bocha_api_keys,
             tavily_keys=config.tavily_api_keys,
             anspire_keys=config.anspire_api_keys,
@@ -115,7 +106,7 @@ def build_pipeline_dependencies(
 
     social_sentiment_service = None
     try:
-        social_sentiment_service = social_sentiment_service_factory(
+        social_sentiment_service = factories.social_sentiment_service(
             api_key=config.social_sentiment_api_key,
             api_url=config.social_sentiment_api_url,
         )
