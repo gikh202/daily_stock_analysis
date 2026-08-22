@@ -1,0 +1,64 @@
+name: Temporary pipeline market data codemod
+
+on:
+  push:
+    branches:
+      - refactor/pipeline-market-data-stage
+
+permissions:
+  contents: write
+
+jobs:
+  codemod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/pipeline-market-data-stage
+          fetch-depth: 0
+
+      - name: Apply narrow pipeline codemod
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("src/core/pipeline.py")
+          text = path.read_text(encoding="utf-8")
+
+          import_anchor = """from src.core.pipeline_dependencies import (\n    PipelineDependencies,\n    build_pipeline_dependencies,\n)\n"""
+          stage_import = "from src.core.stages.market_data import MarketDataPersistenceStage\n"
+          if stage_import not in text:
+              if text.count(import_anchor) != 1:
+                  raise SystemExit(f"expected exactly one pipeline dependency import anchor, found {text.count(import_anchor)}")
+              text = text.replace(import_anchor, import_anchor + stage_import, 1)
+
+          replacement = '''    def fetch_and_save_stock_data(\n        self,\n        code: str,\n        force_refresh: bool = False,\n        current_time: Optional[datetime] = None,\n    ) -> Tuple[bool, Optional[str]]:\n        """\n        获取并保存单只股票数据。\n\n        保留 Pipeline 的公开兼容入口；行情获取、断点续传检查与持久化由\n        ``MarketDataPersistenceStage`` 执行。\n        """\n        return MarketDataPersistenceStage(\n            fetcher_manager=self.fetcher_manager,\n            db=self.db,\n            resume_target_resolver=self._resolve_resume_target_date,\n        ).run(\n            code,\n            force_refresh=force_refresh,\n            current_time=current_time,\n        )\n\n'''
+
+          pattern = re.compile(
+              r"    def fetch_and_save_stock_data\(.*?(?=    @staticmethod\n    def _decision_state_snapshot)",
+              re.S,
+          )
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f"expected exactly one fetch_and_save_stock_data method, replaced {count}")
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          git diff --check
+          git diff -- src/core/pipeline.py
+
+      - name: Commit codemod result
+        shell: bash
+        run: |
+          if git diff --quiet -- src/core/pipeline.py; then
+            echo "No pipeline change needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/core/pipeline.py
+          git commit -m "refactor: delegate market data persistence stage"
+          git push origin HEAD:refactor/pipeline-market-data-stage
