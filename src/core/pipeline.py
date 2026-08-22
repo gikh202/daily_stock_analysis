@@ -93,6 +93,7 @@ from src.core.pipeline_dependencies import (
     PipelineDependencies,
     build_pipeline_dependencies,
 )
+from src.core.stages.market_data import MarketDataPersistenceStage
 from src.core.trading_calendar import (
     build_market_phase_context,
     get_effective_trading_date,
@@ -324,61 +325,28 @@ class StockAnalysisPipeline:
             )
 
     def fetch_and_save_stock_data(
-        self, 
+        self,
         code: str,
         force_refresh: bool = False,
         current_time: Optional[datetime] = None,
     ) -> Tuple[bool, Optional[str]]:
         """
-        获取并保存单只股票数据
-        
-        断点续传逻辑：
-        1. 检查数据库是否已有最新可复用交易日数据
-        2. 如果有且不强制刷新，则跳过网络请求
-        3. 否则从数据源获取并保存
-        
-        Args:
-            code: 股票代码
-            force_refresh: 是否强制刷新（忽略本地缓存）
-            current_time: 本轮运行冻结的参考时间，用于统一断点续传目标交易日判断
-            
-        Returns:
-            Tuple[是否成功, 错误信息]
+        获取并保存单只股票数据。
+
+        保留 Pipeline 的公开兼容入口；行情获取、断点续传检查与持久化由
+        ``MarketDataPersistenceStage`` 执行。
         """
-        stock_name = code
-        try:
-            # 首先获取股票名称
-            stock_name = self.fetcher_manager.get_stock_name(code, allow_realtime=False)
+        return MarketDataPersistenceStage(
+            fetcher_manager=self.fetcher_manager,
+            db=self.db,
+            resume_target_resolver=self._resolve_resume_target_date,
+            stage_logger=logger,
+        ).run(
+            code,
+            force_refresh=force_refresh,
+            current_time=current_time,
+        )
 
-            target_date = self._resolve_resume_target_date(
-                code, current_time=current_time
-            )
-
-            # 断点续传检查：如果最新可复用交易日的数据已存在，则跳过
-            if not force_refresh and self.db.has_today_data(code, target_date):
-                logger.info(
-                    f"{stock_name}({code}) {target_date} 数据已存在，跳过获取（断点续传）"
-                )
-                return True, None
-
-            # 从数据源获取数据
-            logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
-            df, source_name = self.fetcher_manager.get_daily_data(code, days=60)
-
-            if df is None or df.empty:
-                return False, "获取数据为空"
-
-            # 保存到数据库
-            saved_count = self.db.save_daily_data(df, code, source_name)
-            logger.info(f"{stock_name}({code}) 数据保存成功（来源: {source_name}，新增 {saved_count} 条）")
-
-            return True, None
-
-        except Exception as e:
-            error_msg = f"获取/保存数据失败: {str(e)}"
-            logger.error(f"{stock_name}({code}) {error_msg}")
-            return False, error_msg
-    
     @staticmethod
     def _decision_state_snapshot(result: Optional[AnalysisResult]) -> Dict[str, Any]:
         if result is None:
