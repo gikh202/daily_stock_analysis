@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 from unittest.mock import patch
 
 import src.analyzer as analyzer
@@ -18,11 +19,12 @@ from src.infrastructure.llm.trend_prompt import _sanitize_trend_analysis_for_pro
 
 def test_analyzer_public_module_aliases_infrastructure_runtime() -> None:
     assert analyzer is analyzer_impl
-    assert (
-        analyzer.__architecture_infrastructure_impl__
-        == "src.infrastructure.llm.analyzer_impl"
+    assert analyzer.__architecture_infrastructure_impl__ == (
+        "src.infrastructure.llm.analyzer_impl"
     )
     assert analyzer.__name__ == "src.analyzer"
+    assert analyzer.__spec__ is not None
+    assert analyzer.__spec__.name == "src.analyzer"
 
 
 def test_analyzer_policy_exports_are_single_runtime_sources_of_truth() -> None:
@@ -33,10 +35,7 @@ def test_analyzer_policy_exports_are_single_runtime_sources_of_truth() -> None:
     )
     assert analyzer.fill_price_position_if_needed is fill_price_position_if_needed
     assert analyzer.stabilize_decision_with_structure is stabilize_decision_with_structure
-    assert (
-        analyzer._sanitize_trend_analysis_for_prompt
-        is _sanitize_trend_analysis_for_prompt
-    )
+    assert analyzer._sanitize_trend_analysis_for_prompt is _sanitize_trend_analysis_for_prompt
 
 
 def test_analyzer_monkeypatch_seam_still_targets_runtime_globals() -> None:
@@ -49,3 +48,12 @@ def test_analyzer_monkeypatch_seam_still_targets_runtime_globals() -> None:
 def test_public_analyzer_class_module_name_is_preserved() -> None:
     assert analyzer.GeminiAnalyzer.__module__ == "src.analyzer"
     assert analyzer.AnalysisResult.__module__ == "src.analyzer"
+
+
+def test_reload_reexecutes_facade_and_preserves_policy_wiring() -> None:
+    reloaded = importlib.reload(analyzer)
+    assert reloaded is analyzer
+    assert reloaded.__spec__ is not None
+    assert reloaded.__spec__.name == "src.analyzer"
+    assert reloaded.fill_price_position_if_needed is fill_price_position_if_needed
+    assert reloaded.stabilize_decision_with_structure is stabilize_decision_with_structure

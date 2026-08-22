@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,11 +15,12 @@ from src.application.analysis.stages.decision_trace import DecisionTraceStage
 
 def test_pipeline_public_module_aliases_application_runtime() -> None:
     assert pipeline is pipeline_impl
-    assert (
-        pipeline.__architecture_application_impl__
-        == "src.application.analysis.pipeline_impl"
+    assert pipeline.__architecture_application_impl__ == (
+        "src.application.analysis.pipeline_impl"
     )
     assert pipeline.__name__ == "src.core.pipeline"
+    assert pipeline.__spec__ is not None
+    assert pipeline.__spec__.name == "src.core.pipeline"
     assert pipeline.StockAnalysisPipeline.__module__ == "src.core.pipeline"
 
 
@@ -68,3 +70,11 @@ def test_guardrail_trace_helper_delegates_to_stage() -> None:
             "after": {"action": "watch"},
         }
     ]
+
+
+def test_reload_reexecutes_pipeline_facade() -> None:
+    reloaded = importlib.reload(pipeline)
+    assert reloaded is pipeline
+    assert reloaded.__spec__ is not None
+    assert reloaded.__spec__.name == "src.core.pipeline"
+    assert reloaded.StockAnalysisPipeline.__module__ == "src.core.pipeline"
