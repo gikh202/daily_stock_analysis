@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Compatibility service functions for stock analysis and market review.
 
-The public function API is kept for existing CLI/Bot callers.  Concrete
+The public function API is kept for existing CLI/Bot callers. Concrete
 ``StockAnalysisPipeline`` construction is delegated to ``pipeline_factory`` so
 this module no longer depends directly on the orchestration implementation.
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, List, Optional
 
-from src.core.market_review import run_market_review
 from src.enums import ReportType
 from src.services.pipeline_factory import (
     PipelineFactory,
@@ -83,6 +82,8 @@ def perform_market_review(
     pipeline_factory: PipelineFactory = create_analysis_pipeline,
 ) -> Optional[str]:
     """Run a market review without coupling callers to the concrete pipeline."""
+
+    from src.core.market_review import run_market_review
 
     effective_config = config or get_analysis_config()
     pipeline = pipeline_factory(
