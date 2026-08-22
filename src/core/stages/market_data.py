@@ -23,10 +23,12 @@ class MarketDataPersistenceStage:
         fetcher_manager: Any,
         db: Any,
         resume_target_resolver: ResumeTargetResolver,
+        stage_logger: Any = logger,
     ) -> None:
         self.fetcher_manager = fetcher_manager
         self.db = db
         self.resume_target_resolver = resume_target_resolver
+        self.logger = stage_logger
 
     def run(
         self,
@@ -50,19 +52,19 @@ class MarketDataPersistenceStage:
             )
 
             if not force_refresh and self.db.has_today_data(code, target_date):
-                logger.info(
+                self.logger.info(
                     f"{stock_name}({code}) {target_date} 数据已存在，跳过获取（断点续传）"
                 )
                 return True, None
 
-            logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
+            self.logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
             df, source_name = self.fetcher_manager.get_daily_data(code, days=60)
 
             if df is None or df.empty:
                 return False, "获取数据为空"
 
             saved_count = self.db.save_daily_data(df, code, source_name)
-            logger.info(
+            self.logger.info(
                 f"{stock_name}({code}) 数据保存成功（来源: {source_name}，新增 {saved_count} 条）"
             )
 
@@ -70,5 +72,5 @@ class MarketDataPersistenceStage:
 
         except Exception as exc:
             error_msg = f"获取/保存数据失败: {str(exc)}"
-            logger.error(f"{stock_name}({code}) {error_msg}")
+            self.logger.error(f"{stock_name}({code}) {error_msg}")
             return False, error_msg
