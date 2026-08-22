@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -82,3 +84,37 @@ def test_market_data_stage_preserves_fail_safe_error_contract() -> None:
     result = _stage(fetcher_manager=fetcher).run("GOOGL")
 
     assert result == (False, "获取/保存数据失败: provider unavailable")
+
+
+def test_pipeline_market_data_entrypoint_stays_a_thin_stage_delegate() -> None:
+    tree = ast.parse(Path("src/core/pipeline.py").read_text(encoding="utf-8"))
+    pipeline_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "StockAnalysisPipeline"
+    )
+    method = next(
+        node
+        for node in pipeline_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "fetch_and_save_stock_data"
+    )
+
+    call_names = set()
+    for node in ast.walk(method):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            call_names.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            call_names.add(node.func.attr)
+
+    assert "MarketDataPersistenceStage" in call_names
+    assert "run" in call_names
+    assert call_names.isdisjoint(
+        {
+            "get_stock_name",
+            "has_today_data",
+            "get_daily_data",
+            "save_daily_data",
+        }
+    )
