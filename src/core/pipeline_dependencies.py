@@ -6,84 +6,29 @@ This module is the composition root for concrete runtime dependencies used by
 on orchestration and allows tests to inject light-weight dependency bundles.
 
 The historical pipeline module exposed its concrete constructors as patch
-seams. During this refactor we keep those seams available and resolve them at
-build time so existing callers/tests can monkeypatch them without moving
-concrete construction back into ``StockAnalysisPipeline.__init__``.
+seams. Those compatibility aliases are maintained by
+``pipeline_factory_registry`` so this module can focus only on assembling the
+runtime dependency graph.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-import sys
 from typing import Any, Optional, Sequence
 
-from data_provider import DataFetcherManager as _DefaultDataFetcherManager
-from data_provider.market_regime_adapter import (
-    MarketRegimeAdapter as _DefaultMarketRegimeAdapter,
+from src.core.pipeline_factory_registry import (
+    install_legacy_pipeline_seams,
+    resolve_pipeline_factory,
 )
-from src.analyzer import GeminiAnalyzer as _DefaultGeminiAnalyzer
-from src.notification import NotificationService as _DefaultNotificationService
-from src.search_service import SearchService as _DefaultSearchService
-from src.services.market_hotspot_service import (
-    MarketHotspotService as _DefaultMarketHotspotService,
-)
-from src.services.market_structure_service import (
-    MarketStructureService as _DefaultMarketStructureService,
-)
-from src.services.social_sentiment_service import (
-    SocialSentimentService as _DefaultSocialSentimentService,
-)
-from src.stock_analyzer import StockTrendAnalyzer as _DefaultStockTrendAnalyzer
-from src.storage import get_db as _default_get_db
 
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_FACTORIES = {
-    "get_db": _default_get_db,
-    "DataFetcherManager": _DefaultDataFetcherManager,
-    "MarketRegimeAdapter": _DefaultMarketRegimeAdapter,
-    "StockTrendAnalyzer": _DefaultStockTrendAnalyzer,
-    "GeminiAnalyzer": _DefaultGeminiAnalyzer,
-    "NotificationService": _DefaultNotificationService,
-    "SearchService": _DefaultSearchService,
-    "MarketStructureService": _DefaultMarketStructureService,
-    "MarketHotspotService": _DefaultMarketHotspotService,
-    "SocialSentimentService": _DefaultSocialSentimentService,
-}
-
-
-def _pipeline_module() -> Optional[Any]:
-    """Return the importing pipeline module when it is present."""
-
-    return sys.modules.get("src.core.pipeline")
-
-
-def _install_legacy_pipeline_seams() -> None:
-    """Keep historical ``src.core.pipeline.<constructor>`` patch targets alive."""
-
-    pipeline_module = _pipeline_module()
-    if pipeline_module is None:
-        return
-    for name, default in _DEFAULT_FACTORIES.items():
-        if not hasattr(pipeline_module, name):
-            setattr(pipeline_module, name, default)
-
-
-def _resolve_factory(name: str) -> Any:
-    """Honor a patched historical pipeline seam, otherwise use the default."""
-
-    pipeline_module = _pipeline_module()
-    if pipeline_module is not None and hasattr(pipeline_module, name):
-        return getattr(pipeline_module, name)
-    return _DEFAULT_FACTORIES[name]
-
-
 # ``pipeline_dependencies`` is imported while ``src.core.pipeline`` is being
-# initialized, so installing the aliases here preserves its previous public
-# monkeypatch surface without putting concrete construction back in __init__.
-_install_legacy_pipeline_seams()
+# initialized, so install the historical constructor aliases at the same
+# import-time point as before.
+install_legacy_pipeline_seams()
 
 
 @dataclass(frozen=True)
@@ -115,16 +60,16 @@ def build_pipeline_dependencies(
     and converted to ``None`` instead of aborting stock analysis.
     """
 
-    get_db = _resolve_factory("get_db")
-    data_fetcher_manager = _resolve_factory("DataFetcherManager")
-    market_regime_adapter_factory = _resolve_factory("MarketRegimeAdapter")
-    stock_trend_analyzer = _resolve_factory("StockTrendAnalyzer")
-    gemini_analyzer = _resolve_factory("GeminiAnalyzer")
-    notification_service = _resolve_factory("NotificationService")
-    search_service_factory = _resolve_factory("SearchService")
-    market_structure_service_factory = _resolve_factory("MarketStructureService")
-    market_hotspot_service_factory = _resolve_factory("MarketHotspotService")
-    social_sentiment_service_factory = _resolve_factory("SocialSentimentService")
+    get_db = resolve_pipeline_factory("get_db")
+    data_fetcher_manager = resolve_pipeline_factory("DataFetcherManager")
+    market_regime_adapter_factory = resolve_pipeline_factory("MarketRegimeAdapter")
+    stock_trend_analyzer = resolve_pipeline_factory("StockTrendAnalyzer")
+    gemini_analyzer = resolve_pipeline_factory("GeminiAnalyzer")
+    notification_service = resolve_pipeline_factory("NotificationService")
+    search_service_factory = resolve_pipeline_factory("SearchService")
+    market_structure_service_factory = resolve_pipeline_factory("MarketStructureService")
+    market_hotspot_service_factory = resolve_pipeline_factory("MarketHotspotService")
+    social_sentiment_service_factory = resolve_pipeline_factory("SocialSentimentService")
 
     db = get_db()
     fetcher_manager = data_fetcher_manager()
