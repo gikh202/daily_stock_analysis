@@ -1,0 +1,15 @@
+{
+  "active": "v7.3-policy-001",
+  "challenger": null,
+  "policies": {
+    "v7.3-policy-001": {
+      "promoted_at": "2026-08-22",
+      "source": "v7.2-equivalent-baseline",
+      "status": "ACTIVE"
+    }
+  },
+  "previous": null,
+  "promotion_mode": "pull_request",
+  "schema_version": "us-open-policy-registry-v1",
+  "score_model_version": "heuristic_score_v1"
+}
