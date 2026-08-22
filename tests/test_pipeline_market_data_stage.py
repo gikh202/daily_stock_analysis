@@ -12,12 +12,15 @@ from unittest.mock import MagicMock
 from src.core.stages.market_data import MarketDataPersistenceStage
 
 
-def _stage(*, fetcher_manager=None, db=None, resolver=None):
-    return MarketDataPersistenceStage(
-        fetcher_manager=fetcher_manager or MagicMock(),
-        db=db or MagicMock(),
-        resume_target_resolver=resolver or MagicMock(return_value="2026-08-21"),
-    )
+def _stage(*, fetcher_manager=None, db=None, resolver=None, stage_logger=None):
+    kwargs = {
+        "fetcher_manager": fetcher_manager or MagicMock(),
+        "db": db or MagicMock(),
+        "resume_target_resolver": resolver or MagicMock(return_value="2026-08-21"),
+    }
+    if stage_logger is not None:
+        kwargs["stage_logger"] = stage_logger
+    return MarketDataPersistenceStage(**kwargs)
 
 
 def test_market_data_stage_skips_cached_target_date_without_fetching() -> None:
@@ -86,6 +89,23 @@ def test_market_data_stage_preserves_fail_safe_error_contract() -> None:
     assert result == (False, "获取/保存数据失败: provider unavailable")
 
 
+def test_market_data_stage_uses_injected_logger() -> None:
+    fetcher = MagicMock()
+    fetcher.get_stock_name.return_value = "Alphabet"
+    db = MagicMock()
+    db.has_today_data.return_value = True
+    injected_logger = MagicMock()
+
+    result = _stage(
+        fetcher_manager=fetcher,
+        db=db,
+        stage_logger=injected_logger,
+    ).run("GOOGL")
+
+    assert result == (True, None)
+    injected_logger.info.assert_called_once()
+
+
 def test_pipeline_market_data_entrypoint_stays_a_thin_stage_delegate() -> None:
     tree = ast.parse(Path("src/core/pipeline.py").read_text(encoding="utf-8"))
     pipeline_class = next(
@@ -99,12 +119,14 @@ def test_pipeline_market_data_entrypoint_stays_a_thin_stage_delegate() -> None:
         if isinstance(node, ast.FunctionDef) and node.name == "fetch_and_save_stock_data"
     )
 
+    calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
     call_names = set()
-    for node in ast.walk(method):
-        if not isinstance(node, ast.Call):
-            continue
+    stage_call = None
+    for node in calls:
         if isinstance(node.func, ast.Name):
             call_names.add(node.func.id)
+            if node.func.id == "MarketDataPersistenceStage":
+                stage_call = node
         elif isinstance(node.func, ast.Attribute):
             call_names.add(node.func.attr)
 
@@ -118,3 +140,11 @@ def test_pipeline_market_data_entrypoint_stays_a_thin_stage_delegate() -> None:
             "save_daily_data",
         }
     )
+    assert stage_call is not None
+    stage_logger_keyword = next(
+        (keyword for keyword in stage_call.keywords if keyword.arg == "stage_logger"),
+        None,
+    )
+    assert stage_logger_keyword is not None
+    assert isinstance(stage_logger_keyword.value, ast.Name)
+    assert stage_logger_keyword.value.id == "logger"
