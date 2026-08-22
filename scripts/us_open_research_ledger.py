@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
-SCHEMA_VERSION = "us-open-research-ledger-v2"
+SCHEMA_VERSION = "us-open-research-ledger-v3"
 
 
 def _json(value: Any) -> str:
@@ -80,6 +80,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
             better_entry_hit INTEGER,
             best_future_improvement_pct REAL,
             minutes_to_reference_better_price REAL,
+            close_plan_json TEXT,
+            execution_transition TEXT,
             outcome_json TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_us_open_signals_date_symbol
@@ -96,6 +98,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
         "better_entry_hit": "INTEGER",
         "best_future_improvement_pct": "REAL",
         "minutes_to_reference_better_price": "REAL",
+        "close_plan_json": "TEXT",
+        "execution_transition": "TEXT",
     }.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE us_open_signals ADD COLUMN {name} {ddl}")
@@ -118,6 +122,33 @@ def signal_key(
             str(signal_bar_time or "").strip(),
         ]
     )
+
+
+def _close_execution_contract(packet: Mapping[str, Any]) -> dict[str, Any]:
+    assessment = packet.get("assessment") if isinstance(packet.get("assessment"), Mapping) else {}
+    execution = packet.get("execution") if isinstance(packet.get("execution"), Mapping) else {}
+    explicit_status = str(assessment.get("execution_status") or execution.get("execution_status") or "").strip().upper()
+    authorized = bool(assessment.get("execution_authorized") if "execution_authorized" in assessment else execution.get("execution_authorized"))
+    verdict = str(assessment.get("verdict") or "").strip().lower()
+    worth_buying = assessment.get("worth_buying")
+    if explicit_status in {"FULL_APPROVED", "CONDITIONAL_APPROVED", "REJECTED"}:
+        execution_status = explicit_status
+    elif authorized:
+        execution_status = "FULL_APPROVED"
+    elif worth_buying is True or verdict in {"buy_by_plan", "conditional_buy", "watch"}:
+        execution_status = "CONDITIONAL_APPROVED"
+    else:
+        execution_status = "REJECTED"
+    conditional_entry_price = _finite(assessment.get("conditional_entry_price") or execution.get("conditional_entry_price"))
+    conditional_entry_reason = str(assessment.get("conditional_entry_reason") or execution.get("conditional_entry_reason") or "").strip() or None
+    return {
+        "execution_status": execution_status,
+        "execution_authorized": execution_status == "FULL_APPROVED",
+        "conditional_entry_price": conditional_entry_price,
+        "conditional_entry_reason": conditional_entry_reason,
+        "verdict": verdict or None,
+        "worth_buying": worth_buying if isinstance(worth_buying, bool) else None,
+    }
 
 def record_signal(
     path: str | Path,
@@ -143,6 +174,10 @@ def record_signal(
         source_run_id=source_run_id,
         signal_bar_time=bar_time.isoformat(),
     )
+    close_plan = _close_execution_contract(packet)
+    open_action = str(decision.get("action") or decision.get("status") or "").strip().upper()
+    transition = f"{close_plan['execution_status']}->{open_action or 'UNKNOWN'}"
+
     with connect(path) as conn:
         cursor = conn.execute(
             """
@@ -150,8 +185,9 @@ def record_signal(
                 schema_version, signal_key, session_date, symbol,
                 policy_version, source_run_id, source_trade_date,
                 evaluated_at, signal_bar_time, signal_price,
-                decision_status, packet_json, snapshot_json, decision_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                decision_status, packet_json, snapshot_json, decision_json,
+                close_plan_json, execution_transition
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 SCHEMA_VERSION,
@@ -168,6 +204,8 @@ def record_signal(
                 _json(packet),
                 _json(snapshot),
                 _json(decision),
+                _json(close_plan),
+                transition,
             ),
         )
         return cursor.rowcount > 0
@@ -414,6 +452,16 @@ def summary(path: str | Path) -> dict[str, Any]:
             ORDER BY session_date, symbol, id
             """
         ).fetchall()
+        transition_rows = conn.execute(
+            """
+            SELECT execution_transition, COUNT(*)
+            FROM us_open_signals
+            WHERE execution_transition IS NOT NULL
+              AND execution_transition <> ''
+            GROUP BY execution_transition
+            ORDER BY execution_transition
+            """
+        ).fetchall()
     close_returns = [float(row[0]) for row in buy_rows if row[0] is not None]
     hour_returns = [float(row[1]) for row in buy_rows if row[1] is not None]
     maes = [float(row[2]) for row in buy_rows if row[2] is not None]
@@ -421,8 +469,14 @@ def summary(path: str | Path) -> dict[str, Any]:
     wait_hits = [int(row[0]) for row in wait_rows if row[0] is not None]
     wait_improvements = [float(row[1]) for row in wait_rows if row[1] is not None]
     wait_minutes = [float(row[2]) for row in wait_rows if row[2] is not None]
+    execution_transition_stats = {
+        str(row[0]): int(row[1])
+        for row in transition_rows
+        if row[0]
+    }
     return {
         "schema_version": SCHEMA_VERSION,
+        "execution_transition_stats": execution_transition_stats,
         "signals": total,
         "settled": settled,
         "pending": total - settled,
