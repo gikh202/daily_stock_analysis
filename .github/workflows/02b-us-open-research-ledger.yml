@@ -134,7 +134,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p open_confirmation_research open_confirmation_reports
-          python scripts/capture_us_open_research.py \
+          python -m scripts.capture_us_open_research \
             --confirmation-json '${{ steps.source.outputs.confirmation_json }}' \
             --v6-payload '${{ steps.v6.outputs.payload }}' \
             --db open_confirmation_research/us_open_research.db \
