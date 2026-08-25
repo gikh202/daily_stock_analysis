@@ -465,8 +465,16 @@ jobs:
               encoding='utf-8',
           )
           if not notification['success']:
-              raise SystemExit(f"V6 final notification failed: {notification}")
-          print('V6 final notification: PASS')
+              print(
+                  '::warning::V6 final notification failed, but the production-ready '
+                  f'forecast remains valid for next-session open confirmation: {notification}'
+              )
+              print(
+                  'V6 final notification: DEGRADED; delivery failure does not invalidate '
+                  'the validated forecast artifact.'
+              )
+          else:
+              print('V6 final notification: PASS')
           PY
 
       - name: 上传 V6 综合日报与 Stage 13 归档证据
