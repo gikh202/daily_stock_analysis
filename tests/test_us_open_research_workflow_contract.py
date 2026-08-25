@@ -11,7 +11,8 @@ def test_research_workflow_runs_after_open_confirmation_and_never_notifies():
     assert "pattern: us-open-timing-*" in text
     assert "steps.evidence.outputs.capture == 'true'" in text
     assert 'github.event.workflow_run.head_sha' in text
-    assert 'capture_us_open_research.py' in text
+    assert 'python -m scripts.capture_us_open_research' in text
+    assert 'python scripts/capture_us_open_research.py' not in text
     assert 'us_open_research.db' in text
     assert '--notify' not in text
     assert 'EMAIL_PASSWORD' not in text
