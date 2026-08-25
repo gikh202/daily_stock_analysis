@@ -16,6 +16,7 @@ on:
       - 'scripts/run_us_open_confirmation_v2.py'
       - 'scripts/run_us_open_confirmation_safe.py'
       - 'scripts/run_us_open_timing.py'
+      - 'scripts/us_open_terminal_lock.py'
       - 'scripts/send_us_open_failure_alert.py'
       - 'scripts/us_open_research_ledger.py'
       - 'scripts/capture_us_open_research.py'
@@ -28,6 +29,7 @@ on:
       - 'tests/test_us_open_research_ledger.py'
       - 'tests/test_us_open_policy_probe.py'
       - 'tests/test_us_open_research_workflow_contract.py'
+      - 'tests/test_us_open_terminal_lock.py'
 
 permissions:
   contents: read
@@ -63,7 +65,8 @@ jobs:
             tests/test_v7_intraday_timing.py \
             tests/test_us_open_research_ledger.py \
             tests/test_us_open_policy_probe.py \
-            tests/test_us_open_research_workflow_contract.py
+            tests/test_us_open_research_workflow_contract.py \
+            tests/test_us_open_terminal_lock.py
 
       - name: Find latest successful V6/V7 artifact
         id: prior-v6
