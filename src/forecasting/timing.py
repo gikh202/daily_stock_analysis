@@ -8,6 +8,12 @@ from .models import TimingAssessment
 from .timing_policy import TimingPolicy, load_timing_policy
 
 
+# Production workflow candidates after the initial 09:30 ET evaluation.
+# Values are minutes since the 09:30 open and must stay aligned with
+# .github/workflows/01-us-open-confirmation.yml.
+PRODUCTION_RECHECK_MINUTES_SINCE_OPEN = (5, 15, 30, 60, 90, 150)
+
+
 def _finite(value: Any) -> Optional[float]:
     try:
         number = float(value)
@@ -20,12 +26,33 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def production_recheck_delay(minutes_since_open: int) -> int:
+    """Return minutes until the next configured production recheck.
+
+    The workflow runs at 09:30 / 09:35 / 09:45 / 10:00 / 10:30 / 11:00 /
+    12:00 ET.  GitHub may start a runner late, so this function uses the actual
+    evaluation clock and picks the next still-future nominal candidate.  A zero
+    result means the automated recheck window is over for the session.
+    """
+
+    current = max(0, int(minutes_since_open))
+    for target in PRODUCTION_RECHECK_MINUTES_SINCE_OPEN:
+        if target > current:
+            return target - current
+    return 0
+
+
 class IntradayTimingModel:
     """Estimate whether waiting is likely to improve the near-term entry.
 
     V7.3 moves tunable timing constants into a versioned policy while keeping hard
     risk blockers authoritative in code. The default policy is behavior-equivalent
     to V7.2 and Challenger calibration may only change explicitly tunable fields.
+
+    Strategy policy still decides whether waiting has value.  The returned
+    ``recheck_minutes`` is operational: it reflects the next production workflow
+    candidate rather than a theoretical policy interval, so emails and Research
+    Ledger evaluate the wait window the automation can actually observe.
     """
 
     version = "v7.1-intraday-timing.1"
@@ -66,6 +93,9 @@ class IntradayTimingModel:
     ) -> TimingAssessment:
         p = self.policy
         status = str(base_status or "").strip().upper()
+        scheduled_recheck = production_recheck_delay(minutes_since_open)
+        has_scheduled_follow_up = scheduled_recheck > 0
+
         if status in {"NO_BUY", "INVALIDATED"}:
             return TimingAssessment(
                 status,
@@ -77,14 +107,23 @@ class IntradayTimingModel:
                 True,
             )
         if status == "DATA_UNAVAILABLE":
+            rationale = (
+                "current quote/data quality is not sufficient for execution"
+            )
+            if has_scheduled_follow_up:
+                rationale += (
+                    f"; next automated production recheck is in {scheduled_recheck} minutes"
+                )
+            else:
+                rationale += "; automated production recheck window is over for today"
             return TimingAssessment(
                 "DATA_UNAVAILABLE",
                 0.0,
                 None,
                 0.0,
-                p.early_recheck_minutes,
-                "current quote/data quality is not sufficient for execution; keep the session open for a later fresh-data recheck",
-                False,
+                scheduled_recheck,
+                rationale,
+                not has_scheduled_follow_up,
             )
 
         price = float(current_price)
@@ -162,16 +201,24 @@ class IntradayTimingModel:
             and p1 >= p.continuation_p1
             and vwap_premium_pct >= p.continuation_vwap_premium_min_pct
         )
-        early_recheck = (
+        recommended_early_recheck = (
             p.early_recheck_minutes
             if minutes_since_open < p.early_recheck_cutoff_minutes
             else p.late_recheck_minutes
         )
-        confirmation_recheck = (
+        recommended_confirmation_recheck = (
             p.early_recheck_minutes
             if minutes_since_open < p.confirmation_recheck_cutoff_minutes
             else p.late_recheck_minutes
         )
+
+        def scheduled_rationale(text: str, recommended: int) -> str:
+            if has_scheduled_follow_up:
+                return (
+                    f"{text}; policy prefers about {recommended} minutes, while the "
+                    f"next automated production recheck is in {scheduled_recheck} minutes"
+                )
+            return f"{text}; automated production recheck window is over for today"
 
         if status == "BUY_NOW":
             if (
@@ -184,9 +231,12 @@ class IntradayTimingModel:
                     round(better, 4),
                     round(better_price, 4),
                     round(expected_improvement, 4),
-                    early_recheck,
-                    f"near-term better-entry heuristic score {better:.1%} with estimated {expected_improvement:.2f}% price improvement; expected value favors waiting",
-                    False,
+                    scheduled_recheck,
+                    scheduled_rationale(
+                        f"near-term better-entry heuristic score {better:.1%} with estimated {expected_improvement:.2f}% price improvement; expected value favors waiting",
+                        recommended_early_recheck,
+                    ),
+                    not has_scheduled_follow_up,
                 )
             return TimingAssessment(
                 "BUY_NOW",
@@ -203,9 +253,12 @@ class IntradayTimingModel:
                 round(max(better, p.pullback_score_floor), 4),
                 round(better_price, 4),
                 round(expected_improvement, 4),
-                early_recheck,
-                "current price is extended above the risk-bounded entry; wait for a better price rather than chase",
-                False,
+                scheduled_recheck,
+                scheduled_rationale(
+                    "current price is extended above the risk-bounded entry; wait for a better price rather than chase",
+                    recommended_early_recheck,
+                ),
+                not has_scheduled_follow_up,
             )
         if status in {"WAIT_ENTRY", "WAIT_STABILIZE"}:
             return TimingAssessment(
@@ -213,21 +266,27 @@ class IntradayTimingModel:
                 round(better, 4),
                 round(better_price, 4),
                 round(expected_improvement, 4),
-                confirmation_recheck,
-                "price is already cheap/weak relative to the plan; "
-                + (
-                    "downside momentum is still elevated"
-                    if falling_hard
-                    else "stabilization is not yet confirmed"
+                scheduled_recheck,
+                scheduled_rationale(
+                    "price is already cheap/weak relative to the plan; "
+                    + (
+                        "downside momentum is still elevated"
+                        if falling_hard
+                        else "stabilization is not yet confirmed"
+                    ),
+                    recommended_confirmation_recheck,
                 ),
-                False,
+                not has_scheduled_follow_up,
             )
         return TimingAssessment(
             status or "WAIT_CONFIRMATION",
             round(better, 4),
             round(better_price, 4),
             round(expected_improvement, 4),
-            p.default_recheck_minutes,
-            "state is non-terminal; re-evaluate with fresher intraday evidence",
-            False,
+            scheduled_recheck,
+            scheduled_rationale(
+                "state is non-terminal; re-evaluate with fresher intraday evidence",
+                p.default_recheck_minutes,
+            ),
+            not has_scheduled_follow_up,
         )

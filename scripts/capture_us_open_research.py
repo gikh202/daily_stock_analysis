@@ -24,6 +24,24 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _has_observable_wait_window(decision: Mapping[str, Any]) -> bool:
+    """Whether a WAIT decision has a real future automation window to settle.
+
+    At the final 12:00 ET production candidate the timing model may still prefer
+    waiting, but there is no later automated recheck.  Such a terminal WAIT must
+    stay visible in the user report while being excluded from realized WAIT-window
+    research; otherwise the ledger would silently fabricate a fallback horizon.
+    """
+
+    action = str(decision.get("action") or decision.get("status") or "").strip().upper()
+    if action not in {"WAIT_BETTER_ENTRY", "WAIT_CONFIRMATION"}:
+        return True
+    recheck = _finite(decision.get("expected_wait_minutes"))
+    if recheck is None:
+        recheck = _finite(decision.get("recheck_minutes"))
+    return bool(recheck is not None and recheck > 0)
+
+
 def fetch_recent_history(symbol: str) -> Any:
     import yfinance as yf
 
@@ -125,6 +143,7 @@ def capture(
     captured = 0
     existing = 0
     failed = 0
+    skipped_unobservable_wait = 0
     errors: list[str] = []
     for raw in confirmation.get("decisions") or []:
         if not isinstance(raw, Mapping):
@@ -135,6 +154,9 @@ def capture(
         if not symbol or packet is None:
             failed += 1
             errors.append(f"{symbol or '?'}: missing prior packet")
+            continue
+        if not _has_observable_wait_window(decision):
+            skipped_unobservable_wait += 1
             continue
         if decision.get("current_price") is None or not decision.get("source_last_bar_time"):
             # DATA_UNAVAILABLE has no executable snapshot. Keep it in the email,
@@ -165,6 +187,7 @@ def capture(
         "captured": captured,
         "existing": existing,
         "failed": failed,
+        "skipped_unobservable_wait": skipped_unobservable_wait,
         "errors": errors[:20],
         "settlement": settle_result,
         "summary": summary,

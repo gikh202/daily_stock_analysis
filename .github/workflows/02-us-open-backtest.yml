@@ -111,10 +111,51 @@ jobs:
           echo "path=$DB" >> "$GITHUB_OUTPUT"
 
       - name: Run causal 1-minute backtest and parameter grid
+        shell: bash
         run: |
+          set +e
           python scripts/backtest_us_open_confirmation.py \
             --v6-db '${{ steps.db.outputs.path }}' \
-            --output open_confirmation_backtest.json
+            --output open_confirmation_backtest.json \
+            > open_confirmation_backtest.log 2>&1
+          STATUS=$?
+          set -e
+          cat open_confirmation_backtest.log
+
+          if [ "$STATUS" -eq 0 ]; then
+            exit 0
+          fi
+
+          if grep -Fq 'no causal observations with historical minute bars' open_confirmation_backtest.log; then
+            echo '::warning::No matured causal 1-minute observations are currently available; record insufficient_data instead of treating external/history availability as a strategy regression.'
+            python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          payload = {
+              "version": "us-open-backtest-v1",
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "status": "insufficient_data",
+              "observation_count": 0,
+              "sources": {},
+              "promotion_gate": {
+                  "required_final_observations": 20,
+                  "actual_final_observations": 0,
+                  "eligible": False,
+                  "reason": "no matured causal observations with available historical minute bars",
+              },
+          }
+          Path("open_confirmation_backtest.json").write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
+            exit 0
+          fi
+
+          echo "::error::US-open causal backtest failed with exit code $STATUS"
+          exit "$STATUS"
 
       - name: Compare conservative parameter sets
         run: |
