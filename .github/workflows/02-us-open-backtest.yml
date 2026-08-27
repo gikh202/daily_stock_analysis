@@ -26,6 +26,8 @@ on:
       - 'tests/test_us_open_email_delivery_contract.py'
       - 'tests/test_v7_forecast_calibration.py'
       - 'tests/test_v7_intraday_timing.py'
+      - 'tests/test_v73_forecast_reliability.py'
+      - 'tests/test_v73_open_report_reliability.py'
       - 'tests/test_us_open_research_ledger.py'
       - 'tests/test_us_open_policy_probe.py'
       - 'tests/test_us_open_research_workflow_contract.py'
@@ -63,6 +65,8 @@ jobs:
             tests/test_us_open_email_delivery_contract.py \
             tests/test_v7_forecast_calibration.py \
             tests/test_v7_intraday_timing.py \
+            tests/test_v73_forecast_reliability.py \
+            tests/test_v73_open_report_reliability.py \
             tests/test_us_open_research_ledger.py \
             tests/test_us_open_policy_probe.py \
             tests/test_us_open_research_workflow_contract.py \
