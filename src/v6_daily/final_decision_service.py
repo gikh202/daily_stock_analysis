@@ -18,6 +18,7 @@ FULL_APPROVED = "FULL_APPROVED"
 CONDITIONAL_APPROVED = "CONDITIONAL_APPROVED"
 REJECTED = "REJECTED"
 V73_RELIABILITY_MIN_MATURE_SAMPLES = 50
+V73_RESEARCH_ONLY_MARKER = "研究观察"
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -63,7 +64,7 @@ def _research_horizon_is_quarantined(
     V7.3 explicitly quarantines 10D until its own forward calibration reaches at
     least 50 mature observations. The raw research view remains available in the
     source record, but the final fusion layer treats it as neutral research-only
-    evidence so it cannot manufacture a conflict or conditional approval.
+    evidence so it cannot manufacture a conflict or buy authorization.
     """
     key = _horizon_key(horizon)
     if key != "10d":
@@ -102,7 +103,7 @@ def _reliability_filtered_v4(
     forecast["research_expected_return_pct"] = original_return
     forecast["direction"] = "neutral"
     forecast["expected_return_pct"] = None
-    forecast["horizon"] = f"{horizon}（研究观察）"
+    forecast["horizon"] = f"{horizon}（{V73_RESEARCH_ONLY_MARKER}）"
     forecast["reliability_quarantined"] = True
     forecast["reliability_reason"] = (
         "V7.3 10D reliability gate requires >=50 mature forward samples; "
@@ -111,6 +112,33 @@ def _reliability_filtered_v4(
     filtered = dict(v4)
     filtered["forecast"] = forecast
     return filtered
+
+
+def _uses_quarantined_research(packet: FinalDecisionPacket) -> bool:
+    return V73_RESEARCH_ONLY_MARKER in str(packet.v4_horizon or "")
+
+
+def _apply_reliability_guard(packet: FinalDecisionPacket) -> FinalDecisionPacket:
+    """Fail closed when the only V4 directional horizon is reliability-quarantined."""
+    if not _uses_quarantined_research(packet):
+        return packet
+    verdict = (
+        FinalVerdict.WAIT
+        if packet.v6_decision in {"WAIT", "AVOID"}
+        else FinalVerdict.WATCH
+    )
+    assessment = replace(
+        packet.assessment,
+        verdict=verdict,
+        worth_buying=False if packet.v6_decision in {"WAIT", "AVOID"} else None,
+        execution_authorized=False,
+        rationale=(
+            "V7.3 reliability gate quarantined the upstream 10D research horizon: "
+            "it remains visible for research but cannot create directional conflict, "
+            "conditional approval, or execution authorization until >=50 mature samples."
+        ),
+    )
+    return replace(packet, assessment=assessment)
 
 
 def _constructive_direction(packet: FinalDecisionPacket) -> bool:
@@ -128,16 +156,11 @@ def _risk_heavy(packet: FinalDecisionPacket) -> bool:
 
 
 def _wait_is_conditionally_buyable(packet: FinalDecisionPacket) -> bool:
-    """Separate a buyable WAIT from a true close-layer rejection.
-
-    V6 WAIT means the deterministic layer did not produce an executable setup;
-    it does not automatically mean the investment thesis is invalid. V7.2 only
-    promotes WAIT to conditional approval when the cross-layer direction remains
-    constructive and the existing hard risk blockers are absent.
-    """
+    """Separate a buyable WAIT from a true close-layer rejection."""
     return bool(
         packet.v6_decision == "WAIT"
         and packet.fusion_complete
+        and not _uses_quarantined_research(packet)
         and packet.agreement is not FusionAgreement.CONFLICT
         and packet.v4_operation not in {"卖出", "减仓"}
         and _constructive_direction(packet)
@@ -220,7 +243,8 @@ def build_final_decision_packets(
         code = str(item.get("code") or "").strip().upper()
         filtered_v4 = _reliability_filtered_v4(item, v4_views.get(code))
         raw = build_final_decision_packet(item, filtered_v4)
-        packets.append(_upgrade_execution_contract(raw))
+        guarded = _apply_reliability_guard(raw)
+        packets.append(_upgrade_execution_contract(guarded))
     return tuple(packets)
 
 
