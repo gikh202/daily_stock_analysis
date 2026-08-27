@@ -88,19 +88,21 @@ jobs:
           print(f'Forecast Engine AB source: PASS stock_daily={bars}')
           PY
 
-      - name: Build one isolated 3-year research database
+      - name: Build identical warmup plus 3-year evaluation research database
         shell: bash
         run: |
           cd head
+          # Fetch four years so the first year is input warmup only. The AB runner
+          # scores exactly the latest three years for both engines.
           python scripts/backfill_v6_accuracy_history.py \
             --source-db ../data/stock_analysis.db \
             --research-db ../v6_research/stock_analysis_research.db \
             --codes 'MSFT,GOOGL,QQQM,VOO' \
-            --history-years 3 \
+            --history-years 4 \
             --minimum-bars 81 \
             --summary ../forecast_engine_ab_artifacts/history_backfill.json
 
-      - name: Run V7.1 vs V7.3 strict walk-forward AB
+      - name: Run V7.1 vs V7.3 strict 3-year walk-forward AB
         shell: bash
         run: |
           python head/scripts/run_forecast_engine_ab_walk_forward.py \
