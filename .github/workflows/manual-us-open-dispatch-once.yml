@@ -1,0 +1,78 @@
+name: Manual US Open Dispatch Relay
+
+on:
+  push:
+    branches:
+      - 'manual/us-open-trigger-20260827-2118'
+    paths:
+      - '.github/workflows/manual-us-open-dispatch-once.yml'
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch main US-open workflow and record run id
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflowId = '01-us-open-confirmation.yml';
+            const branch = 'manual/us-open-trigger-20260827-2118';
+            const started = Date.now();
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: workflowId,
+              ref: 'main',
+              inputs: { force_resend: 'false' },
+            });
+
+            let selected = null;
+            for (let attempt = 0; attempt < 12 && !selected; attempt += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 2500));
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id: workflowId,
+                branch: 'main',
+                event: 'workflow_dispatch',
+                per_page: 20,
+              });
+              selected = (response.data.workflow_runs || [])
+                .filter((run) => new Date(run.created_at).getTime() >= started - 5000)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+            }
+
+            if (!selected) {
+              core.setFailed('workflow_dispatch succeeded but the created run could not be located');
+              return;
+            }
+
+            const marker = {
+              run_id: selected.id,
+              html_url: selected.html_url,
+              status: selected.status,
+              conclusion: selected.conclusion,
+              created_at: selected.created_at,
+              head_sha: selected.head_sha,
+              event: selected.event,
+              ref: 'main',
+              force_resend: false,
+            };
+            const markerPath = '.manual-us-open-last-run.json';
+            await github.rest.repos.createOrUpdateFileContents({
+              owner,
+              repo,
+              path: markerPath,
+              message: `chore: record manual US-open run ${selected.id}`,
+              content: Buffer.from(JSON.stringify(marker, null, 2) + '\n').toString('base64'),
+              branch,
+            });
+            core.info(`Dispatched US-open run ${selected.id}: ${selected.html_url}`);
