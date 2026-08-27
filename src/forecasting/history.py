@@ -86,7 +86,7 @@ class ForecastHistory:
         self,
         db_path: str,
         *,
-        minimum_samples: int = 30,
+        minimum_samples: int = 50,
         minimum_regime_samples: int = 15,
         prior_strength: float = 12.0,
     ) -> None:
