@@ -103,6 +103,65 @@ jobs:
             --minimum-bars 81 \
             --summary ../forecast_engine_ab_artifacts/history_backfill.json
 
+      - name: Optimize replay harness without changing model semantics
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('head/scripts/run_forecast_engine_ab_walk_forward.py')
+          text = path.read_text(encoding='utf-8')
+
+          old_index = "        CREATE INDEX ix_ab_outcome_horizon_end ON v6_forecast_outcomes(horizon_days,end_trade_date);\n"
+          new_index = (
+              "        CREATE INDEX ix_ab_outcome_horizon_end ON v6_forecast_outcomes(horizon_days,end_trade_date);\n"
+              "        CREATE INDEX ix_ab_horizon_run_horizon ON v6_horizon_forecasts(forecast_run_id,horizon_days);\n"
+              "        CREATE INDEX ix_ab_run_effective ON v6_forecast_runs(effective_trade_date);\n"
+          )
+          if old_index not in text:
+              raise SystemExit('AB harness index anchor not found')
+          text = text.replace(old_index, new_index, 1)
+
+          old_engine = """    engine = V7ForecastEngine(history_db_path=str(history_path))
+    pending: list[dict[str, Any]] = []
+"""
+          new_engine = """    engine = V7ForecastEngine(history_db_path=str(history_path))
+    # Cache identical strict-as-of history reads within one trading date. The
+    # replay DB only gains newly matured outcomes when the date advances, so
+    # clearing this cache immediately after _flush_matured() preserves exact
+    # no-lookahead semantics while eliminating repeated SQLite scans.
+    original_history_rows = engine.history._rows
+    history_row_cache: dict[tuple[Any, ...], Any] = {}
+
+    def cached_history_rows(*row_args: Any, **row_kwargs: Any) -> Any:
+        cache_key = (row_args, tuple(sorted(row_kwargs.items())))
+        if cache_key not in history_row_cache:
+            history_row_cache[cache_key] = original_history_rows(*row_args, **row_kwargs)
+        return history_row_cache[cache_key]
+
+    engine.history._rows = cached_history_rows
+    pending: list[dict[str, Any]] = []
+"""
+          if old_engine not in text:
+              raise SystemExit('AB harness engine anchor not found')
+          text = text.replace(old_engine, new_engine, 1)
+
+          old_flush = """            _flush_matured(conn, pending, as_of)
+            current_date = as_of
+"""
+          new_flush = """            _flush_matured(conn, pending, as_of)
+            history_row_cache.clear()
+            current_date = as_of
+"""
+          if old_flush not in text:
+              raise SystemExit('AB harness flush anchor not found')
+          text = text.replace(old_flush, new_flush, 1)
+
+          path.write_text(text, encoding='utf-8')
+          compile(text, str(path), 'exec')
+          print('AB harness optimization: PASS (date-scoped history cache + replay indexes)')
+          PY
+
       - name: Run V7.1 vs V7.3 strict 3-year walk-forward AB
         shell: bash
         run: |
