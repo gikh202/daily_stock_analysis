@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from statistics import NormalDist
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from src.alpha_engine.models import AlphaFeatures
@@ -9,7 +10,7 @@ from .history import ForecastHistory
 from .models import ForecastBundle, ForecastHorizon
 
 
-V7_FORECAST_VERSION = "v7.1-forecast.1"
+V7_FORECAST_VERSION = "v7.3-forecast-reliability.1"
 FORECAST_HORIZONS = (1, 5, 10, 20)
 
 
@@ -59,49 +60,38 @@ def _first_number(mapping: Mapping[str, Any], names: Sequence[str]) -> Optional[
     return None
 
 
-def _horizon_block(context: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+def _prediction_horizons(context: Mapping[str, Any]) -> Mapping[str, Any]:
     prediction = _find_mapping(context, ("prediction_context",))
     horizons = prediction.get("horizons")
-    if not isinstance(horizons, dict):
-        return {}
-    value = horizons.get(name)
+    return horizons if isinstance(horizons, dict) else {}
+
+
+def _horizon_block(context: Mapping[str, Any], horizon: int) -> Mapping[str, Any]:
+    horizons = _prediction_horizons(context)
+    value = horizons.get(f"{int(horizon)}d")
     return value if isinstance(value, dict) else {}
 
 
-def _raw_return_targets(context: Mapping[str, Any]) -> Dict[int, Optional[float]]:
-    h5 = _horizon_block(context, "5d")
-    h20 = _horizon_block(context, "20d")
-    h60 = _horizon_block(context, "60d")
-    r5 = _first_number(h5, ("target_return_pct", "expected_return_pct"))
-    r20 = _first_number(h20, ("target_return_pct", "expected_return_pct"))
-    r60 = _first_number(h60, ("target_return_pct", "expected_return_pct"))
-    return {
-        1: None if r5 is None else r5 / 3.0,
-        5: r5 if r5 is not None else (None if r20 is None else r20 * 0.30),
-        10: None if r20 is None else r20 * 0.55,
-        20: r20 if r20 is not None else (None if r60 is None else r60 * 0.40),
-    }
+def _native_return_target(context: Mapping[str, Any], horizon: int) -> Optional[float]:
+    """Read only the matching horizon. V7.3 never creates 1D/10D by scaling 5D/20D."""
+    block = _horizon_block(context, horizon)
+    return _first_number(
+        block,
+        ("target_return_pct", "expected_return_pct", "return_target_pct"),
+    )
 
 
-def _raw_alpha_targets(context: Mapping[str, Any]) -> Dict[int, Optional[float]]:
-    result: Dict[int, Optional[float]] = {}
-    for horizon, (name, scale) in {
-        1: ("5d", 1 / 3),
-        5: ("5d", 1.0),
-        10: ("20d", 0.55),
-        20: ("20d", 1.0),
-    }.items():
-        block = _horizon_block(context, name)
-        values = [
-            value
-            for value in (
-                _first_number(block, ("excess_vs_spy_pct",)),
-                _first_number(block, ("excess_vs_qqq_pct",)),
-            )
-            if value is not None
-        ]
-        result[horizon] = None if not values else sum(values) / len(values) * scale
-    return result
+def _native_alpha_target(context: Mapping[str, Any], horizon: int) -> Optional[float]:
+    block = _horizon_block(context, horizon)
+    values = [
+        value
+        for value in (
+            _first_number(block, ("excess_vs_spy_pct",)),
+            _first_number(block, ("excess_vs_qqq_pct",)),
+        )
+        if value is not None
+    ]
+    return None if not values else sum(values) / len(values)
 
 
 def _realized_volatility(context: Mapping[str, Any]) -> Optional[float]:
@@ -112,14 +102,9 @@ def _realized_volatility(context: Mapping[str, Any]) -> Optional[float]:
     )
 
 
-def _feature_probability(
-    features: AlphaFeatures,
-    horizon: int,
-    *,
-    challenger: bool,
-) -> tuple[float, float]:
+def _feature_weights(horizon: int, *, challenger: bool) -> dict[str, float]:
     if challenger:
-        weights = {
+        return {
             "trend": 0.18,
             "momentum": 0.30,
             "relative_strength": 0.20,
@@ -127,8 +112,17 @@ def _feature_probability(
             "volume_confirmation": 0.16,
             "market_regime": 0.08,
         }
-    elif horizon <= 5:
-        weights = {
+    if horizon <= 1:
+        return {
+            "trend": 0.14,
+            "momentum": 0.34,
+            "relative_strength": 0.16,
+            "sector_relative_strength": 0.06,
+            "volume_confirmation": 0.20,
+            "market_regime": 0.10,
+        }
+    if horizon <= 5:
+        return {
             "trend": 0.20,
             "momentum": 0.24,
             "relative_strength": 0.20,
@@ -136,8 +130,8 @@ def _feature_probability(
             "volume_confirmation": 0.16,
             "market_regime": 0.12,
         }
-    elif horizon <= 10:
-        weights = {
+    if horizon <= 10:
+        return {
             "trend": 0.26,
             "momentum": 0.18,
             "relative_strength": 0.20,
@@ -146,17 +140,24 @@ def _feature_probability(
             "fundamental_quality": 0.08,
             "market_regime": 0.12,
         }
-    else:
-        weights = {
-            "trend": 0.22,
-            "momentum": 0.10,
-            "relative_strength": 0.16,
-            "sector_relative_strength": 0.10,
-            "fundamental_quality": 0.18,
-            "catalyst": 0.08,
-            "market_regime": 0.16,
-        }
+    return {
+        "trend": 0.22,
+        "momentum": 0.10,
+        "relative_strength": 0.16,
+        "sector_relative_strength": 0.10,
+        "fundamental_quality": 0.18,
+        "catalyst": 0.08,
+        "market_regime": 0.16,
+    }
 
+
+def _feature_probability(
+    features: AlphaFeatures,
+    horizon: int,
+    *,
+    challenger: bool,
+) -> tuple[float, float]:
+    weights = _feature_weights(horizon, challenger=challenger)
     numerator = 0.0
     observed = 0.0
     total = sum(weights.values())
@@ -202,8 +203,53 @@ def _blend_optional(
     return float(primary) * (1 - weight) + float(history) * weight
 
 
+def _feature_return_target(
+    feature_probability: float,
+    sigma: float,
+    *,
+    regime: str,
+    horizon: int,
+) -> float:
+    """Independent horizon return prior derived from that horizon's factors."""
+    p = _clamp(
+        feature_probability + _regime_adjustment(regime, horizon), 0.03, 0.97
+    )
+    implied = sigma * NormalDist().inv_cdf(p)
+    return _clamp(implied * 0.65, -2.5 * sigma, 2.5 * sigma)
+
+
+def _joint_expected_return(
+    base_return: float,
+    probability_up: float,
+    sigma: float,
+    *,
+    calibration_samples: int,
+) -> tuple[float, float, float]:
+    """Reconcile probability and expected return through one return distribution."""
+    p = _clamp(probability_up, 0.02, 0.98)
+    probability_implied = sigma * NormalDist().inv_cdf(p)
+    reliability = min(1.0, math.sqrt(max(0, calibration_samples) / 50.0))
+    coherence_weight = 0.50 + 0.25 * reliability
+    reconciled = (
+        (1.0 - coherence_weight) * base_return
+        + coherence_weight * probability_implied
+    )
+    return reconciled, probability_implied, coherence_weight
+
+
+def _decision_weight(horizon: int, status: str, samples: int) -> float:
+    """Reliability weight exposed to downstream fusion; 10D is quarantined until mature."""
+    if status == "prior_only" or samples <= 0:
+        return 0.0
+    if horizon == 10 and samples < 50:
+        return 0.0
+    if status != "mature":
+        return 0.10 if horizon != 10 else 0.0
+    return min(1.0, samples / 100.0) * (0.35 if horizon == 10 else 1.0)
+
+
 class V7ForecastEngine:
-    """Calibrated, regime-aware forecast layer with strict no-lookahead history."""
+    """Hierarchically calibrated, horizon-independent forecast layer."""
 
     version = V7_FORECAST_VERSION
 
@@ -213,9 +259,6 @@ class V7ForecastEngine:
         *,
         history_db_path: str | None = None,
     ) -> None:
-        # Production passes the same normalized V6/V7 database used by its
-        # write/read stores. Keeping calibration on that exact path avoids a
-        # hidden second database drifting from the production decision history.
         self.history = history or ForecastHistory(history_db_path or "v6_data/v6_daily.db")
 
     def forecast(
@@ -230,13 +273,10 @@ class V7ForecastEngine:
         atr: float | None,
         current_price: float | None,
     ) -> ForecastBundle:
-        # Unknown/malformed dates are deliberately passed through as missing.
-        # ForecastHistory then returns prior-only calibration. Never substitute a
-        # far-future sentinel, because that would admit future outcomes in replay.
         as_of = str(effective_trade_date or "").strip()[:10] or None
+        symbol_key = str(symbol or "").strip().upper()
+        instrument_key = str(instrument_type or "STOCK").strip().upper()
         regime = str(market_regime or "unknown").strip().lower() or "unknown"
-        raw_returns = _raw_return_targets(context)
-        raw_alphas = _raw_alpha_targets(context)
         realized_vol = _realized_volatility(context)
         atr_pct = (
             abs(float(atr)) / float(current_price) * 100.0
@@ -258,37 +298,43 @@ class V7ForecastEngine:
                 as_of_date=as_of,
                 horizon_days=horizon,
                 regime=regime,
+                symbol=symbol_key,
+                instrument_type=instrument_key,
             )
             selections[horizon] = selection
             selected_champion = str(selection["champion_model"])
             selected_challenger = str(selection["challenger_model"])
             challenger_active = selected_champion == "momentum_challenger"
+
             feature_p, feature_coverage = _feature_probability(
-                features,
-                horizon,
-                challenger=False,
+                features, horizon, challenger=False
             )
             challenger_p, challenger_coverage = _feature_probability(
-                features,
-                horizon,
-                challenger=True,
+                features, horizon, challenger=True
             )
             sigma = max(0.35, daily_vol * math.sqrt(float(horizon)))
-            return_p = _return_probability(raw_returns.get(horizon), sigma)
-            components = [(feature_p, 0.58)] + (
-                [] if return_p is None else [(return_p, 0.42)]
+            native_return = _native_return_target(context, horizon)
+            factor_return = _feature_return_target(
+                feature_p, sigma, regime=regime, horizon=horizon
             )
+            raw_return = (
+                factor_return
+                if native_return is None
+                else 0.65 * native_return + 0.35 * factor_return
+            )
+            native_alpha = _native_alpha_target(context, horizon)
+            return_p = _return_probability(raw_return, sigma)
+
+            components = [(feature_p, 0.58), (return_p, 0.42)]
             raw_probability = sum(value * weight for value, weight in components) / sum(
                 weight for _, weight in components
             )
             raw_probability = _clamp(
-                raw_probability + _regime_adjustment(regime, horizon),
-                0.03,
-                0.97,
+                raw_probability + _regime_adjustment(regime, horizon), 0.03, 0.97
             )
             challenger_raw = _clamp(
                 challenger_p
-                + 0.20 * ((return_p or 0.5) - 0.5)
+                + 0.20 * (return_p - 0.5)
                 + _regime_adjustment(regime, horizon),
                 0.03,
                 0.97,
@@ -300,6 +346,8 @@ class V7ForecastEngine:
                 raw_probability_up=raw_probability,
                 regime=regime,
                 probability_key="probability_up",
+                symbol=symbol_key,
+                instrument_type=instrument_key,
             )
             challenger_calibration = self.history.calibration(
                 as_of_date=as_of,
@@ -307,27 +355,41 @@ class V7ForecastEngine:
                 raw_probability_up=challenger_raw,
                 regime=regime,
                 probability_key="challenger_probability_up",
+                symbol=symbol_key,
+                instrument_type=instrument_key,
             )
-
-            active_raw = challenger_raw if challenger_active else raw_probability
             active_calibration = (
                 challenger_calibration if challenger_active else calibration
             )
-            shadow_calibration = calibration if challenger_active else challenger_calibration
+            shadow_calibration = (
+                calibration if challenger_active else challenger_calibration
+            )
+            active_raw = challenger_raw if challenger_active else raw_probability
             probability = active_calibration.probability_up
             shadow = shadow_calibration.probability_up
 
             history_weight = min(0.55, active_calibration.samples / 200.0)
-            expected_return = _blend_optional(
-                raw_returns.get(horizon),
+            base_expected_return = _blend_optional(
+                raw_return,
                 active_calibration.historical_return_pct,
                 history_weight,
             )
+            (
+                expected_return,
+                probability_implied_return,
+                coherence_weight,
+            ) = _joint_expected_return(
+                base_expected_return,
+                probability,
+                sigma,
+                calibration_samples=active_calibration.samples,
+            )
             expected_alpha = _blend_optional(
-                raw_alphas.get(horizon),
+                native_alpha,
                 active_calibration.historical_alpha_pct,
                 history_weight,
             )
+
             p10 = (
                 active_calibration.return_p10_pct
                 if active_calibration.samples >= 10
@@ -357,17 +419,14 @@ class V7ForecastEngine:
                 else min(0.0, expected_return) - 0.80 * sigma
             )
             reliability = min(1.0, math.sqrt(active_calibration.samples / 100.0))
-            agreement = 1.0 - min(
-                1.0,
-                abs(feature_p - (return_p or feature_p)) * 2.0,
-            )
+            agreement = 1.0 - min(1.0, abs(feature_p - return_p) * 2.0)
             evidence = _clamp(
                 0.70 * feature_coverage
-                + 0.30 * (1.0 if raw_returns.get(horizon) is not None else 0.0),
+                + 0.30 * (1.0 if native_return is not None else 0.65),
                 0.0,
                 1.0,
             )
-            confidence = _clamp(
+            evidence_confidence = _clamp(
                 0.45 * evidence + 0.35 * reliability + 0.20 * agreement,
                 0.0,
                 1.0,
@@ -379,47 +438,75 @@ class V7ForecastEngine:
                 if probability <= 0.42
                 else "neutral"
             )
+            probability_semantics = (
+                "uncalibrated_model_tendency"
+                if active_calibration.status == "prior_only"
+                else "historically_calibrated_probability"
+            )
+            decision_weight = _decision_weight(
+                horizon, active_calibration.status, active_calibration.samples
+            )
 
             horizons[f"{horizon}d"] = ForecastHorizon(
-                horizon,
-                round(active_raw, 4),
-                round(probability, 4),
-                round(expected_return, 4),
-                round(expected_alpha, 4),
-                round(p10, 4),
-                round(p50, 4),
-                round(p90, 4),
-                round(expected_mfe, 4),
-                round(expected_mae, 4),
-                round(evidence, 4),
-                round(confidence, 4),
-                active_calibration.samples,
-                active_calibration.status,
-                regime,
-                selected_champion,
-                selected_challenger,
-                round(shadow, 4),
-                direction,
-                round(probability * 100.0, 2),
-                {
+                horizon_days=horizon,
+                raw_probability_up=round(active_raw, 4),
+                probability_up=round(probability, 4),
+                expected_return_pct=round(expected_return, 4),
+                expected_alpha_vs_spy_pct=round(expected_alpha, 4),
+                p10_return_pct=round(p10, 4),
+                p50_return_pct=round(p50, 4),
+                p90_return_pct=round(p90, 4),
+                expected_mfe_pct=round(expected_mfe, 4),
+                expected_mae_pct=round(expected_mae, 4),
+                evidence_coverage=round(evidence, 4),
+                forecast_confidence=round(evidence_confidence, 4),
+                calibration_samples=active_calibration.samples,
+                calibration_status=active_calibration.status,
+                regime=regime,
+                champion_model=selected_champion,
+                challenger_model=selected_challenger,
+                challenger_probability_up=round(shadow, 4),
+                direction=direction,
+                score=round(probability * 100.0, 2),
+                diagnostics={
                     "feature_probability": round(feature_p, 4),
-                    "return_probability": None
-                    if return_p is None
-                    else round(return_p, 4),
+                    "return_probability": round(return_p, 4),
                     "sigma_pct": round(sigma, 4),
-                    "raw_expected_return_pct": raw_returns.get(horizon),
-                    "raw_expected_alpha_pct": raw_alphas.get(horizon),
+                    "native_expected_return_pct": native_return,
+                    "factor_expected_return_pct": round(factor_return, 4),
+                    "raw_expected_return_pct": round(raw_return, 4),
+                    "pre_coherence_expected_return_pct": round(
+                        base_expected_return, 4
+                    ),
+                    "probability_implied_return_pct": round(
+                        probability_implied_return, 4
+                    ),
+                    "coherence_weight": round(coherence_weight, 4),
+                    "native_expected_alpha_pct": native_alpha,
                     "calibration": calibration.to_dict(),
                     "challenger_calibration": challenger_calibration.to_dict(),
-                    "challenger_evidence_coverage": round(challenger_coverage, 4),
+                    "calibration_scope": active_calibration.calibration_scope,
+                    "historical_direction_hit_rate": (
+                        active_calibration.historical_direction_hit_rate
+                    ),
+                    "probability_semantics": probability_semantics,
+                    "decision_weight": round(decision_weight, 4),
+                    "evidence_confidence_semantics": (
+                        "evidence_and_reliability_score_not_win_rate"
+                    ),
+                    "challenger_evidence_coverage": round(
+                        challenger_coverage, 4
+                    ),
                 },
             )
 
-        coverage = sum(item.evidence_coverage for item in horizons.values()) / len(horizons)
+        coverage = sum(item.evidence_coverage for item in horizons.values()) / len(
+            horizons
+        )
         primary_selection = selections[5]
         return ForecastBundle(
-            str(symbol or "").strip().upper(),
-            str(instrument_type or "STOCK").strip().upper(),
+            symbol_key,
+            instrument_key,
             effective_trade_date,
             regime,
             self.version,
@@ -438,6 +525,19 @@ class V7ForecastEngine:
                     for horizon in FORECAST_HORIZONS
                 },
                 "numeric_llm_influence": "none",
+                "horizon_return_policy": (
+                    "native_horizon_or_horizon_specific_factor_prior; "
+                    "no_cross_horizon_scaling"
+                ),
+                "calibration_policy": (
+                    "symbol_to_instrument_type_to_regime_to_global; strict_as_of"
+                ),
+                "probability_return_policy": (
+                    "joint_distribution_coherence_reconciliation"
+                ),
+                "reliability_policy": (
+                    "10d decision weight is zero until >=50 mature samples"
+                ),
                 "as_of_policy": (
                     "outcome_end_trade_date_strictly_before_effective_trade_date; "
                     "missing_effective_date_uses_prior_only"
