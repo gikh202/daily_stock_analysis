@@ -30,11 +30,10 @@ def production_recheck_delay(minutes_since_open: int) -> int:
     """Return minutes until the next configured production recheck.
 
     The workflow runs at 09:30 / 09:35 / 09:45 / 10:00 / 10:30 / 11:00 /
-    12:00 ET.  GitHub may start a runner late, so this function uses the actual
-    evaluation clock and picks the next still-future nominal candidate.  A zero
+    12:00 ET. GitHub may start a runner late, so this function uses the actual
+    evaluation clock and picks the next still-future nominal candidate. A zero
     result means the automated recheck window is over for the session.
     """
-
     current = max(0, int(minutes_since_open))
     for target in PRODUCTION_RECHECK_MINUTES_SINCE_OPEN:
         if target > current:
@@ -45,17 +44,13 @@ def production_recheck_delay(minutes_since_open: int) -> int:
 class IntradayTimingModel:
     """Estimate whether waiting is likely to improve the near-term entry.
 
-    V7.3 moves tunable timing constants into a versioned policy while keeping hard
-    risk blockers authoritative in code. The default policy is behavior-equivalent
-    to V7.2 and Challenger calibration may only change explicitly tunable fields.
-
-    Strategy policy still decides whether waiting has value.  The returned
-    ``recheck_minutes`` is operational: it reflects the next production workflow
-    candidate rather than a theoretical policy interval, so emails and Research
-    Ledger evaluate the wait window the automation can actually observe.
+    V7.3 keeps hard risk blockers authoritative for execution, but a NO_BUY risk
+    veto is no longer an observation terminal while scheduled intraday checks
+    remain. This lets the system keep collecting live evidence without ever
+    converting a rejected close plan into a buy authorization.
     """
 
-    version = "v7.1-intraday-timing.1"
+    version = "v7.3-intraday-timing.1"
     better_entry_metric = "heuristic_score_v1"
 
     def __init__(
@@ -96,20 +91,36 @@ class IntradayTimingModel:
         scheduled_recheck = production_recheck_delay(minutes_since_open)
         has_scheduled_follow_up = scheduled_recheck > 0
 
-        if status in {"NO_BUY", "INVALIDATED"}:
+        if status == "INVALIDATED":
             return TimingAssessment(
                 status,
                 0.0,
                 None,
                 0.0,
                 0,
-                "hard blocker from prior plan/risk remains authoritative",
+                "hard invalidation remains authoritative and terminal",
                 True,
             )
-        if status == "DATA_UNAVAILABLE":
-            rationale = (
-                "current quote/data quality is not sufficient for execution"
+        if status == "NO_BUY":
+            rationale = "hard blocker from prior plan/risk remains authoritative for execution"
+            if has_scheduled_follow_up:
+                rationale += (
+                    f"; observation remains active and the next automated recheck is in "
+                    f"{scheduled_recheck} minutes"
+                )
+            else:
+                rationale += "; automated observation window is over for today"
+            return TimingAssessment(
+                "NO_BUY",
+                0.0,
+                None,
+                0.0,
+                scheduled_recheck,
+                rationale,
+                not has_scheduled_follow_up,
             )
+        if status == "DATA_UNAVAILABLE":
+            rationale = "current quote/data quality is not sufficient for execution"
             if has_scheduled_follow_up:
                 rationale += (
                     f"; next automated production recheck is in {scheduled_recheck} minutes"
@@ -161,7 +172,8 @@ class IntradayTimingModel:
         if entry_high is not None and price > entry_high:
             better += _clamp(
                 p.above_entry_base_bonus
-                + ((price / entry_high - 1.0) * 100.0) / p.above_entry_bonus_divisor,
+                + ((price / entry_high - 1.0) * 100.0)
+                / p.above_entry_bonus_divisor,
                 p.above_entry_base_bonus,
                 p.above_entry_bonus_max,
             )
@@ -177,7 +189,11 @@ class IntradayTimingModel:
 
         expected_improvement = max(
             p.improvement_min_pct,
-            vol * (p.improvement_vol_base + p.improvement_vol_score_weight * better),
+            vol
+            * (
+                p.improvement_vol_base
+                + p.improvement_vol_score_weight * better
+            ),
         )
         if entry_high is not None and price > entry_high:
             expected_improvement += min(

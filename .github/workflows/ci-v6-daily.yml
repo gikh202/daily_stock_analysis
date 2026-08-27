@@ -42,6 +42,7 @@ on:
       - 'tests/test_v6_stage11_schema_archival.py'
       - 'tests/test_v6_stage11_production_runner.py'
       - 'tests/test_v6_stage12_archive_restore.py'
+      - 'tests/test_v73_final_fusion_reliability.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -93,6 +94,7 @@ on:
       - 'tests/test_v6_stage11_schema_archival.py'
       - 'tests/test_v6_stage11_production_runner.py'
       - 'tests/test_v6_stage12_archive_restore.py'
+      - 'tests/test_v73_final_fusion_reliability.py'
       - 'tests/test_alpha_engine.py'
       - 'tests/test_alpha_validation.py'
       - '.github/workflows/ci-v6-daily.yml'
@@ -216,5 +218,6 @@ jobs:
             tests/test_v6_stage11_schema_archival.py \
             tests/test_v6_stage11_production_runner.py \
             tests/test_v6_stage12_archive_restore.py \
+            tests/test_v73_final_fusion_reliability.py \
             tests/test_alpha_engine.py \
             tests/test_alpha_validation.py
