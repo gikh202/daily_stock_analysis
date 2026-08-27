@@ -90,7 +90,6 @@ def test_default_forecast_maturity_threshold_is_50(tmp_path: Path) -> None:
     history, profile = _profile(path)
     assert history.minimum_samples == 50
     assert profile.samples == 49
-    assert profile.calibration_status if False else True
     assert profile.status == "shrunk"
 
 
