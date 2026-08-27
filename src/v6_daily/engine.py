@@ -12,7 +12,7 @@ from .accuracy import classify_instrument, enrich_features
 from .models import V6Signal
 
 
-V6_ENGINE_VERSION = "v7.1-forecast.1"
+V6_ENGINE_VERSION = "v7.3-forecast-reliability.1"
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -229,7 +229,12 @@ class V6DailyEngine:
             for item in alpha.limitations
             if not str(item).startswith("trade-plan gate downgraded")
         ]
-        if primary.calibration_status != "mature":
+        if primary.calibration_status == "prior_only":
+            limitations.append(
+                "5d forecast is prior-only model tendency "
+                f"(n={primary.calibration_samples}); it is not a historically calibrated probability"
+            )
+        elif primary.calibration_status != "mature":
             limitations.append(
                 "5d forecast calibration is "
                 f"{primary.calibration_status} (n={primary.calibration_samples}); "
@@ -291,11 +296,19 @@ class V6DailyEngine:
             limitations=tuple(dict.fromkeys(limitations)),
             diagnostics={
                 "engine_version": self.version,
+                "forecast_engine_version": bundle.model_version,
                 "feature_adapter_version": AlphaFeatureAdapter.version,
                 "primary_horizon": bundle.primary_horizon,
                 "forecast_component_coverage": primary.evidence_coverage,
                 "forecast_confidence": primary.forecast_confidence,
+                "forecast_evidence_confidence": primary.evidence_confidence,
+                "forecast_historical_direction_hit_rate": (
+                    primary.historical_direction_hit_rate
+                ),
                 "forecast_probability_up": primary.probability_up,
+                "forecast_probability_semantics": primary.probability_semantics,
+                "forecast_calibration_samples": primary.calibration_samples,
+                "forecast_calibration_status": primary.calibration_status,
                 "adapter": adapted.diagnostics,
                 "accuracy": accuracy_diag,
                 "alpha": alpha.diagnostics,
