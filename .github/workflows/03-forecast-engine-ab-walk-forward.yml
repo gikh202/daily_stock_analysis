@@ -1,0 +1,127 @@
+name: V7.3 Forecast Engine AB Walk-Forward
+
+on:
+  pull_request:
+    paths:
+      - 'src/forecasting/**'
+      - 'src/alpha_engine/**'
+      - 'src/v6_daily/replay.py'
+      - 'scripts/run_forecast_engine_ab_walk_forward.py'
+      - 'scripts/backfill_v6_accuracy_history.py'
+      - 'src/v6_daily/research_backfill.py'
+      - 'tests/test_v73_forecast_maturity_threshold.py'
+      - '.github/workflows/03-forecast-engine-ab-walk-forward.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forecast-engine-ab-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  forecast-engine-ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout V7.3 candidate
+        uses: actions/checkout@v5
+        with:
+          path: head
+
+      - name: Checkout frozen V7.1 baseline
+        uses: actions/checkout@v5
+        with:
+          ref: 4f50daeee59e73001461c989e35eae931925bd62
+          path: v71
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            head/requirements.txt
+            head/constraints-production.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c head/constraints-production.txt -r head/requirements.txt
+
+      - name: Run Forecast maturity threshold tests
+        run: pytest -q head/tests/test_v73_forecast_maturity_threshold.py
+
+      - name: Restore latest production source database
+        uses: actions/cache/restore@v5
+        with:
+          path: data/
+          key: forecast-engine-ab-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-analysis-data-${{ runner.os }}-
+
+      - name: Validate source database
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+          path = 'data/stock_analysis.db'
+          if not os.path.isfile(path):
+              raise SystemExit('stock_analysis.db missing; cannot run Forecast Engine AB walk-forward')
+          conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+          try:
+              quick = str(conn.execute('PRAGMA quick_check').fetchone()[0]).strip().lower()
+              tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+              bars = int(conn.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]) if 'stock_daily' in tables else 0
+          finally:
+              conn.close()
+          if quick != 'ok' or bars <= 0:
+              raise SystemExit(f'invalid source DB: quick={quick!r} stock_daily={bars}')
+          print(f'Forecast Engine AB source: PASS stock_daily={bars}')
+          PY
+
+      - name: Build one isolated 3-year research database
+        shell: bash
+        run: |
+          cd head
+          python scripts/backfill_v6_accuracy_history.py \
+            --source-db ../data/stock_analysis.db \
+            --research-db ../v6_research/stock_analysis_research.db \
+            --codes 'MSFT,GOOGL,QQQM,VOO' \
+            --history-years 3 \
+            --minimum-bars 81 \
+            --summary ../forecast_engine_ab_artifacts/history_backfill.json
+
+      - name: Run V7.1 vs V7.3 strict walk-forward AB
+        shell: bash
+        run: |
+          python head/scripts/run_forecast_engine_ab_walk_forward.py \
+            --stock-db v6_research/stock_analysis_research.db \
+            --old-root v71 \
+            --new-root head \
+            --codes 'MSFT,GOOGL,QQQM,VOO' \
+            --years 3 \
+            --min-lookback 80 \
+            --output-dir forecast_engine_ab_artifacts/results
+
+      - name: Publish AB report to job summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f forecast_engine_ab_artifacts/results/forecast_engine_ab.md ]; then
+            cat forecast_engine_ab_artifacts/results/forecast_engine_ab.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Forecast Engine AB artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: forecast-engine-ab-${{ github.run_id }}
+          path: forecast_engine_ab_artifacts/
+          if-no-files-found: warn
+          retention-days: 14
