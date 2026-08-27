@@ -52,9 +52,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -c head/constraints-production.txt -r head/requirements.txt
+          python -m pip install --disable-pip-version-check pytest
 
       - name: Run Forecast maturity threshold tests
-        run: pytest -q head/tests/test_v73_forecast_maturity_threshold.py
+        run: |
+          cd head
+          pytest -q --noconftest tests/test_v73_forecast_maturity_threshold.py
 
       - name: Restore latest production source database
         uses: actions/cache/restore@v5
