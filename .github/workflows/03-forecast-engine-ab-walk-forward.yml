@@ -122,37 +122,40 @@ jobs:
               raise SystemExit('AB harness index anchor not found')
           text = text.replace(old_index, new_index, 1)
 
-          old_engine = """    engine = V7ForecastEngine(history_db_path=str(history_path))
-    pending: list[dict[str, Any]] = []
-"""
-          new_engine = """    engine = V7ForecastEngine(history_db_path=str(history_path))
-    # Cache identical strict-as-of history reads within one trading date. The
-    # replay DB only gains newly matured outcomes when the date advances, so
-    # clearing this cache immediately after _flush_matured() preserves exact
-    # no-lookahead semantics while eliminating repeated SQLite scans.
-    original_history_rows = engine.history._rows
-    history_row_cache: dict[tuple[Any, ...], Any] = {}
-
-    def cached_history_rows(*row_args: Any, **row_kwargs: Any) -> Any:
-        cache_key = (row_args, tuple(sorted(row_kwargs.items())))
-        if cache_key not in history_row_cache:
-            history_row_cache[cache_key] = original_history_rows(*row_args, **row_kwargs)
-        return history_row_cache[cache_key]
-
-    engine.history._rows = cached_history_rows
-    pending: list[dict[str, Any]] = []
-"""
+          old_engine = (
+              "    engine = V7ForecastEngine(history_db_path=str(history_path))\n"
+              "    pending: list[dict[str, Any]] = []\n"
+          )
+          new_engine = (
+              "    engine = V7ForecastEngine(history_db_path=str(history_path))\n"
+              "    # Cache identical strict-as-of history reads within one trading date.\n"
+              "    # The replay DB gains matured outcomes only when the date advances;\n"
+              "    # clearing after _flush_matured() preserves exact no-lookahead semantics.\n"
+              "    original_history_rows = engine.history._rows\n"
+              "    history_row_cache: dict[tuple[Any, ...], Any] = {}\n"
+              "\n"
+              "    def cached_history_rows(*row_args: Any, **row_kwargs: Any) -> Any:\n"
+              "        cache_key = (row_args, tuple(sorted(row_kwargs.items())))\n"
+              "        if cache_key not in history_row_cache:\n"
+              "            history_row_cache[cache_key] = original_history_rows(*row_args, **row_kwargs)\n"
+              "        return history_row_cache[cache_key]\n"
+              "\n"
+              "    engine.history._rows = cached_history_rows\n"
+              "    pending: list[dict[str, Any]] = []\n"
+          )
           if old_engine not in text:
               raise SystemExit('AB harness engine anchor not found')
           text = text.replace(old_engine, new_engine, 1)
 
-          old_flush = """            _flush_matured(conn, pending, as_of)
-            current_date = as_of
-"""
-          new_flush = """            _flush_matured(conn, pending, as_of)
-            history_row_cache.clear()
-            current_date = as_of
-"""
+          old_flush = (
+              "            _flush_matured(conn, pending, as_of)\n"
+              "            current_date = as_of\n"
+          )
+          new_flush = (
+              "            _flush_matured(conn, pending, as_of)\n"
+              "            history_row_cache.clear()\n"
+              "            current_date = as_of\n"
+          )
           if old_flush not in text:
               raise SystemExit('AB harness flush anchor not found')
           text = text.replace(old_flush, new_flush, 1)
