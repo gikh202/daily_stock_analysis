@@ -28,8 +28,39 @@ class ForecastHorizon:
     score: float
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def evidence_confidence(self) -> float:
+        """Compatibility-safe name for forecast_confidence.
+
+        The value is an evidence/reliability score, not a historical win rate.
+        """
+        return float(self.forecast_confidence)
+
+    @property
+    def historical_direction_hit_rate(self) -> Optional[float]:
+        value = self.diagnostics.get("historical_direction_hit_rate")
+        try:
+            return None if value is None else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def probability_semantics(self) -> str:
+        return str(
+            self.diagnostics.get("probability_semantics")
+            or (
+                "uncalibrated_model_tendency"
+                if self.calibration_status == "prior_only"
+                else "historically_calibrated_probability"
+            )
+        )
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["evidence_confidence"] = self.evidence_confidence
+        payload["historical_direction_hit_rate"] = self.historical_direction_hit_rate
+        payload["probability_semantics"] = self.probability_semantics
+        return payload
 
 
 @dataclass(frozen=True)
@@ -78,8 +109,14 @@ class ForecastDecision:
     max_position_fraction: float
     gates: Tuple[str, ...] = ()
 
+    @property
+    def evidence_confidence(self) -> float:
+        return float(self.forecast_confidence)
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["evidence_confidence"] = self.evidence_confidence
+        return payload
 
 
 @dataclass(frozen=True)
