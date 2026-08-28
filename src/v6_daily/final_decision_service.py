@@ -59,20 +59,12 @@ def _research_horizon_is_quarantined(
     v6: Mapping[str, Any],
     horizon: str,
 ) -> bool:
-    """Return True when an upstream research horizon must not affect execution fusion.
-
-    V7.3 explicitly quarantines 10D until its own forward calibration reaches at
-    least 50 mature observations. The raw research view remains available in the
-    source record, but the final fusion layer treats it as neutral research-only
-    evidence so it cannot manufacture a conflict or buy authorization.
-    """
+    """Return True when an upstream research horizon must not affect execution fusion."""
     key = _horizon_key(horizon)
     if key != "10d":
         return False
     block = _v7_horizon_block(v6, key)
     if not block:
-        # Legacy payloads had no per-horizon reliability contract. Preserve their
-        # old behavior rather than silently changing replay semantics.
         return False
     diagnostics = _mapping(block.get("diagnostics"))
     weight = _finite(diagnostics.get("decision_weight"))
@@ -114,6 +106,16 @@ def _reliability_filtered_v4(
     filtered = dict(v4)
     filtered["forecast"] = forecast
     return filtered
+
+
+def _execution_view(v6: Mapping[str, Any]) -> Dict[str, Any]:
+    """Use reliability-aware direction for execution without rewriting research history."""
+    view = dict(v6)
+    diagnostics = _mapping(v6.get("diagnostics"))
+    trading_direction = str(diagnostics.get("trading_direction") or "").strip().lower()
+    if trading_direction in {"bullish", "neutral", "bearish"}:
+        view["direction"] = trading_direction
+    return view
 
 
 def _uses_quarantined_research(packet: FinalDecisionPacket) -> bool:
@@ -268,8 +270,9 @@ def build_final_decision_packets(
     packets: list[FinalDecisionPacket] = []
     for item in board:
         code = str(item.get("code") or "").strip().upper()
-        filtered_v4 = _reliability_filtered_v4(item, v4_views.get(code))
-        raw = build_final_decision_packet(item, filtered_v4)
+        execution_item = _execution_view(item)
+        filtered_v4 = _reliability_filtered_v4(execution_item, v4_views.get(code))
+        raw = build_final_decision_packet(execution_item, filtered_v4)
         guarded = _apply_reliability_guard(raw)
         packets.append(_upgrade_execution_contract(guarded))
     return tuple(packets)
