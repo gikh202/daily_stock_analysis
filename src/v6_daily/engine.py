@@ -155,17 +155,21 @@ def _reliability_aware_horizon_payload(horizon: Any) -> Dict[str, Any]:
     diagnostics = dict(payload.get("diagnostics") or {})
     raw_direction = str(horizon.direction or "neutral")
     weight = forecast_reliability_weight(horizon)
-    display_direction = reliability_aware_direction(horizon)
+    trading_direction = reliability_aware_direction(horizon)
     diagnostics["research_direction"] = raw_direction
+    diagnostics["trading_direction"] = trading_direction
     diagnostics["v74_reliability_weight"] = weight
     diagnostics["direction_semantics"] = (
         "validated_trading_direction"
-        if display_direction == raw_direction and weight > 0.0
+        if trading_direction == raw_direction and weight > 0.0
         else "research_tendency_not_trading_direction"
     )
     payload["diagnostics"] = diagnostics
-    payload["direction"] = display_direction
+    # Preserve the raw research direction for forward outcome learning. Consumers
+    # that make execution decisions must use trading_direction / decision_weight.
+    payload["direction"] = raw_direction
     payload["research_direction"] = raw_direction
+    payload["trading_direction"] = trading_direction
     payload["decision_weight"] = weight
     return payload
 
@@ -251,7 +255,7 @@ class V6DailyEngine:
         catalysts, risks = _qualitative_intelligence(raw_result)
         primary = bundle.primary
         primary_reliability_weight = forecast_reliability_weight(primary)
-        primary_direction = reliability_aware_direction(primary)
+        trading_direction = reliability_aware_direction(primary)
 
         limitations = [
             item
@@ -314,6 +318,8 @@ class V6DailyEngine:
                 "diagnostics": {
                     **bundle.diagnostics,
                     "v74_primary_reliability_weight": primary_reliability_weight,
+                    "v74_research_direction": primary.direction,
+                    "v74_trading_direction": trading_direction,
                     "v74_momentum_continuation_score": continuation_score,
                 },
             },
@@ -324,7 +330,9 @@ class V6DailyEngine:
             code=code,
             analysis_created_at=str(record.get("created_at") or ""),
             baseline_price=float(adapted.current_price),
-            direction=primary_direction,
+            # Persist raw direction so future outcomes can honestly measure whether
+            # the research forecast was right. Execution uses trading_direction.
+            direction=primary.direction,
             forecast_score=primary.score,
             decision=final_decision,
             quality_score=alpha.quality_score,
@@ -357,6 +365,7 @@ class V6DailyEngine:
                 "forecast_calibration_status": primary.calibration_status,
                 "forecast_reliability_weight": primary_reliability_weight,
                 "research_direction": primary.direction,
+                "trading_direction": trading_direction,
                 "momentum_continuation_score": continuation_score,
                 "adapter": adapted.diagnostics,
                 "accuracy": accuracy_diag,
