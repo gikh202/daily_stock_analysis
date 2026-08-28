@@ -8,6 +8,7 @@ from src.forecasting.decision import (
     reliability_aware_direction,
 )
 from src.forecasting.models import ForecastBundle, ForecastHorizon
+from src.v6_daily.final_decision_service import _execution_view
 
 
 def _horizon(
@@ -98,6 +99,19 @@ def test_low_sample_bearish_direction_is_research_only() -> None:
     assert reliability_aware_direction(horizon) == "neutral"
 
 
+def test_research_direction_is_preserved_while_execution_uses_trading_direction() -> None:
+    item = {
+        "direction": "bearish",
+        "diagnostics": {
+            "research_direction": "bearish",
+            "trading_direction": "neutral",
+        },
+    }
+    execution = _execution_view(item)
+    assert item["direction"] == "bearish"
+    assert execution["direction"] == "neutral"
+
+
 def test_poor_mature_hit_rate_is_zero_weight_and_mid_hit_rate_is_low_weight() -> None:
     poor = _horizon(
         5,
@@ -137,6 +151,20 @@ def test_momentum_continuation_requires_multi_factor_risk_on_confirmation() -> N
     )
     assert momentum_continuation_score(weak_volume, "risk_on") == 0.0
     assert momentum_continuation_score(_strong_continuation_features(), "risk_off") == 0.0
+
+
+def test_msft_like_risk_on_factors_are_recognized_as_continuation() -> None:
+    # Mirrors the failure case: only moderate volume, but very strong momentum and
+    # relative strength in a risk-on regime. RSI/overbought evidence must not by
+    # itself turn this combination into a reversal assumption.
+    features = AlphaFeatures(
+        trend=59.0,
+        momentum=91.0,
+        relative_strength=92.0,
+        volume_confirmation=41.0,
+        market_regime=80.0,
+    )
+    assert momentum_continuation_score(features, "risk_on") >= 0.65
 
 
 def test_low_reliability_bearish_forecast_cannot_force_avoid() -> None:
