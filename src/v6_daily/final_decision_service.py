@@ -13,7 +13,7 @@ from .v4_research_adapter import latest_v4_views
 
 
 FINAL_DECISION_PAYLOAD_VERSION = "final-decision-payload-v1"
-EXECUTION_CONTRACT_VERSION = "v7.2"
+EXECUTION_CONTRACT_VERSION = "v7.4"
 FULL_APPROVED = "FULL_APPROVED"
 CONDITIONAL_APPROVED = "CONDITIONAL_APPROVED"
 REJECTED = "REJECTED"
@@ -76,6 +76,8 @@ def _research_horizon_is_quarantined(
         return False
     diagnostics = _mapping(block.get("diagnostics"))
     weight = _finite(diagnostics.get("decision_weight"))
+    if weight is None:
+        weight = _finite(block.get("decision_weight"))
     try:
         samples = int(block.get("calibration_samples") or 0)
     except (TypeError, ValueError):
@@ -106,8 +108,8 @@ def _reliability_filtered_v4(
     forecast["horizon"] = f"{horizon}（{V73_RESEARCH_ONLY_MARKER}）"
     forecast["reliability_quarantined"] = True
     forecast["reliability_reason"] = (
-        "V7.3 10D reliability gate requires >=50 mature forward samples; "
-        "this research horizon is excluded from final execution-direction fusion"
+        "V7.4 reliability gate requires >=50 mature forward samples and usable "
+        "directional accuracy before a research horizon may influence execution"
     )
     filtered = dict(v4)
     filtered["forecast"] = forecast
@@ -116,29 +118,6 @@ def _reliability_filtered_v4(
 
 def _uses_quarantined_research(packet: FinalDecisionPacket) -> bool:
     return V73_RESEARCH_ONLY_MARKER in str(packet.v4_horizon or "")
-
-
-def _apply_reliability_guard(packet: FinalDecisionPacket) -> FinalDecisionPacket:
-    """Fail closed when the only V4 directional horizon is reliability-quarantined."""
-    if not _uses_quarantined_research(packet):
-        return packet
-    verdict = (
-        FinalVerdict.WAIT
-        if packet.v6_decision in {"WAIT", "AVOID"}
-        else FinalVerdict.WATCH
-    )
-    assessment = replace(
-        packet.assessment,
-        verdict=verdict,
-        worth_buying=False if packet.v6_decision in {"WAIT", "AVOID"} else None,
-        execution_authorized=False,
-        rationale=(
-            "V7.3 reliability gate quarantined the upstream 10D research horizon: "
-            "it remains visible for research but cannot create directional conflict, "
-            "conditional approval, or execution authorization until >=50 mature samples."
-        ),
-    )
-    return replace(packet, assessment=assessment)
 
 
 def _constructive_direction(packet: FinalDecisionPacket) -> bool:
@@ -153,6 +132,54 @@ def _risk_heavy(packet: FinalDecisionPacket) -> bool:
         (risk is not None and risk >= 60.0)
         or (risk is not None and opportunity is not None and risk >= opportunity)
     )
+
+
+def _quarantined_wait_can_remain_conditional(packet: FinalDecisionPacket) -> bool:
+    """Low-sample uncertainty is not itself a hard risk rejection."""
+    return bool(
+        packet.v6_decision == "WAIT"
+        and not _risk_heavy(packet)
+        and packet.v4_operation not in {"卖出", "减仓"}
+    )
+
+
+def _apply_reliability_guard(packet: FinalDecisionPacket) -> FinalDecisionPacket:
+    """Quarantine unreliable research without converting uncertainty into rejection."""
+    if not _uses_quarantined_research(packet):
+        return packet
+
+    if _quarantined_wait_can_remain_conditional(packet):
+        assessment = replace(
+            packet.assessment,
+            verdict=FinalVerdict.CONDITIONAL_BUY,
+            worth_buying=True,
+            execution_authorized=False,
+            rationale=(
+                "V7.4 reliability gate quarantined the upstream research horizon, "
+                "but low sample reliability is uncertainty rather than a hard risk veto. "
+                "The WAIT thesis remains conditionally observable intraday; execution "
+                "still requires a complete risk-bounded plan or declared confirmation."
+            ),
+        )
+        return replace(packet, assessment=assessment)
+
+    verdict = (
+        FinalVerdict.WAIT
+        if packet.v6_decision in {"WAIT", "AVOID"}
+        else FinalVerdict.WATCH
+    )
+    assessment = replace(
+        packet.assessment,
+        verdict=verdict,
+        worth_buying=False if packet.v6_decision in {"WAIT", "AVOID"} else None,
+        execution_authorized=False,
+        rationale=(
+            "V7.4 reliability gate quarantined the upstream research horizon. "
+            "A separate hard risk/avoid condition remains authoritative, so the "
+            "quarantined research cannot create conditional approval or execution authorization."
+        ),
+    )
+    return replace(packet, assessment=assessment)
 
 
 def _wait_is_conditionally_buyable(packet: FinalDecisionPacket) -> bool:
