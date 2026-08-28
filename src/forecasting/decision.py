@@ -146,6 +146,8 @@ class ForecastDecisionPolicy:
                 0.0,
                 ("hard_risk_gate",),
             )
+        if str(h5.calibration_status or "").strip().lower() == "prior_only":
+            gates.append("probability_not_yet_calibrated")
         if w5 <= 0.0:
             gates.append("5d_reliability_below_trading_floor")
         if confidence < 0.50:
