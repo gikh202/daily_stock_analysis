@@ -7,12 +7,17 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from src.alpha_engine import AlphaDecisionEngine, AlphaFeatureAdapter
 from src.forecasting import ForecastDecisionPolicy, V7ForecastEngine
+from src.forecasting.decision import (
+    forecast_reliability_weight,
+    momentum_continuation_score,
+    reliability_aware_direction,
+)
 
 from .accuracy import classify_instrument, enrich_features
 from .models import V6Signal
 
 
-V6_ENGINE_VERSION = "v7.3-forecast-reliability.1"
+V6_ENGINE_VERSION = "v7.4-forecast-execution-correction.1"
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -145,6 +150,26 @@ def _effective_trade_date(
     return created[:10] if len(created) >= 10 else None
 
 
+def _reliability_aware_horizon_payload(horizon: Any) -> Dict[str, Any]:
+    payload = horizon.to_dict()
+    diagnostics = dict(payload.get("diagnostics") or {})
+    raw_direction = str(horizon.direction or "neutral")
+    weight = forecast_reliability_weight(horizon)
+    display_direction = reliability_aware_direction(horizon)
+    diagnostics["research_direction"] = raw_direction
+    diagnostics["v74_reliability_weight"] = weight
+    diagnostics["direction_semantics"] = (
+        "validated_trading_direction"
+        if display_direction == raw_direction and weight > 0.0
+        else "research_tendency_not_trading_direction"
+    )
+    payload["diagnostics"] = diagnostics
+    payload["direction"] = display_direction
+    payload["research_direction"] = raw_direction
+    payload["decision_weight"] = weight
+    return payload
+
+
 class V6DailyEngine:
     """Compatibility daily orchestrator backed by the V7 forecast architecture."""
 
@@ -204,10 +229,12 @@ class V6DailyEngine:
             atr=adapted.atr,
             current_price=adapted.current_price,
         )
+        continuation_score = momentum_continuation_score(features, bundle.regime)
         forecast_decision = self.policy.decide(
             bundle,
             risk_score=alpha.risk_score,
             opportunity_score=alpha.opportunity_score,
+            features=features,
         )
         trade_plan = self.policy.build_trade_plan(
             forecast_decision,
@@ -223,6 +250,8 @@ class V6DailyEngine:
         model_used, llm_health = _llm_health(raw_result, primary_model)
         catalysts, risks = _qualitative_intelligence(raw_result)
         primary = bundle.primary
+        primary_reliability_weight = forecast_reliability_weight(primary)
+        primary_direction = reliability_aware_direction(primary)
 
         limitations = [
             item
@@ -240,6 +269,18 @@ class V6DailyEngine:
                 f"{primary.calibration_status} (n={primary.calibration_samples}); "
                 "probability is conservatively shrunk"
             )
+        if primary_reliability_weight <= 0.0:
+            hit = primary.historical_direction_hit_rate
+            limitations.append(
+                "5d direction is research-only and excluded from trading direction: "
+                f"n={primary.calibration_samples}, hit_rate="
+                + ("N/A" if hit is None else f"{hit:.1%}")
+            )
+        if continuation_score >= 0.65:
+            limitations.append(
+                f"risk-on momentum continuation signal active ({continuation_score:.0%}); "
+                "overbought evidence must not be treated as an automatic reversal"
+            )
         if instrument_type == "STOCK" and features.fundamental_quality is None:
             limitations.append("deterministic fundamental quality unavailable")
         if features.catalyst is None:
@@ -253,7 +294,8 @@ class V6DailyEngine:
             )
 
         horizon_payload = {
-            key: value.to_dict() for key, value in bundle.horizons.items()
+            key: _reliability_aware_horizon_payload(value)
+            for key, value in bundle.horizons.items()
         }
         context_features = {
             "instrument_type": instrument_type,
@@ -269,7 +311,11 @@ class V6DailyEngine:
                 "promotion_status": bundle.promotion_status,
                 "decision": forecast_decision.to_dict(),
                 "horizons": horizon_payload,
-                "diagnostics": bundle.diagnostics,
+                "diagnostics": {
+                    **bundle.diagnostics,
+                    "v74_primary_reliability_weight": primary_reliability_weight,
+                    "v74_momentum_continuation_score": continuation_score,
+                },
             },
         }
         return V6Signal(
@@ -278,7 +324,7 @@ class V6DailyEngine:
             code=code,
             analysis_created_at=str(record.get("created_at") or ""),
             baseline_price=float(adapted.current_price),
-            direction=primary.direction,
+            direction=primary_direction,
             forecast_score=primary.score,
             decision=final_decision,
             quality_score=alpha.quality_score,
@@ -309,6 +355,9 @@ class V6DailyEngine:
                 "forecast_probability_semantics": primary.probability_semantics,
                 "forecast_calibration_samples": primary.calibration_samples,
                 "forecast_calibration_status": primary.calibration_status,
+                "forecast_reliability_weight": primary_reliability_weight,
+                "research_direction": primary.direction,
+                "momentum_continuation_score": continuation_score,
                 "adapter": adapted.diagnostics,
                 "accuracy": accuracy_diag,
                 "alpha": alpha.diagnostics,
