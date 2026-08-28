@@ -62,7 +62,7 @@ def momentum_continuation_score(features: Any, regime: str | None) -> float:
     """Detect risk-on trend continuation without treating overbought as automatic reversal.
 
     This is an execution-context signal, not a calibrated probability. It requires
-    simultaneous trend, momentum, relative-strength and volume confirmation.
+    simultaneous trend, momentum, relative-strength and non-weak volume confirmation.
     """
     if str(regime or "").strip().lower() != "risk_on" or features is None:
         return 0.0
@@ -74,7 +74,7 @@ def momentum_continuation_score(features: Any, regime: str | None) -> float:
     if None in {trend, momentum, relative, volume}:
         return 0.0
     assert trend is not None and momentum is not None and relative is not None and volume is not None
-    if trend < 55.0 or momentum < 70.0 or relative < 65.0 or volume < 50.0:
+    if trend < 55.0 or momentum < 70.0 or relative < 65.0 or volume < 40.0:
         return 0.0
     if market is not None and market < 60.0:
         return 0.0
@@ -82,7 +82,7 @@ def momentum_continuation_score(features: Any, regime: str | None) -> float:
         0.25 * _clamp((trend - 55.0) / 30.0, 0.0, 1.0)
         + 0.35 * _clamp((momentum - 70.0) / 30.0, 0.0, 1.0)
         + 0.25 * _clamp((relative - 65.0) / 30.0, 0.0, 1.0)
-        + 0.15 * _clamp((volume - 50.0) / 40.0, 0.0, 1.0)
+        + 0.15 * _clamp((volume - 40.0) / 40.0, 0.0, 1.0)
     )
     return round(_clamp(0.60 + 0.40 * strength, 0.0, 1.0), 4)
 
