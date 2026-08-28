@@ -11,15 +11,23 @@ from src.v6_daily.final_decision_service import (
 from src.v6_daily.fusion_contracts import FusionAgreement, build_final_decision_packet
 
 
-def _v6(*, samples: int, status: str, weight: float, direction: str = "bullish"):
+def _v6(
+    *,
+    samples: int,
+    status: str,
+    weight: float,
+    direction: str = "bullish",
+    risk: float = 40.0,
+    opportunity: float = 70.0,
+):
     return {
         "code": "TEST",
         "instrument_type": "STOCK",
         "effective_trade_date": "2026-08-26",
         "decision": "WAIT",
         "direction": direction,
-        "opportunity_score": 70.0,
-        "risk_score": 40.0,
+        "opportunity_score": opportunity,
+        "risk_score": risk,
         "forecast_score": 60.0,
         "evidence_coverage": 0.8,
         "trade_plan": {},
@@ -34,7 +42,7 @@ def _v6(*, samples: int, status: str, weight: float, direction: str = "bullish")
     }
 
 
-def _v4(direction: str = "bullish"):
+def _v4(direction: str = "bullish", operation: str = "观望"):
     return {
         "forecast": {
             "direction": direction,
@@ -42,12 +50,12 @@ def _v4(direction: str = "bullish"):
             "expected_return_pct": 3.5,
         },
         "trend_prediction": direction,
-        "operation": "观望",
+        "operation": operation,
         "is_trading_day": True,
     }
 
 
-def test_unreliable_10d_cannot_create_conditional_approval() -> None:
+def test_unreliable_10d_wait_remains_conditionally_observable() -> None:
     v6 = _v6(samples=16, status="shrunk", weight=0.0, direction="bullish")
     filtered = _reliability_filtered_v4(v6, _v4("bullish"))
     assert filtered is not None
@@ -61,8 +69,36 @@ def test_unreliable_10d_cannot_create_conditional_approval() -> None:
 
     assert raw.agreement is FusionAgreement.PARTIAL
     assert upgraded.assessment.execution_authorized is False
-    assert upgraded.assessment.worth_buying is False
-    assert _execution_status(upgraded) == REJECTED
+    assert upgraded.assessment.worth_buying is True
+    assert _execution_status(upgraded) == CONDITIONAL_APPROVED
+    assert "uncertainty" in upgraded.assessment.rationale
+
+
+def test_unreliable_10d_hard_risk_stays_rejected() -> None:
+    v6 = _v6(
+        samples=16,
+        status="shrunk",
+        weight=0.0,
+        direction="bullish",
+        risk=72.0,
+        opportunity=60.0,
+    )
+    filtered = _reliability_filtered_v4(v6, _v4("bullish"))
+    raw = build_final_decision_packet(v6, filtered)
+    guarded = _apply_reliability_guard(raw)
+
+    assert guarded.assessment.execution_authorized is False
+    assert guarded.assessment.worth_buying is False
+    assert _execution_status(guarded) == REJECTED
+
+
+def test_unreliable_10d_sell_operation_stays_rejected() -> None:
+    v6 = _v6(samples=16, status="shrunk", weight=0.0, direction="bullish")
+    filtered = _reliability_filtered_v4(v6, _v4("bullish", operation="减仓"))
+    raw = build_final_decision_packet(v6, filtered)
+    guarded = _apply_reliability_guard(raw)
+    assert guarded.assessment.worth_buying is False
+    assert _execution_status(guarded) == REJECTED
 
 
 def test_unreliable_10d_cannot_create_direction_conflict() -> None:
