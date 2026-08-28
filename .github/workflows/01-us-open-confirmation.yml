@@ -1,25 +1,13 @@
 name: 美股开盘执行确认
 
 on:
-  # 从 09:30 ET 开始。等待态会在后续候选继续按实际 runner 时间复查，
-  # 直到出现“现在买 / 今天不买 / 计划失效”等终态；状态未变化时邮件自动抑制。
+  # GitHub schedule 只提供候选触发；真正是否执行以 runner 启动时的纽约时间为准。
+  # 09:30 ET 附近密集触发，之后每 30 分钟兜底；等待态继续复查，终态/同状态邮件自动抑制。
   schedule:
-    # EDT (-04:00): 09:30 / 09:35 / 09:45 / 10:00 / 10:30 / 11:00 / 12:00 ET
-    - cron: '30 13 * * 1-5'
-    - cron: '35 13 * * 1-5'
-    - cron: '45 13 * * 1-5'
-    - cron: '0 14 * * 1-5'
-    - cron: '30 14 * * 1-5'
-    - cron: '0 15 * * 1-5'
-    - cron: '0 16 * * 1-5'
-    # EST (-05:00): 09:30 / 09:35 / 09:45 / 10:00 / 10:30 / 11:00 / 12:00 ET
-    - cron: '30 14 * * 1-5'
-    - cron: '35 14 * * 1-5'
-    - cron: '45 14 * * 1-5'
-    - cron: '0 15 * * 1-5'
-    - cron: '30 15 * * 1-5'
-    - cron: '0 16 * * 1-5'
-    - cron: '0 17 * * 1-5'
+    # 同时覆盖 EDT/EST。早于开盘或晚于常规收盘的候选由 gate 自动跳过。
+    - cron: '30,35,45 13 * * 1-5'
+    - cron: '0,30,35,45 14 * * 1-5'
+    - cron: '0,30 15-20 * * 1-5'
   workflow_dispatch:
     inputs:
       force_resend:
@@ -59,8 +47,8 @@ jobs:
 
           SHOULD_RUN=false
           FORCE_RESEND=false
-          FAMILY_OK=false
           REASON='outside_intraday_timing_window'
+          HM=$((10#$NY_HM))
 
           if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
             SHOULD_RUN=true
@@ -70,26 +58,15 @@ jobs:
             else
               REASON='manual_intraday_timing'
             fi
+          elif [ "$NY_WEEKDAY" -lt 1 ] || [ "$NY_WEEKDAY" -gt 5 ]; then
+            REASON='weekend'
+          elif [ "$HM" -lt 930 ]; then
+            REASON='before_market_open'
+          elif [ "$HM" -ge 1600 ]; then
+            REASON='runner_arrived_after_market_close'
           else
-            if [ "$NY_OFFSET" = '-0400' ]; then
-              case "$EVENT_SCHEDULE" in
-                '30 13 * * 1-5'|'35 13 * * 1-5'|'45 13 * * 1-5'|'0 14 * * 1-5'|'30 14 * * 1-5'|'0 15 * * 1-5'|'0 16 * * 1-5') FAMILY_OK=true ;;
-              esac
-            elif [ "$NY_OFFSET" = '-0500' ]; then
-              case "$EVENT_SCHEDULE" in
-                '30 14 * * 1-5'|'35 14 * * 1-5'|'45 14 * * 1-5'|'0 15 * * 1-5'|'30 15 * * 1-5'|'0 16 * * 1-5'|'0 17 * * 1-5') FAMILY_OK=true ;;
-              esac
-            fi
-
-            HM=$((10#$NY_HM))
-            if [ "$NY_WEEKDAY" -ge 1 ] && [ "$NY_WEEKDAY" -le 5 ] \
-              && [ "$HM" -ge 930 ] && [ "$HM" -le 1230 ] \
-              && [ "$FAMILY_OK" = 'true' ]; then
-              SHOULD_RUN=true
-              REASON='scheduled_intraday_timing'
-            elif [ "$FAMILY_OK" != 'true' ]; then
-              REASON='inactive_dst_schedule_family'
-            fi
+            SHOULD_RUN=true
+            REASON='scheduled_live_session'
           fi
 
           echo "NY=${NY_DATE} ${NY_HM} ${NY_OFFSET}; schedule=${EVENT_SCHEDULE:-manual}; run=${SHOULD_RUN}; reason=${REASON}"
@@ -159,9 +136,52 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 确认当前为美股真实交易时段
+        id: trading-session
+        if: ${{ steps.once.outputs.execute == 'true' }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          import exchange_calendars as xcals
+
+          ny = ZoneInfo('America/New_York')
+          now = datetime.now(ny)
+          cal = xcals.get_calendar('XNYS')
+          session_date = now.date()
+
+          is_trading_day = cal.is_session(session_date)
+          is_live_session = False
+          session_open = ''
+          session_close = ''
+
+          if is_trading_day:
+              session = cal.date_to_session(session_date, direction='none')
+              open_dt = cal.session_open(session).tz_convert('America/New_York').to_pydatetime()
+              close_dt = cal.session_close(session).tz_convert('America/New_York').to_pydatetime()
+              session_open = open_dt.isoformat()
+              session_close = close_dt.isoformat()
+              is_live_session = open_dt <= now < close_dt
+
+          print(
+              f'NYSE date={session_date} now={now.isoformat()} '
+              f'trading_day={is_trading_day} live_session={is_live_session} '
+              f'open={session_open or "N/A"} close={session_close or "N/A"}'
+          )
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+              fh.write(f"is_trading_day={'true' if is_trading_day else 'false'}\n")
+              fh.write(f"is_live_session={'true' if is_live_session else 'false'}\n")
+              fh.write(f"session_open={session_open}\n")
+              fh.write(f"session_close={session_close}\n")
+          PY
+
       - name: 查找开盘前最近成功的 V7/V6 收盘预测
         id: prior-v6
-        if: ${{ steps.once.outputs.execute == 'true' }}
+        if: ${{ steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' }}
         uses: actions/github-script@v7
         env:
           SESSION_OPEN_EPOCH: ${{ steps.gate.outputs.session_open_epoch }}
@@ -196,7 +216,7 @@ jobs:
             core.info(`Using close forecast run ${preferred.id} created_at=${preferred.created_at}`);
 
       - name: 下载上一收盘预测 Artifact
-        if: ${{ steps.once.outputs.execute == 'true' && steps.prior-v6.outputs.run_id != '' }}
+        if: ${{ steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' && steps.prior-v6.outputs.run_id != '' }}
         uses: actions/download-artifact@v5
         with:
           pattern: v6-daily-*
@@ -207,7 +227,7 @@ jobs:
 
       - name: 定位结构化收盘预测
         id: plan
-        if: ${{ steps.once.outputs.execute == 'true' }}
+        if: ${{ steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' }}
         shell: bash
         env:
           SOURCE_RUN_ID: ${{ steps.prior-v6.outputs.run_id }}
@@ -233,7 +253,7 @@ jobs:
 
       - name: 发送开盘实时执行确认 / V7盘中择时
         id: confirm
-        if: ${{ steps.once.outputs.execute == 'true' }}
+        if: ${{ steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' }}
         env:
           OPEN_CONFIRMATION_SOURCE_RUN_ID: ${{ steps.plan.outputs.source_run_id }}
           OPEN_CONFIRMATION_PREVIOUS_STATE: .open-confirmation-state/${{ steps.gate.outputs.ny_date }}.json
@@ -269,7 +289,7 @@ jobs:
 
       - name: 解析盘中择时状态
         id: timing-state
-        if: ${{ success() && steps.once.outputs.execute == 'true' }}
+        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -290,14 +310,14 @@ jobs:
           PY
 
       - name: 保存最新盘中状态
-        if: ${{ success() && steps.once.outputs.execute == 'true' }}
+        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' }}
         uses: actions/cache/save@v5
         with:
           path: .open-confirmation-state/
           key: us-open-state-${{ steps.gate.outputs.ny_date }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: 写入当日终态标记
-        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.timing-state.outputs.follow_up_needed == 'false' && steps.terminal-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' && steps.timing-state.outputs.follow_up_needed == 'false' && steps.terminal-cache.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           mkdir -p .open-confirmation-terminal
@@ -309,7 +329,7 @@ jobs:
             > ".open-confirmation-terminal/${{ steps.gate.outputs.ny_date }}.txt"
 
       - name: 保存当日终态标记
-        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.timing-state.outputs.follow_up_needed == 'false' && steps.terminal-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' && steps.timing-state.outputs.follow_up_needed == 'false' && steps.terminal-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: .open-confirmation-terminal/
@@ -317,7 +337,7 @@ jobs:
 
       - name: 发送一次当日链路失败告警
         id: failure-alert
-        if: ${{ failure() && steps.once.outputs.execute == 'true' && steps.failure-alert-cache.outputs.cache-hit != 'true' }}
+        if: ${{ failure() && steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' && steps.failure-alert-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         env:
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
@@ -344,7 +364,7 @@ jobs:
           key: us-open-confirmation-failure-alert-${{ steps.gate.outputs.ny_date }}
 
       - name: 上传盘中择时报告
-        if: ${{ always() && steps.once.outputs.execute == 'true' }}
+        if: ${{ always() && steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session == 'true' }}
         uses: actions/upload-artifact@v6
         with:
           name: us-open-timing-${{ github.run_id }}-${{ github.run_attempt }}
@@ -353,7 +373,11 @@ jobs:
           retention-days: 30
 
       - name: 输出跳过原因
-        if: ${{ steps.gate.outputs.should_run != 'true' || steps.once.outputs.execute == 'false' }}
+        if: ${{ steps.gate.outputs.should_run != 'true' || steps.once.outputs.execute == 'false' || (steps.once.outputs.execute == 'true' && steps.trading-session.outputs.is_live_session != 'true') }}
         run: |
           echo "gate_reason=${{ steps.gate.outputs.reason }}"
           echo "terminal=${{ steps.terminal-cache.outputs.cache-hit }}"
+          echo "is_trading_day=${{ steps.trading-session.outputs.is_trading_day }}"
+          echo "is_live_session=${{ steps.trading-session.outputs.is_live_session }}"
+          echo "session_open=${{ steps.trading-session.outputs.session_open }}"
+          echo "session_close=${{ steps.trading-session.outputs.session_close }}"
