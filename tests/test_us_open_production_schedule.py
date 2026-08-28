@@ -22,18 +22,36 @@ def test_production_recheck_delay_matches_nominal_et_candidates() -> None:
     assert production_recheck_delay(60) == 30     # 10:30 -> 11:00
     assert production_recheck_delay(90) == 60     # 11:00 -> 12:00
     assert production_recheck_delay(149) == 1
-    assert production_recheck_delay(150) == 0     # 12:00 is the last candidate
+    assert production_recheck_delay(150) == 0     # 12:00 is the last nominal timing candidate
 
 
 def test_workflow_crons_stay_aligned_with_timing_contract() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    # GitHub cron is now only a set of candidate triggers.  The workflow
+    # deliberately covers both EDT and EST and lets the runtime NYSE session
+    # gate decide whether a delayed runner should actually execute.
     for cron in (
-        "30 13 * * 1-5", "35 13 * * 1-5", "45 13 * * 1-5",
-        "0 14 * * 1-5", "30 14 * * 1-5", "0 15 * * 1-5", "0 16 * * 1-5",
-        "35 14 * * 1-5", "45 14 * * 1-5", "30 15 * * 1-5", "0 17 * * 1-5",
+        "30,35,45 13 * * 1-5",
+        "0,30,35,45 14 * * 1-5",
+        "0,30 15-20 * * 1-5",
     ):
         assert f"cron: '{cron}'" in text
-    assert "09:30 / 09:35 / 09:45 / 10:00 / 10:30 / 11:00 / 12:00 ET" in text
+
+    for marker in (
+        '"$HM" -lt 930',
+        '"$HM" -ge 1600',
+        "scheduled_live_session",
+        "runner_arrived_after_market_close",
+        "exchange_calendars as xcals",
+        "xcals.get_calendar('XNYS')",
+        "is_live_session",
+    ):
+        assert marker in text
+
+    assert "FAMILY_OK" not in text
+    assert "inactive_dst_schedule_family" not in text
+    assert '"$HM" -le 1230' not in text
 
 
 def _wait_pullback(minutes_since_open: int):
