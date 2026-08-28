@@ -18,18 +18,22 @@ def test_open_confirmation_requires_email_channel_success() -> None:
 def test_open_confirmation_starts_at_market_open_and_uses_runtime_gate() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     for marker in (
-        "cron: '30 13 * * 1-5'",
-        "cron: '30 14 * * 1-5'",
-        "cron: '30 14 * * 1-5'",
-        "cron: '0 16 * * 1-5'",
-        '"$HM" -ge 930',
-        '"$HM" -le 1230',
-        "scheduled_intraday_timing",
+        "cron: '30,35,45 13 * * 1-5'",
+        "cron: '0,30,35,45 14 * * 1-5'",
+        "cron: '0,30 15-20 * * 1-5'",
+        '"$HM" -lt 930',
+        '"$HM" -ge 1600',
+        "scheduled_live_session",
+        "runner_arrived_after_market_close",
+        "exchange_calendars as xcals",
+        "xcals.get_calendar('XNYS')",
+        "is_live_session",
         "发送开盘实时执行确认 / V7盘中择时",
     ):
         assert marker in text
-    assert "cron: '45 13 * * 1-5'" in text
-    assert "cron: '45 14 * * 1-5'" in text
+    assert "FAMILY_OK" not in text
+    assert "inactive_dst_schedule_family" not in text
+    assert '"$HM" -le 1230' not in text
 
 
 def test_waiting_state_is_rechecked_until_terminal() -> None:
