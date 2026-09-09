@@ -362,36 +362,133 @@ def _summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {
             "samples": 0,
+            "positive_rate_pct": None,
+            "majority_baseline_accuracy_pct": None,
             "directional_accuracy_pct": None,
+            "direction_skill_pp": None,
             "non_neutral_signal_accuracy_pct": None,
             "non_neutral_samples": 0,
             "neutral_rate_pct": None,
+            "base_rate_brier_score": None,
             "brier_score": None,
+            "base_rate_log_loss": None,
             "log_loss": None,
             "return_mae_pct": None,
+            "buy_candidate_samples": 0,
+            "buy_candidate_win_rate_pct": None,
+            "buy_candidate_mean_return_pct": None,
+            "buy_candidate_positive_alpha_rate_pct": None,
+            "buy_candidate_mean_alpha_pct": None,
             "mature_share_pct": None,
         }
-    binary_hits = [int((float(row["probability_up"]) >= 0.5) == (float(row["realized_return_pct"]) > 0.0)) for row in rows]
-    signal_rows = [row for row in rows if str(row.get("direction")) in {"bullish", "bearish"}]
+
+    outcomes = [int(float(row["realized_return_pct"]) > 0.0) for row in rows]
+    positive_rate = sum(outcomes) / len(outcomes)
+    majority_baseline = max(positive_rate, 1.0 - positive_rate)
+    binary_hits = [
+        int(
+            (float(row["probability_up"]) >= 0.5)
+            == (float(row["realized_return_pct"]) > 0.0)
+        )
+        for row in rows
+    ]
+    directional_accuracy = sum(binary_hits) / len(binary_hits)
+
+    signal_rows = [
+        row for row in rows if str(row.get("direction")) in {"bullish", "bearish"}
+    ]
     signal_hits = [
-        int((str(row["direction"]) == "bullish" and float(row["realized_return_pct"]) > 0.0)
-            or (str(row["direction"]) == "bearish" and float(row["realized_return_pct"]) < 0.0))
+        int(
+            (
+                str(row["direction"]) == "bullish"
+                and float(row["realized_return_pct"]) > 0.0
+            )
+            or (
+                str(row["direction"]) == "bearish"
+                and float(row["realized_return_pct"]) < 0.0
+            )
+        )
         for row in signal_rows
     ]
-    outcomes = [int(float(row["realized_return_pct"]) > 0.0) for row in rows]
-    brier = [(float(row["probability_up"]) - outcome) ** 2 for row, outcome in zip(rows, outcomes)]
-    losses = [_log_loss(float(row["probability_up"]), outcome) for row, outcome in zip(rows, outcomes)]
-    return_errors = [abs(float(row["expected_return_pct"]) - float(row["realized_return_pct"])) for row in rows]
+
+    # A deterministic candidate-buy definition shared by both replay variants.
+    # It mirrors the core constructive forecast thresholds without using future data.
+    buy_rows = [
+        row
+        for row in rows
+        if float(row["probability_up"]) >= 0.58
+        and float(row["expected_return_pct"]) > 0.35
+        and (_finite(row.get("expected_alpha_pct")) or 0.0) > 0.0
+    ]
+    buy_returns = [float(row["realized_return_pct"]) for row in buy_rows]
+    buy_alphas = [
+        float(value)
+        for row in buy_rows
+        for value in [_finite(row.get("realized_alpha_pct"))]
+        if value is not None
+    ]
+
+    brier = [
+        (float(row["probability_up"]) - outcome) ** 2
+        for row, outcome in zip(rows, outcomes)
+    ]
+    losses = [
+        _log_loss(float(row["probability_up"]), outcome)
+        for row, outcome in zip(rows, outcomes)
+    ]
+    base_brier = [(positive_rate - outcome) ** 2 for outcome in outcomes]
+    base_losses = [_log_loss(positive_rate, outcome) for outcome in outcomes]
+    return_errors = [
+        abs(float(row["expected_return_pct"]) - float(row["realized_return_pct"]))
+        for row in rows
+    ]
     mature = [str(row.get("calibration_status")) == "mature" for row in rows]
+
     return {
         "samples": len(rows),
-        "directional_accuracy_pct": round(100.0 * sum(binary_hits) / len(binary_hits), 3),
-        "non_neutral_signal_accuracy_pct": None if not signal_hits else round(100.0 * sum(signal_hits) / len(signal_hits), 3),
+        "positive_rate_pct": round(100.0 * positive_rate, 3),
+        "majority_baseline_accuracy_pct": round(100.0 * majority_baseline, 3),
+        "directional_accuracy_pct": round(100.0 * directional_accuracy, 3),
+        "direction_skill_pp": round(
+            100.0 * (directional_accuracy - majority_baseline), 3
+        ),
+        "non_neutral_signal_accuracy_pct": (
+            None
+            if not signal_hits
+            else round(100.0 * sum(signal_hits) / len(signal_hits), 3)
+        ),
         "non_neutral_samples": len(signal_rows),
-        "neutral_rate_pct": round(100.0 * (len(rows) - len(signal_rows)) / len(rows), 3),
+        "neutral_rate_pct": round(
+            100.0 * (len(rows) - len(signal_rows)) / len(rows), 3
+        ),
+        "base_rate_brier_score": round(statistics.fmean(base_brier), 6),
         "brier_score": round(statistics.fmean(brier), 6),
+        "base_rate_log_loss": round(statistics.fmean(base_losses), 6),
         "log_loss": round(statistics.fmean(losses), 6),
         "return_mae_pct": round(statistics.fmean(return_errors), 6),
+        "buy_candidate_samples": len(buy_rows),
+        "buy_candidate_win_rate_pct": (
+            None
+            if not buy_returns
+            else round(
+                100.0 * sum(value > 0.0 for value in buy_returns) / len(buy_returns),
+                3,
+            )
+        ),
+        "buy_candidate_mean_return_pct": (
+            None if not buy_returns else round(statistics.fmean(buy_returns), 6)
+        ),
+        "buy_candidate_positive_alpha_rate_pct": (
+            None
+            if not buy_alphas
+            else round(
+                100.0 * sum(value > 0.0 for value in buy_alphas) / len(buy_alphas),
+                3,
+            )
+        ),
+        "buy_candidate_mean_alpha_pct": (
+            None if not buy_alphas else round(statistics.fmean(buy_alphas), 6)
+        ),
         "mature_share_pct": round(100.0 * sum(mature) / len(mature), 3),
     }
 
@@ -496,6 +593,7 @@ def _run_variant(args: argparse.Namespace) -> None:
             payload = _payload(block)
             probability = _finite(payload.get("probability_up"))
             expected = _finite(payload.get("expected_return_pct"))
+            expected_alpha = _finite(payload.get("expected_alpha_vs_spy_pct"))
             score = _finite(payload.get("score"))
             if probability is None or expected is None:
                 continue
@@ -514,10 +612,18 @@ def _run_variant(args: argparse.Namespace) -> None:
                     "engine_version": str(getattr(engine, "version", "unknown")),
                     "probability_up": round(probability, 8),
                     "expected_return_pct": round(expected, 8),
+                    "expected_alpha_pct": (
+                        None if expected_alpha is None else round(expected_alpha, 8)
+                    ),
                     "direction": str(payload.get("direction") or "neutral"),
                     "calibration_status": str(payload.get("calibration_status") or "prior_only"),
                     "calibration_samples": int(payload.get("calibration_samples") or 0),
                     "realized_return_pct": round(float(outcome["return_pct"]), 8),
+                    "realized_alpha_pct": (
+                        None
+                        if outcome.get("excess_vs_spy_pct") is None
+                        else round(float(outcome["excess_vs_spy_pct"]), 8)
+                    ),
                     "end_trade_date": outcome["end_trade_date"],
                 }
             )
@@ -544,7 +650,23 @@ def _run_variant(args: argparse.Namespace) -> None:
 
 def _metric_delta(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"samples": int(new.get("samples") or 0)}
-    for key in ("directional_accuracy_pct", "non_neutral_signal_accuracy_pct", "brier_score", "log_loss", "return_mae_pct", "mature_share_pct"):
+    for key in (
+        "positive_rate_pct",
+        "majority_baseline_accuracy_pct",
+        "directional_accuracy_pct",
+        "direction_skill_pp",
+        "non_neutral_signal_accuracy_pct",
+        "base_rate_brier_score",
+        "brier_score",
+        "base_rate_log_loss",
+        "log_loss",
+        "return_mae_pct",
+        "buy_candidate_win_rate_pct",
+        "buy_candidate_mean_return_pct",
+        "buy_candidate_positive_alpha_rate_pct",
+        "buy_candidate_mean_alpha_pct",
+        "mature_share_pct",
+    ):
         left, right = _finite(old.get(key)), _finite(new.get(key))
         result[key] = None if left is None or right is None else round(right - left, 6)
     return result
@@ -591,11 +713,20 @@ def _paired_comparison(old_payload: Mapping[str, Any], new_payload: Mapping[str,
         "old_engine_version": old_report.get("engine_version"),
         "new_engine_version": new_report.get("engine_version"),
         "delta_semantics": {
+            "positive_rate_pct": "descriptive baseline; model independent",
+            "majority_baseline_accuracy_pct": "descriptive baseline; model independent",
             "directional_accuracy_pct": "positive is better",
+            "direction_skill_pp": "positive is better; >0 beats majority direction baseline",
             "non_neutral_signal_accuracy_pct": "positive is better",
+            "base_rate_brier_score": "descriptive probability baseline",
             "brier_score": "negative is better",
+            "base_rate_log_loss": "descriptive probability baseline",
             "log_loss": "negative is better",
             "return_mae_pct": "negative is better",
+            "buy_candidate_win_rate_pct": "positive is better",
+            "buy_candidate_mean_return_pct": "positive is better",
+            "buy_candidate_positive_alpha_rate_pct": "positive is better",
+            "buy_candidate_mean_alpha_pct": "positive is better",
             "mature_share_pct": "descriptive only",
         },
         "by_horizon": by_horizon,
@@ -618,24 +749,77 @@ def _markdown(old: Mapping[str, Any], new: Mapping[str, Any], comparison: Mappin
         f"- Old: `{old['report'].get('engine_version')}`",
         f"- New: `{new['report'].get('engine_version')}`",
         f"- Paired observations: **{comparison.get('paired_observations', 0)}**",
-        "- Metrics: binary directional accuracy (P(up) >= 50%), non-neutral signal accuracy, Brier, log loss, return MAE.",
+        "- Metrics: direction accuracy **and skill vs majority baseline**, Brier/log loss vs base-rate probability, return MAE, and deterministic BUY-candidate realized return/alpha.",
+        "- BUY candidate = P(up) >=58%, expected return >0.35%, expected alpha vs SPY >0; future return/alpha are scoring outcomes only.",
         "- Scope limitation: this is a deterministic OHLCV reconstruction of Forecast Engine inputs, not a historical replay of unavailable news/LLM snapshots.",
         "",
         "## Overall by horizon",
         "",
-        "| Horizon | Model | N | Dir Acc | Signal Acc | Brier | Log loss | Return MAE | Mature share |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Horizon | Model | N | Up base | Majority | Dir Acc | Skill | Brier / base | Log loss / base | Return MAE |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for horizon in ("1d", "5d", "10d", "20d"):
         for label, payload in (("V7.1", old), ("V7.3", new)):
             metric = payload["report"]["by_horizon"][horizon]
             lines.append(
-                f"| {horizon} | {label} | {metric['samples']} | {_fmt(metric['directional_accuracy_pct'])}% | {_fmt(metric['non_neutral_signal_accuracy_pct'])}% | {_fmt(metric['brier_score'], 6)} | {_fmt(metric['log_loss'], 6)} | {_fmt(metric['return_mae_pct'], 4)}% | {_fmt(metric['mature_share_pct'])}% |"
+                f"| {horizon} | {label} | {metric['samples']} | "
+                f"{_fmt(metric['positive_rate_pct'])}% | "
+                f"{_fmt(metric['majority_baseline_accuracy_pct'])}% | "
+                f"{_fmt(metric['directional_accuracy_pct'])}% | "
+                f"{_fmt(metric['direction_skill_pp'])}pp | "
+                f"{_fmt(metric['brier_score'], 6)} / {_fmt(metric['base_rate_brier_score'], 6)} | "
+                f"{_fmt(metric['log_loss'], 6)} / {_fmt(metric['base_rate_log_loss'], 6)} | "
+                f"{_fmt(metric['return_mae_pct'], 4)}% |"
             )
         delta = comparison["by_horizon"][horizon]
         lines.append(
-            f"| {horizon} | Δ V7.3−V7.1 | {delta['samples']} | {_fmt(delta['directional_accuracy_pct'])}pp | {_fmt(delta['non_neutral_signal_accuracy_pct'])}pp | {_fmt(delta['brier_score'], 6)} | {_fmt(delta['log_loss'], 6)} | {_fmt(delta['return_mae_pct'], 4)}% | {_fmt(delta['mature_share_pct'])}pp |"
+            f"| {horizon} | Δ V7.3−V7.1 | {delta['samples']} | "
+            f"{_fmt(delta['positive_rate_pct'])}pp | "
+            f"{_fmt(delta['majority_baseline_accuracy_pct'])}pp | "
+            f"{_fmt(delta['directional_accuracy_pct'])}pp | "
+            f"{_fmt(delta['direction_skill_pp'])}pp | "
+            f"{_fmt(delta['brier_score'], 6)} | {_fmt(delta['log_loss'], 6)} | "
+            f"{_fmt(delta['return_mae_pct'], 4)}% |"
         )
+
+    lines.extend(["", "## BUY-candidate quality", ""])
+    lines.append(
+        "| Horizon | Model | Candidates | Win rate | Mean return | +Alpha rate | Mean alpha |"
+    )
+    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    for horizon in ("1d", "5d", "10d", "20d"):
+        for label, payload in (("V7.1", old), ("V7.3", new)):
+            metric = payload["report"]["by_horizon"][horizon]
+            lines.append(
+                f"| {horizon} | {label} | {metric['buy_candidate_samples']} | "
+                f"{_fmt(metric['buy_candidate_win_rate_pct'])}% | "
+                f"{_fmt(metric['buy_candidate_mean_return_pct'], 4)}% | "
+                f"{_fmt(metric['buy_candidate_positive_alpha_rate_pct'])}% | "
+                f"{_fmt(metric['buy_candidate_mean_alpha_pct'], 4)}% |"
+            )
+
+    lines.extend(["", "## 5D by symbol: skill and BUY quality", ""])
+    lines.append(
+        "| Symbol | Model | N | Majority | Dir Acc | Skill | Buy N | Buy Win | Buy Mean Ret | Buy Mean Alpha |"
+    )
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    symbols = sorted(
+        set(old["report"]["by_symbol"]) | set(new["report"]["by_symbol"])
+    )
+    for symbol in symbols:
+        for label, payload in (("V7.1", old), ("V7.3", new)):
+            metric = (payload["report"]["by_symbol"].get(symbol) or {}).get("5d") or {}
+            lines.append(
+                f"| {symbol} | {label} | {metric.get('samples', 0)} | "
+                f"{_fmt(metric.get('majority_baseline_accuracy_pct'))}% | "
+                f"{_fmt(metric.get('directional_accuracy_pct'))}% | "
+                f"{_fmt(metric.get('direction_skill_pp'))}pp | "
+                f"{metric.get('buy_candidate_samples', 0)} | "
+                f"{_fmt(metric.get('buy_candidate_win_rate_pct'))}% | "
+                f"{_fmt(metric.get('buy_candidate_mean_return_pct'), 4)}% | "
+                f"{_fmt(metric.get('buy_candidate_mean_alpha_pct'), 4)}% |"
+            )
+
     lines.extend(["", "## Stock / ETF split", ""])
     lines.append("| Type | Horizon | Δ Dir Acc | Δ Brier | Δ Log loss | Δ Return MAE |")
     lines.append("|---|---|---:|---:|---:|---:|")
