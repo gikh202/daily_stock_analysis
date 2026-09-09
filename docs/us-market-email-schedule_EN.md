@@ -1,19 +1,34 @@
-# US Market Two-Checkpoint Analysis and Email Delivery
+# US Market Low-Latency Email Schedule
 
-GitHub Actions uses two complementary analysis checkpoints instead of forcing intraday confirmation and post-close review into one fixed UTC schedule.
+The production schedule separates **time-critical execution email** from the heavier V4/V6/V7 research chain. GitHub Actions remains a best-effort scheduler, so UTC cron entries are candidate triggers and runtime gates use `America/New_York` plus the XNYS calendar.
 
 ## Default checkpoints
 
-| Checkpoint | Workflow | Trigger semantics |
+| Checkpoint | Workflow | Production behavior |
 | --- | --- | --- |
-| 15 minutes after the US open | `.github/workflows/01-us-open-confirmation.yml` | Targets 09:45 ET. To tolerate GitHub Actions scheduling delays, lightweight compensation candidates also run at 09:55, 10:10, 10:25, 10:40, 10:55, and 11:10 ET. The orchestrator reuses the successful/in-flight V4/V6 chain so the candidates do not intentionally send duplicate final emails. |
-| After the US close | `.github/workflows/00-daily-analysis.yml` | Runs the full analysis at 22:30 UTC on weekdays. GitHub scheduled jobs may queue and start later, so the actual email can arrive after the nominal 06:30 Taipei/Beijing time. |
+| US open | `.github/workflows/01-us-open-confirmation.yml` | Starts at 09:30 ET with dense 09:30–09:35 compensation candidates. A single fresh 1-minute bar is enough for a conservative first decision; later candidates add more opening evidence. It installs only `requirements-realtime.txt` and sends email through the lightweight SMTP path. |
+| US close flash | `.github/workflows/00a-us-close-flash.yml` | Candidate triggers at 20:00 and 21:00 UTC cover EDT/EST. The New York runtime gate keeps only the real 16:00 ET window, validates the XNYS session, reuses the most recent successful V6/V7 plan, and sends a low-latency close snapshot before deep analysis. |
+| Deep post-close analysis | `.github/workflows/00-daily-analysis.yml` → `.github/workflows/03-v6-daily.yml` | Candidate triggers at 20:05 and 21:05 UTC. The New York runtime gate keeps only the true post-close run. V4 performs the full analysis; V6/V7 follows from the same successful run and sends the validated comprehensive report. |
 
-The open-confirmation workflow dispatches the existing full daily-analysis workflow rather than duplicating analysis logic. Both checkpoints therefore share the same stock list, market-phase handling, data/LLM configuration, report and DecisionSignal guardrails, notification channels, trading-day checks, and report artifacts.
+The former fixed 22:30 UTC close schedule and the 0–60 second random startup sleep are no longer part of the production path.
+
+## Open-session follow-up
+
+The open workflow continues to re-evaluate non-terminal states later in the session. State-signature and terminal caches suppress unchanged or completed decisions. The first pass is intentionally conservative: a thin opening sample may authorize continued observation, but it cannot bypass a close-plan `REJECTED` state, stop/invalidation boundary, or missing risk plan.
+
+The entry-timing layer now publishes:
+
+- ideal entry price selected from multiple causal candidates;
+- acceptable entry zone;
+- no-chase-above price;
+- candidate source and research touch/EV scores;
+- stop, targets, and position limits from the existing hard risk contract.
+
+These research scores are not represented as calibrated win probabilities.
 
 ## Email configuration
 
-To receive email from both checkpoints, configure at least these Repository Settings values:
+The low-latency open/close path uses the same repository values:
 
 ```text
 EMAIL_SENDER
@@ -21,32 +36,22 @@ EMAIL_PASSWORD
 EMAIL_RECEIVERS
 ```
 
-Optional:
+Optional values:
 
 ```text
 EMAIL_SENDER_NAME
+SMTP_HOST
+SMTP_PORT
 ```
 
-Use the SMTP authorization code / app password required by your mail provider when ordinary account passwords are not accepted.
+Common Gmail, QQ/Foxmail, 163/126, and Outlook SMTP hosts are inferred automatically. `SMTP_HOST` / `SMTP_PORT` are available for other providers.
 
-Both checkpoints reuse the notification environment from `00-daily-analysis.yml`; no second set of email credentials is required for the open-confirmation run.
+## Research and calibration
 
-## Decision and email consistency
+`02b-us-open-research-ledger.yml` persists the open decisions plus reusable 1-minute and 5-minute intraday bars. Settled outcomes compare optimized-entry execution with immediate entry and report entry-timing alpha.
 
-The final email, analysis history, and automatic DecisionSignal use the same finalized action. When the AnalysisContextPack explicitly reports `poor` core-evidence quality, an otherwise actionable `buy/add` is downgraded to `watch` before public output and persistence, with the data-quality guardrail reason retained for auditability. This prevents the email from recommending a buy while the stored signal has already been downgraded.
+`02c-us-open-policy-calibration.yml` evaluates the global timing policy and separate market-regime slices. When an eligible Challenger exists on the weekly scheduled run, the workflow creates a dedicated pull request containing only approved timing tunables and/or regime overrides. CI and review remain required before production changes.
 
-Insufficient technical history is represented as unavailable rather than inferred from placeholder values. MA60 is exposed only when enough real history exists, and technical-score coverage records which indicator groups are actually available before an active buy conclusion can be produced.
+## Scheduling caveat
 
-## Market holidays, DST, and scheduling delay
-
-- `01-us-open-confirmation.yml` uses the `America/New_York` timezone directly, so daylight-saving transitions do not shift the target by an hour.
-- The multiple open candidates are compensation triggers, not an instruction to send multiple emails. A successful or in-flight V4/V6 chain is reused by later scheduled candidates.
-- Weekday cron expressions are only candidate triggers. Existing trading-day checks still decide whether analysis should actually run on US market holidays.
-- GitHub Actions scheduling is not a hard real-time scheduler and may run late when the platform queue is busy; the 22:30 UTC post-close schedule can be delayed as well.
-- For validation, use the manual `workflow_dispatch` entry on the open-confirmation workflow and the manual entry on the daily-analysis workflow.
-
-## Avoid duplicate schedules
-
-Do not add a third workflow for the same post-close or 09:45 ET checkpoint. Duplicate schedules would duplicate market/news/LLM requests, history and DecisionSignal writes, email delivery, and external API/model usage.
-
-If the timing needs to change, update the existing workflows and their DST/trading-calendar regression validation instead of copying the workflow.
+GitHub Actions `schedule` is not a hard real-time scheduler. A 09:30 or 16:00 candidate can still enter the GitHub queue late. The dense open candidates, EDT/EST runtime gates, lightweight dependencies, and separate close-flash workflow minimize avoidable application-side latency; they cannot guarantee second-level delivery from GitHub-hosted runners.
