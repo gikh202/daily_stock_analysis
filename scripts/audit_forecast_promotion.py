@@ -150,6 +150,12 @@ def build_audit(
                     "challenger_direction_skill": challenger.get(
                         "direction_skill"
                     ),
+                    "champion_signal_samples": champion.get("signal_samples"),
+                    "challenger_signal_samples": challenger.get("signal_samples"),
+                    "champion_signal_accuracy": champion.get("signal_accuracy"),
+                    "challenger_signal_accuracy": challenger.get("signal_accuracy"),
+                    "champion_signal_coverage": champion.get("signal_coverage"),
+                    "challenger_signal_coverage": challenger.get("signal_coverage"),
                     "champion_brier_score": champion.get("brier_score"),
                     "challenger_brier_score": challenger.get("brier_score"),
                     "champion_log_loss": champion.get("log_loss"),
@@ -159,6 +165,18 @@ def build_audit(
                     ),
                     "challenger_directional_alpha_pct": challenger.get(
                         "directional_alpha_pct"
+                    ),
+                    "champion_signal_directional_alpha_pct": champion.get(
+                        "signal_directional_alpha_pct"
+                    ),
+                    "challenger_signal_directional_alpha_pct": challenger.get(
+                        "signal_directional_alpha_pct"
+                    ),
+                    "champion_signal_alpha_samples": champion.get(
+                        "signal_alpha_samples"
+                    ),
+                    "challenger_signal_alpha_samples": challenger.get(
+                        "signal_alpha_samples"
                     ),
                     "promotion_gates": dict(
                         selection.get("promotion_gates") or {}
@@ -214,9 +232,9 @@ def render_markdown(payload: Mapping[str, Any]) -> str:
         f"- Promoted: **{summary.get('promoted_evaluations', 0)}**",
         "",
         "| Symbol | H | Status | Scope | N | Majority | Champ Acc | Chall Acc | "
-        "Chall Skill | Inverse | ΔBrier | ΔLogLoss | Champ α | Chall α | "
-        "Failed gates |",
-        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "Chall Skill | Signal N | Signal Acc | Signal Cov | Inverse | ΔBrier | "
+        "ΔLogLoss | Signal α | Failed gates |",
+        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         cb = row.get("champion_brier_score")
@@ -238,18 +256,22 @@ def render_markdown(payload: Mapping[str, Any]) -> str:
             f"{_pct(row.get('champion_directional_accuracy'))} | "
             f"{_pct(row.get('challenger_directional_accuracy'))} | "
             f"{_pct(row.get('challenger_direction_skill'))} | "
+            f"{row.get('challenger_signal_samples') or 0} | "
+            f"{_pct(row.get('challenger_signal_accuracy'))} | "
+            f"{_pct(row.get('challenger_signal_coverage'))} | "
             f"{_pct(row.get('inverse_challenger_directional_accuracy'))} | "
             f"{_num(delta_brier, 6)} | {_num(delta_logloss, 6)} | "
-            f"{_num(row.get('champion_directional_alpha_pct'), 3)}% | "
-            f"{_num(row.get('challenger_directional_alpha_pct'), 3)}% | "
+            f"{_num(row.get('challenger_signal_directional_alpha_pct'), 3)}% | "
             f"{failures} |"
         )
     lines += [
         "",
         "Promotion requires all gates: symbol-specific scope, sample floor, "
         "direction accuracy ≥52%, direction Skill ≥+2pp, better direction than "
-        "Champion and inverse control, better Brier and Log Loss, sufficient "
-        "alpha samples, positive directional alpha, and improved directional alpha.",
+        "Champion and inverse control, at least 50 actionable strong signals "
+        "(P≥58% or P≤42%) with ≥55% accuracy, better Brier and Log Loss, "
+        "sufficient strong-signal alpha samples, positive strong-signal alpha, "
+        "and improved strong-signal alpha.",
         "",
     ]
     return "\n".join(lines)
