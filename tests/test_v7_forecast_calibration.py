@@ -396,3 +396,174 @@ def test_low_confidence_gate_cannot_leave_watch_position_authorized() -> None:
     assert decision.decision == "WAIT"
     assert decision.max_position_fraction == 0.0
     assert "forecast_confidence_below_50pct" in decision.gates
+
+
+
+def _promotion_gate_db(
+    path: Path,
+    *,
+    mode: str,
+    row_symbol: str = "TEST",
+) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE v6_forecast_runs (
+            id INTEGER PRIMARY KEY,
+            engine_version TEXT,
+            market_regime TEXT,
+            effective_trade_date TEXT,
+            symbol TEXT,
+            instrument_type TEXT
+        );
+        CREATE TABLE v6_horizon_forecasts (
+            id INTEGER PRIMARY KEY,
+            forecast_run_id INTEGER,
+            horizon_days INTEGER,
+            score REAL,
+            payload_json TEXT
+        );
+        CREATE TABLE v6_forecast_outcomes (
+            id INTEGER PRIMARY KEY,
+            forecast_run_id INTEGER,
+            horizon_days INTEGER,
+            end_trade_date TEXT,
+            return_pct REAL,
+            mfe_pct REAL,
+            mae_pct REAL,
+            excess_vs_spy_pct REAL
+        );
+        """
+    )
+    for idx in range(1, 241):
+        if mode == "strong_challenger":
+            positive = idx % 2 == 0
+            champion_p = 0.55
+            challenger_p = 0.70 if positive else 0.30
+        elif mode == "better_calibration_no_skill":
+            positive = idx % 10 < 7
+            champion_p = 0.90
+            challenger_p = 0.70
+        else:
+            raise ValueError(mode)
+
+        ret = 1.0 if positive else -1.0
+        excess = 1.0 if positive else -1.0
+        conn.execute(
+            "INSERT INTO v6_forecast_runs VALUES (?,?,?,?,?,?)",
+            (
+                idx,
+                "v8-test",
+                "risk_on",
+                "2025-01-02",
+                row_symbol,
+                "STOCK",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO v6_horizon_forecasts(
+                forecast_run_id,horizon_days,score,payload_json
+            ) VALUES (?,?,?,?)
+            """,
+            (
+                idx,
+                5,
+                champion_p * 100.0,
+                json.dumps(
+                    {
+                        "probability_up": champion_p,
+                        "challenger_probability_up": challenger_p,
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO v6_forecast_outcomes(
+                forecast_run_id,horizon_days,end_trade_date,return_pct,
+                mfe_pct,mae_pct,excess_vs_spy_pct
+            ) VALUES (?,?,?,?,?,?,?)
+            """,
+            (
+                idx,
+                5,
+                "2025-02-03",
+                ret,
+                max(ret, 1.5),
+                min(ret, -1.0),
+                excess,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_challenger_promotes_only_after_all_oos_skill_gates_pass(tmp_path: Path) -> None:
+    path = tmp_path / "promotion.db"
+    _promotion_gate_db(path, mode="strong_challenger")
+    selection = ForecastHistory(str(path)).select_champion(
+        as_of_date="2025-03-01",
+        horizon_days=5,
+        regime="risk_on",
+        symbol="TEST",
+        instrument_type="STOCK",
+    )
+    assert selection["status"] == "promoted"
+    assert selection["champion_model"] == "momentum_challenger"
+    assert selection["evaluation_scope"] in {"symbol", "symbol_regime"}
+    assert selection["majority_baseline_accuracy"] == 0.5
+    assert selection["challenger_metrics"]["directional_accuracy"] == 1.0
+    assert selection["challenger_metrics"]["direction_skill"] == 0.5
+    assert selection["inverse_challenger_directional_accuracy"] == 0.0
+    assert selection["challenger_metrics"]["directional_alpha_pct"] == 1.0
+    assert all(selection["promotion_gates"].values())
+    assert selection["promotion_failures"] == []
+
+
+def test_brier_improvement_alone_cannot_promote_without_direction_skill(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "no-skill.db"
+    _promotion_gate_db(path, mode="better_calibration_no_skill")
+    selection = ForecastHistory(str(path)).select_champion(
+        as_of_date="2025-03-01",
+        horizon_days=5,
+        regime="risk_on",
+        symbol="TEST",
+        instrument_type="STOCK",
+    )
+    assert (
+        selection["challenger_metrics"]["brier_score"]
+        < selection["champion_metrics"]["brier_score"]
+    )
+    assert selection["challenger_metrics"]["direction_skill"] == 0.0
+    assert selection["status"] == "observing"
+    assert selection["champion_model"] == "calibrated_ensemble"
+    assert selection["promotion_gates"]["direction_skill_floor"] is False
+    assert "direction_skill_floor" in selection["promotion_failures"]
+
+
+def test_pooled_fallback_evidence_cannot_promote_symbol_model(tmp_path: Path) -> None:
+    path = tmp_path / "pooled.db"
+    _promotion_gate_db(
+        path,
+        mode="strong_challenger",
+        row_symbol="OTHER",
+    )
+    selection = ForecastHistory(str(path)).select_champion(
+        as_of_date="2025-03-01",
+        horizon_days=5,
+        regime="risk_on",
+        symbol="TARGET",
+        instrument_type="STOCK",
+    )
+    assert selection["evaluation_scope"] in {
+        "instrument_type",
+        "instrument_regime",
+        "regime",
+        "global",
+    }
+    assert selection["promotion_gates"]["symbol_specific_scope"] is False
+    assert selection["status"] == "observing"
+    assert selection["champion_model"] == "calibrated_ensemble"
