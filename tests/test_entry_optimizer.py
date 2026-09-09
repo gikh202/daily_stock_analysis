@@ -48,3 +48,26 @@ def test_optimizer_refuses_to_invent_plan_without_valid_stop():
     result = EntryOptimizer().optimize(current_price=100.0, stop_loss=None)
     assert result.ideal_entry_price is None
     assert result.candidates == ()
+
+
+def test_wait_mode_excludes_current_price_candidate():
+    result = EntryOptimizer().optimize(
+        current_price=100.0,
+        stop_loss=95.0,
+        targets=(106.0,),
+        entry_low=98.0,
+        entry_high=100.0,
+        session_low=97.8,
+        session_high=100.2,
+        session_vwap=99.0,
+        ema20=98.8,
+        opening_range_low=98.2,
+        previous_close=98.5,
+        intraday_volatility_pct=1.0,
+        probability_up_1d=0.55,
+        probability_up_5d=0.60,
+        allow_current=False,
+    )
+    assert result.ideal_entry_price is not None
+    assert result.ideal_entry_price < 99.95
+    assert all(item.source != "current" for item in result.candidates)
