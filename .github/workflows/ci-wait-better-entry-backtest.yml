@@ -16,6 +16,7 @@ on:
       - 'tests/test_wait_backtest_evaluation.py'
       - 'tests/test_entry_optimizer.py'
       - 'tests/test_entry_optimizer_research.py'
+      - 'tests/test_us_market_low_latency_workflows.py'
   workflow_dispatch:
 
 permissions:
@@ -49,7 +50,8 @@ jobs:
             tests/test_wait_better_entry_contract.py \
             tests/test_wait_backtest_evaluation.py \
             tests/test_entry_optimizer.py \
-            tests/test_entry_optimizer_research.py
+            tests/test_entry_optimizer_research.py \
+            tests/test_us_market_low_latency_workflows.py
 
       - name: Find latest successful V6/V7 artifact
         id: prior-v6
