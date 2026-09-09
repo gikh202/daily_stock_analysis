@@ -30,8 +30,8 @@ def test_close_flash_is_separate_and_lightweight() -> None:
 
 def test_open_path_is_lightweight_and_dense_at_open() -> None:
     text = OPEN.read_text(encoding="utf-8")
-    assert "cron: '30-35,45 13 * * 1-5'" in text
-    assert "cron: '0,30-35,45 14 * * 1-5'" in text
+    assert "cron: '30,35,40,45 13 * * 1-5'" in text
+    assert "cron: '0,30,35,40,45 14 * * 1-5'" in text
     assert "requirements-realtime.txt" in text
     assert "pip install -r requirements.txt" not in text
 
