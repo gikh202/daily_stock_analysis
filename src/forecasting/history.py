@@ -79,7 +79,7 @@ class CalibrationProfile:
 class ForecastHistory:
     """Read-only, strict as-of learning view over matured forecast outcomes.
 
-    V7.3 uses hierarchical reliability scopes. The most specific sufficiently
+    V8 uses hierarchical reliability scopes. The most specific sufficiently
     populated scope wins: symbol -> instrument type -> market regime -> global.
     Every scope is strict-as-of, so fallback never admits future outcomes.
     """
@@ -471,52 +471,126 @@ class ForecastHistory:
         symbol: str | None = None,
         instrument_type: str | None = None,
     ) -> Dict[str, Any]:
-        """Compare Champion and Challenger only on paired native predictions."""
+        """Compare Champion/Challenger on paired, strictly prior outcomes.
+
+        Besides probability calibration metrics, V8 measures whether each model
+        has genuine directional skill above the majority-class baseline and
+        whether its signed realized alpha is positive. The inverse Challenger
+        is kept as a shadow control so a model cannot be promoted merely because
+        the market happened to favor one side.
+        """
+        empty = {
+            "samples": 0,
+            "scope": "global",
+            "positive_rate": None,
+            "majority_baseline_accuracy": None,
+            "champion_directional_accuracy": None,
+            "challenger_directional_accuracy": None,
+            "inverse_challenger_directional_accuracy": None,
+            "champion_direction_skill": None,
+            "challenger_direction_skill": None,
+            "challenger_vs_inverse_margin": None,
+            "champion_brier_score": None,
+            "challenger_brier_score": None,
+            "champion_log_loss": None,
+            "challenger_log_loss": None,
+            "alpha_samples": 0,
+            "champion_directional_alpha_pct": None,
+            "challenger_directional_alpha_pct": None,
+        }
         if _valid_date(as_of_date) is None:
-            return {
-                "samples": 0,
-                "champion_brier_score": None,
-                "challenger_brier_score": None,
-                "champion_log_loss": None,
-                "challenger_log_loss": None,
-            }
-        rows = self._metric_rows(
-            as_of_date=as_of_date,
-            horizon_days=horizon_days,
-            regime=regime,
+            return empty
+
+        rows = self._rows(as_of_date=as_of_date, horizon_days=horizon_days)
+        selected, scope, _ = self._hierarchical_scope(
+            rows,
             symbol=symbol,
             instrument_type=instrument_type,
+            regime=regime,
         )
-        paired: list[tuple[float, float, int]] = []
-        for row in rows:
+        paired: list[tuple[float, float, int, Optional[float]]] = []
+        for row in selected:
             champion_p = self._row_probability(row, "probability_up")
-            challenger_p = self._row_probability(row, "challenger_probability_up")
+            challenger_p = self._row_probability(
+                row, "challenger_probability_up"
+            )
             ret = _finite(row["return_pct"])
             if champion_p is None or challenger_p is None or ret is None:
                 continue
-            paired.append((champion_p, challenger_p, int(ret > 0.0)))
+            paired.append(
+                (
+                    champion_p,
+                    challenger_p,
+                    int(ret > 0.0),
+                    _finite(row["excess_vs_spy_pct"]),
+                )
+            )
         if not paired:
-            return {
-                "samples": 0,
-                "champion_brier_score": None,
-                "challenger_brier_score": None,
-                "champion_log_loss": None,
-                "challenger_log_loss": None,
-            }
+            return {**empty, "scope": scope}
+
+        n = len(paired)
+        positive_rate = statistics.fmean(y for _, _, y, _ in paired)
+        majority_baseline = max(positive_rate, 1.0 - positive_rate)
+        champion_accuracy = statistics.fmean(
+            int((p >= 0.50) == bool(y)) for p, _, y, _ in paired
+        )
+        challenger_accuracy = statistics.fmean(
+            int((p >= 0.50) == bool(y)) for _, p, y, _ in paired
+        )
+        inverse_accuracy = 1.0 - challenger_accuracy
+        champion_skill = champion_accuracy - majority_baseline
+        challenger_skill = challenger_accuracy - majority_baseline
+
+        alpha_rows = [
+            (champion_p, challenger_p, alpha)
+            for champion_p, challenger_p, _, alpha in paired
+            if alpha is not None
+        ]
+        champion_directional_alpha = (
+            statistics.fmean(
+                (1.0 if champion_p >= 0.50 else -1.0) * float(alpha)
+                for champion_p, _, alpha in alpha_rows
+            )
+            if alpha_rows
+            else None
+        )
+        challenger_directional_alpha = (
+            statistics.fmean(
+                (1.0 if challenger_p >= 0.50 else -1.0) * float(alpha)
+                for _, challenger_p, alpha in alpha_rows
+            )
+            if alpha_rows
+            else None
+        )
+
         return {
-            "samples": len(paired),
+            "samples": n,
+            "scope": scope,
+            "positive_rate": positive_rate,
+            "majority_baseline_accuracy": majority_baseline,
+            "champion_directional_accuracy": champion_accuracy,
+            "challenger_directional_accuracy": challenger_accuracy,
+            "inverse_challenger_directional_accuracy": inverse_accuracy,
+            "champion_direction_skill": champion_skill,
+            "challenger_direction_skill": challenger_skill,
+            "challenger_vs_inverse_margin": (
+                challenger_accuracy - inverse_accuracy
+            ),
             "champion_brier_score": statistics.fmean(
-                (p - y) ** 2 for p, _, y in paired
+                (p - y) ** 2 for p, _, y, _ in paired
             ),
             "challenger_brier_score": statistics.fmean(
-                (p - y) ** 2 for _, p, y in paired
+                (p - y) ** 2 for _, p, y, _ in paired
             ),
             "champion_log_loss": statistics.fmean(
-                _log_loss(p, y) for p, _, y in paired
+                _log_loss(p, y) for p, _, y, _ in paired
             ),
             "challenger_log_loss": statistics.fmean(
-                _log_loss(p, y) for _, p, y in paired
+                _log_loss(p, y) for _, p, y, _ in paired
             ),
+            "alpha_samples": len(alpha_rows),
+            "champion_directional_alpha_pct": champion_directional_alpha,
+            "challenger_directional_alpha_pct": challenger_directional_alpha,
         }
 
     def select_champion(
@@ -528,8 +602,22 @@ class ForecastHistory:
         symbol: str | None = None,
         instrument_type: str | None = None,
         min_promotion_samples: int = 200,
-        min_brier_improvement: float = 0.01,
+        min_directional_accuracy: float = 0.52,
+        min_direction_skill: float = 0.02,
+        min_direction_accuracy_improvement: float = 0.005,
+        min_brier_improvement: float = 0.001,
+        min_log_loss_improvement: float = 0.002,
+        min_directional_alpha_improvement_pct: float = 0.05,
+        min_alpha_samples: int | None = None,
     ) -> Dict[str, Any]:
+        """Select a model only after strict multi-metric forward OOS evidence.
+
+        Promotion is intentionally hard. A Challenger must demonstrate real
+        directional skill for the requested symbol/horizon, beat Champion and
+        its own inverse signal, improve Brier and log loss, and generate better
+        positive signed realized alpha. Pooled fallback scopes remain useful for
+        research calibration but cannot promote a symbol-specific model.
+        """
         paired = self.paired_model_metrics(
             as_of_date=as_of_date,
             horizon_days=horizon_days,
@@ -537,23 +625,95 @@ class ForecastHistory:
             symbol=symbol,
             instrument_type=instrument_type,
         )
+        alpha_floor = (
+            int(min_promotion_samples)
+            if min_alpha_samples is None
+            else max(1, int(min_alpha_samples))
+        )
+        specific_scope = (
+            not str(symbol or "").strip()
+            or paired["scope"] in {"symbol", "symbol_regime"}
+        )
+
         champion = {
             "samples": paired["samples"],
+            "directional_accuracy": paired["champion_directional_accuracy"],
+            "direction_skill": paired["champion_direction_skill"],
             "brier_score": paired["champion_brier_score"],
             "log_loss": paired["champion_log_loss"],
+            "directional_alpha_pct": paired["champion_directional_alpha_pct"],
+            "alpha_samples": paired["alpha_samples"],
         }
         challenger = {
             "samples": paired["samples"],
+            "directional_accuracy": paired["challenger_directional_accuracy"],
+            "direction_skill": paired["challenger_direction_skill"],
             "brier_score": paired["challenger_brier_score"],
             "log_loss": paired["challenger_log_loss"],
+            "directional_alpha_pct": paired[
+                "challenger_directional_alpha_pct"
+            ],
+            "alpha_samples": paired["alpha_samples"],
         }
-        promote = bool(
-            paired["samples"] >= int(min_promotion_samples)
-            and champion["brier_score"] is not None
-            and challenger["brier_score"] is not None
-            and challenger["brier_score"]
-            <= champion["brier_score"] - float(min_brier_improvement)
-        )
+
+        def present(value: Any) -> bool:
+            return value is not None and math.isfinite(float(value))
+
+        gates = {
+            "symbol_specific_scope": bool(specific_scope),
+            "sample_floor": paired["samples"] >= int(min_promotion_samples),
+            "direction_accuracy_floor": bool(
+                present(challenger["directional_accuracy"])
+                and challenger["directional_accuracy"]
+                >= float(min_directional_accuracy)
+            ),
+            "direction_skill_floor": bool(
+                present(challenger["direction_skill"])
+                and challenger["direction_skill"] >= float(min_direction_skill)
+            ),
+            "beats_champion_direction": bool(
+                present(champion["directional_accuracy"])
+                and present(challenger["directional_accuracy"])
+                and challenger["directional_accuracy"]
+                >= champion["directional_accuracy"]
+                + float(min_direction_accuracy_improvement)
+            ),
+            "beats_inverse_signal": bool(
+                present(challenger["directional_accuracy"])
+                and present(
+                    paired["inverse_challenger_directional_accuracy"]
+                )
+                and challenger["directional_accuracy"]
+                > paired["inverse_challenger_directional_accuracy"]
+            ),
+            "brier_improves": bool(
+                present(champion["brier_score"])
+                and present(challenger["brier_score"])
+                and challenger["brier_score"]
+                <= champion["brier_score"] - float(min_brier_improvement)
+            ),
+            "log_loss_improves": bool(
+                present(champion["log_loss"])
+                and present(challenger["log_loss"])
+                and challenger["log_loss"]
+                <= champion["log_loss"] - float(min_log_loss_improvement)
+            ),
+            "alpha_sample_floor": paired["alpha_samples"] >= alpha_floor,
+            "directional_alpha_positive": bool(
+                present(challenger["directional_alpha_pct"])
+                and challenger["directional_alpha_pct"] > 0.0
+            ),
+            "directional_alpha_improves": bool(
+                present(champion["directional_alpha_pct"])
+                and present(challenger["directional_alpha_pct"])
+                and challenger["directional_alpha_pct"]
+                >= champion["directional_alpha_pct"]
+                + float(min_directional_alpha_improvement_pct)
+            ),
+        }
+        failures = [name for name, passed in gates.items() if not passed]
+        promote = bool(gates and not failures)
+
         return {
             "champion_model": (
                 "momentum_challenger" if promote else "calibrated_ensemble"
@@ -566,11 +726,39 @@ class ForecastHistory:
                 if promote
                 else ("observing" if paired["samples"] else "cold_start")
             ),
+            "promotion_gate_version": "v8-oos-multimetric-skill.1",
             "promotion_min_samples": int(min_promotion_samples),
+            "promotion_min_alpha_samples": alpha_floor,
+            "min_directional_accuracy": float(min_directional_accuracy),
+            "min_direction_skill": float(min_direction_skill),
+            "min_direction_accuracy_improvement": float(
+                min_direction_accuracy_improvement
+            ),
             "min_brier_improvement": float(min_brier_improvement),
+            "min_log_loss_improvement": float(min_log_loss_improvement),
+            "min_directional_alpha_improvement_pct": float(
+                min_directional_alpha_improvement_pct
+            ),
             "evaluation_basis": "paired_forward_only",
             "scope_policy": "symbol_to_instrument_type_to_regime_to_global",
+            "promotion_scope_policy": (
+                "symbol_or_symbol_regime_only; pooled_fallback_observation_only"
+            ),
+            "evaluation_scope": paired["scope"],
             "paired_samples": paired["samples"],
+            "positive_rate": paired["positive_rate"],
+            "majority_baseline_accuracy": paired[
+                "majority_baseline_accuracy"
+            ],
+            "inverse_challenger_directional_accuracy": paired[
+                "inverse_challenger_directional_accuracy"
+            ],
+            "challenger_vs_inverse_margin": paired[
+                "challenger_vs_inverse_margin"
+            ],
+            "promotion_gates": gates,
+            "promotion_failures": failures,
             "champion_metrics": champion,
             "challenger_metrics": challenger,
         }
+
