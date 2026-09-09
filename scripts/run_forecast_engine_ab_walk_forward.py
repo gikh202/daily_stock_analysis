@@ -374,6 +374,8 @@ def _summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "log_loss": None,
             "directional_alpha_pct": None,
             "alpha_samples": 0,
+            "signal_directional_alpha_pct": None,
+            "signal_alpha_samples": 0,
             "return_mae_pct": None,
             "mature_share_pct": None,
         }
@@ -429,6 +431,14 @@ def _summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for row in rows
         if _finite(row.get("realized_excess_vs_spy_pct")) is not None
     ]
+    signal_alpha_values = [
+        (
+            1.0 if str(row.get("direction")) == "bullish" else -1.0
+        )
+        * float(row["realized_excess_vs_spy_pct"])
+        for row in signal_rows
+        if _finite(row.get("realized_excess_vs_spy_pct")) is not None
+    ]
     return_errors = [
         abs(
             float(row["expected_return_pct"])
@@ -474,6 +484,12 @@ def _summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             else round(statistics.fmean(alpha_values), 6)
         ),
         "alpha_samples": len(alpha_values),
+        "signal_directional_alpha_pct": (
+            None
+            if not signal_alpha_values
+            else round(statistics.fmean(signal_alpha_values), 6)
+        ),
+        "signal_alpha_samples": len(signal_alpha_values),
         "return_mae_pct": round(
             statistics.fmean(return_errors), 6
         ),
@@ -642,6 +658,7 @@ def _metric_delta(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, A
         "brier_score",
         "log_loss",
         "directional_alpha_pct",
+        "signal_directional_alpha_pct",
         "return_mae_pct",
         "mature_share_pct",
     ):
@@ -697,6 +714,7 @@ def _paired_comparison(old_payload: Mapping[str, Any], new_payload: Mapping[str,
             "brier_score": "negative is better",
             "log_loss": "negative is better",
             "directional_alpha_pct": "positive is better",
+            "signal_directional_alpha_pct": "positive is better and matches actionable bullish/bearish signals",
             "return_mae_pct": "negative is better",
             "mature_share_pct": "descriptive only",
         },
@@ -724,13 +742,13 @@ def _markdown(
         f"- Old: `{old['report'].get('engine_version')}`",
         f"- New: `{new['report'].get('engine_version')}`",
         f"- Paired observations: **{comparison.get('paired_observations', 0)}**",
-        "- Core promotion metrics: directional accuracy, majority baseline, direction Skill, inverse control, Brier, log loss, realized directional alpha.",
+        "- Core promotion metrics: directional accuracy, majority baseline, direction Skill, inverse control, strong-signal accuracy, Brier, log loss, realized strong-signal directional alpha.",
         "- Direction Skill = directional accuracy − majority-class baseline accuracy. Positive Skill is required before a model can be considered genuinely predictive.",
         "- Scope limitation: this is a deterministic OHLCV reconstruction of Forecast Engine inputs, not a historical replay of unavailable news/LLM snapshots.",
         "",
         "## Overall by horizon",
         "",
-        "| Horizon | Model | N | Dir Acc | Majority | Skill | Inverse | Signal Acc | Brier | Log loss | Dir Alpha | Return MAE | Mature |",
+        "| Horizon | Model | N | Dir Acc | Majority | Skill | Inverse | Signal Acc | Brier | Log loss | Signal Alpha | Return MAE | Mature |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for horizon in ("1d", "5d", "10d", "20d"):
@@ -745,7 +763,7 @@ def _markdown(
                 f"{_fmt(metric['non_neutral_signal_accuracy_pct'])}% | "
                 f"{_fmt(metric['brier_score'], 6)} | "
                 f"{_fmt(metric['log_loss'], 6)} | "
-                f"{_fmt(metric['directional_alpha_pct'], 4)}% | "
+                f"{_fmt(metric['signal_directional_alpha_pct'], 4)}% | "
                 f"{_fmt(metric['return_mae_pct'], 4)}% | "
                 f"{_fmt(metric['mature_share_pct'])}% |"
             )
@@ -757,14 +775,14 @@ def _markdown(
             f"{_fmt(delta['non_neutral_signal_accuracy_pct'])}pp | "
             f"{_fmt(delta['brier_score'], 6)} | "
             f"{_fmt(delta['log_loss'], 6)} | "
-            f"{_fmt(delta['directional_alpha_pct'], 4)}% | "
+            f"{_fmt(delta['signal_directional_alpha_pct'], 4)}% | "
             f"{_fmt(delta['return_mae_pct'], 4)}% | "
             f"{_fmt(delta['mature_share_pct'])}pp |"
         )
 
     lines.extend(["", "## Stock / ETF split", ""])
     lines.append(
-        "| Type | Horizon | Δ Dir Acc | Δ Skill | Δ Brier | Δ Log loss | Δ Dir Alpha | Δ Return MAE |"
+        "| Type | Horizon | Δ Dir Acc | Δ Skill | Δ Brier | Δ Log loss | Δ Signal Alpha | Δ Return MAE |"
     )
     lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
     for instrument, horizons in comparison["by_instrument_type"].items():
@@ -776,7 +794,7 @@ def _markdown(
                 f"{_fmt(delta['direction_skill_pp'])}pp | "
                 f"{_fmt(delta['brier_score'], 6)} | "
                 f"{_fmt(delta['log_loss'], 6)} | "
-                f"{_fmt(delta['directional_alpha_pct'], 4)}% | "
+                f"{_fmt(delta['signal_directional_alpha_pct'], 4)}% | "
                 f"{_fmt(delta['return_mae_pct'], 4)}% |"
             )
     return "\n".join(lines) + "\n"
