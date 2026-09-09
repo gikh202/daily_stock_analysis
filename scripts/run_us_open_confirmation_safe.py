@@ -172,8 +172,16 @@ def _append_v73_reliability(
     reliability: Mapping[str, Mapping[str, Any]],
 ) -> str:
     text = str(report or "")
-    text = text.replace("**预测可信度**", "**模型证据置信分**")
-    text = text.replace("| 1D上涨概率 | 5D上涨概率 |", "| 1D预测 | 5D预测 |")
+    text = text.replace("**预测可信度**", "**模型证据分**")
+    text = text.replace("**模型证据置信分**", "**模型证据分**")
+    text = text.replace(
+        "| 1D上涨概率 | 5D上涨概率 |",
+        "| 1D研究倾向 | 5D研究倾向 |",
+    )
+    text = text.replace(
+        "| 1D预测 | 5D预测 |",
+        "| 1D研究倾向 | 5D研究倾向 |",
+    )
     if not reliability or "## V7.3 预测可靠度" in text:
         return text
 
