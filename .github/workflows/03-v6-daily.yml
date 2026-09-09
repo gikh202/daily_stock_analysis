@@ -41,6 +41,8 @@ env:
   V6_DAILY_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.notify) || vars.V6_DAILY_NOTIFY || 'true' }}
   # Stage 13: production remains normalized-only; legacy tables are retired before runtime.
   V6_DAILY_READ_SOURCE: normalized
+  # V8 deep pipeline only: hydrate SPY/QQQ into an isolated settlement clone.
+  V6_BENCHMARK_SETTLEMENT_ENABLED: 'true'
 
 jobs:
   upstream-gate:
