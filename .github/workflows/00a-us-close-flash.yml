@@ -27,7 +27,7 @@ jobs:
           NY_HM="$(TZ='America/New_York' date '+%H%M')"
           NY_WD="$(TZ='America/New_York' date '+%u')"
           RUN=false
-          if [ "\${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             RUN=true
           elif [ "$NY_WD" -le 5 ] && [ $((10#$NY_HM)) -ge 1600 ] && [ $((10#$NY_HM)) -le 1645 ]; then
             RUN=true
@@ -36,11 +36,11 @@ jobs:
           echo "NY_HM=$NY_HM run=$RUN"
 
       - name: Checkout
-        if: \${{ steps.gate.outputs.run == 'true' }}
+        if: ${{ steps.gate.outputs.run == 'true' }}
         uses: actions/checkout@v5
 
       - name: Setup Python
-        if: \${{ steps.gate.outputs.run == 'true' }}
+        if: ${{ steps.gate.outputs.run == 'true' }}
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
@@ -48,12 +48,12 @@ jobs:
           cache-dependency-path: requirements-realtime.txt
 
       - name: Install realtime dependencies
-        if: \${{ steps.gate.outputs.run == 'true' }}
+        if: ${{ steps.gate.outputs.run == 'true' }}
         run: pip install -r requirements-realtime.txt
 
       - name: Confirm XNYS trading session
         id: session
-        if: \${{ steps.gate.outputs.run == 'true' }}
+        if: ${{ steps.gate.outputs.run == 'true' }}
         shell: bash
         run: |
           python - <<'PY'
@@ -65,16 +65,16 @@ jobs:
           today = datetime.now(ZoneInfo('America/New_York')).date()
           is_session = bool(xcals.get_calendar('XNYS').is_session(today))
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
-              f.write(f"is_session={'true' if is_session else 'false'}\\n")
+              f.write(f"is_session={'true' if is_session else 'false'}\n")
           print('XNYS', today, 'session=', is_session)
           PY
 
       - name: Find latest successful prior V6/V7 plan
         id: prior
-        if: \${{ steps.session.outputs.is_session == 'true' }}
+        if: ${{ steps.session.outputs.is_session == 'true' }}
         uses: actions/github-script@v7
         with:
-          github-token: \${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const response = await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner,
@@ -95,18 +95,18 @@ jobs:
             core.info('Using V6/V7 run ' + run.id + ' created_at=' + run.created_at);
 
       - name: Download prior V6/V7 artifact
-        if: \${{ steps.session.outputs.is_session == 'true' && steps.prior.outputs.run_id != '' }}
+        if: ${{ steps.session.outputs.is_session == 'true' && steps.prior.outputs.run_id != '' }}
         uses: actions/download-artifact@v5
         with:
           pattern: v6-daily-*
           path: prior_v6
           merge-multiple: true
-          run-id: \${{ steps.prior.outputs.run_id }}
-          github-token: \${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.prior.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Locate prior payload
         id: payload
-        if: \${{ steps.session.outputs.is_session == 'true' }}
+        if: ${{ steps.session.outputs.is_session == 'true' }}
         shell: bash
         run: |
           PAYLOAD="$(find prior_v6 -type f -name 'v6_daily_latest.json' -print | sort | tail -n 1 || true)"
@@ -117,21 +117,21 @@ jobs:
           echo "path=$PAYLOAD" >> "$GITHUB_OUTPUT"
 
       - name: Send immediate close flash
-        if: \${{ steps.session.outputs.is_session == 'true' }}
+        if: ${{ steps.session.outputs.is_session == 'true' }}
         env:
-          EMAIL_SENDER: \${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD: \${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECEIVERS: \${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
-          SMTP_HOST: \${{ vars.SMTP_HOST || secrets.SMTP_HOST }}
-          SMTP_PORT: \${{ vars.SMTP_PORT || secrets.SMTP_PORT }}
+          EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
+          SMTP_HOST: ${{ vars.SMTP_HOST || secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || secrets.SMTP_PORT }}
         run: |
-          python scripts/run_us_close_flash.py --v6-payload '\${{ steps.payload.outputs.path }}'
+          python scripts/run_us_close_flash.py --v6-payload '${{ steps.payload.outputs.path }}'
 
       - name: Upload close flash
-        if: \${{ always() && steps.session.outputs.is_session == 'true' }}
+        if: ${{ always() && steps.session.outputs.is_session == 'true' }}
         uses: actions/upload-artifact@v6
         with:
-          name: us-close-flash-\${{ github.run_id }}-\${{ github.run_attempt }}
+          name: us-close-flash-${{ github.run_id }}-${{ github.run_attempt }}
           path: close_flash_reports/
           if-no-files-found: warn
           retention-days: 30
