@@ -228,3 +228,95 @@ def test_no_buy_risk_veto_stays_observable_until_last_scheduled_recheck() -> Non
     )
     assert late.terminal is True
     assert late.recheck_minutes == 0
+
+
+def test_direction_hit_rate_measures_prediction_direction_not_positive_rate(tmp_path: Path) -> None:
+    path = tmp_path / "bearish-direction.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE v6_forecast_runs (
+            id INTEGER PRIMARY KEY,
+            engine_version TEXT,
+            market_regime TEXT,
+            effective_trade_date TEXT,
+            symbol TEXT,
+            instrument_type TEXT
+        );
+        CREATE TABLE v6_horizon_forecasts (
+            id INTEGER PRIMARY KEY,
+            forecast_run_id INTEGER,
+            horizon_days INTEGER,
+            score REAL,
+            payload_json TEXT
+        );
+        CREATE TABLE v6_forecast_outcomes (
+            id INTEGER PRIMARY KEY,
+            forecast_run_id INTEGER,
+            horizon_days INTEGER,
+            end_trade_date TEXT,
+            return_pct REAL,
+            mfe_pct REAL,
+            mae_pct REAL,
+            excess_vs_spy_pct REAL
+        );
+        """
+    )
+    for row_id in range(1, 31):
+        conn.execute(
+            "INSERT INTO v6_forecast_runs VALUES (?,?,?,?,?,?)",
+            (
+                row_id,
+                "v7-test",
+                "risk_on",
+                f"2026-01-{((row_id - 1) % 28) + 1:02d}",
+                "TEST",
+                "STOCK",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO v6_horizon_forecasts(forecast_run_id,horizon_days,score,payload_json) VALUES (?,?,?,?)",
+            (
+                row_id,
+                5,
+                30.0,
+                json.dumps(
+                    {
+                        "champion_model": "calibrated_ensemble",
+                        "challenger_model": "momentum_challenger",
+                        "probability_up": 0.30,
+                        "challenger_probability_up": 0.35,
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO v6_forecast_outcomes(forecast_run_id,horizon_days,end_trade_date,return_pct,mfe_pct,mae_pct,excess_vs_spy_pct) VALUES (?,?,?,?,?,?,?)",
+            (
+                row_id,
+                5,
+                f"2026-02-{((row_id - 1) % 28) + 1:02d}",
+                -1.0,
+                0.3,
+                -1.5,
+                -0.2,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    profile = ForecastHistory(
+        str(path),
+        minimum_samples=20,
+        minimum_regime_samples=10,
+    ).calibration(
+        as_of_date="2026-03-15",
+        horizon_days=5,
+        raw_probability_up=0.30,
+        regime="risk_on",
+        symbol="TEST",
+        instrument_type="STOCK",
+    )
+    assert profile.historical_positive_rate == 0.0
+    assert profile.historical_direction_hit_rate == 1.0
+    assert profile.historical_majority_baseline_accuracy == 1.0
