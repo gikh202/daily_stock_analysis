@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] V7.5 将美股开/收盘低延迟通知与深度分析拆分：开盘从 09:30 ET 起使用轻量依赖和 SMTP、首根 1m K 线即可给出保守状态；新增 16:00 ET 收盘快讯；深度 V4 改为 16:05 ET 候选并移除 22:30 UTC 固定延迟与随机 sleep。
+- [新功能] V7.5 新增多候选 Entry Optimizer，以原风控计划、VWAP、1m EMA20、Opening Range、日内低点和前收等因果价格比较触达评分、R:R 与研究 EV，邮件显式输出理想买点、可接受区和禁止追价线；REJECTED、止损、失效与仓位硬约束仍优先。
+- [新功能] Research Ledger v4 持久化 1m/5m 美股盘中 K 线并结算理想买点触达、等待策略收益和相对立即买入 Alpha；新增 entry-timing 回测及按 market regime 分层统计。
+- [新功能] 周度 US-open 校准新增 risk_on/risk_off/neutral 分层 Challenger。全局或 Regime Challenger 达到既有 OOS/Alpha 风险门槛时自动创建仅含批准参数的 PR，仍要求 CI 与人工审核后才能进入生产。
 - [修复] V7.1 WAIT_BETTER_ENTRY 决策 JSON 显式输出 expected_wait_minutes / better_entry_reason，并将 research ledger 的 better-entry 命中严格限制在承诺等待窗口；新增同信号立即买入 vs 等待买入的因果 1m A/B 回测。
 - [修复] V7.1 修复 post-merge 审计发现的预测与盘中学习漏洞：strict no-lookahead 排除无效历史日期，Champion/Challenger 改为各 horizon 独立且仅用 paired forward-only 样本晋级，所有执行 gate 真正 fail-closed；恢复 `us-open-timing-*` Research Ledger 链路并按分钟多时点记录/结算等待是否获得更优价，将盘中“更好买点概率”降级为明确未校准的启发式评分，并以语义价格区间抑制无实质变化的重复邮件。
 - [新功能] V7 美股预测与盘中择时架构将证据覆盖与预测置信度分离，新增 1D/5D/10D/20D 校准概率、期望收益/Alpha、收益分布与 MFE/MAE、严格 no-lookahead 的 Regime/Champion-Challenger Outcome 学习，并将开盘邮件升级为可持续复查的“现在买/等更好买点/等确认/不买/失效”状态机；等待或行情不足状态会在后续盘中候选继续评估，未变化状态自动抑制重复邮件，现有止损、失效、R:R 与仓位硬约束保持优先。
