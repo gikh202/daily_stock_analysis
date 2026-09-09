@@ -137,3 +137,10 @@ def test_open_timing_report_labels_better_entry_metric_as_uncalibrated_score() -
     assert "更好买点启发式评分（未校准）" in text
     compact = "".join(text.split())
     assert '"semantics":"heuristic_score"' in compact
+
+
+def test_realtime_email_falls_back_to_sender_when_receivers_empty() -> None:
+    text = (ROOT / "scripts" / "realtime_email.py").read_text(encoding="utf-8")
+    assert "if not receiver_list:" in text
+    assert "receiver_list = [sender]" in text
+    assert 'raise RuntimeError("EMAIL_SENDER/EMAIL_PASSWORD are required")' in text
