@@ -116,6 +116,39 @@ def _hit_rate_text(block: Mapping[str, Any]) -> str:
         return "N/A"
 
 
+def _baseline_text(block: Mapping[str, Any]) -> str:
+    value = block.get("historical_majority_baseline_accuracy")
+    if value is None:
+        value = _mapping(block.get("diagnostics")).get(
+            "historical_majority_baseline_accuracy"
+        )
+    try:
+        return f"{float(value):.1%}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _skill_text(block: Mapping[str, Any]) -> str:
+    hit = block.get("historical_direction_hit_rate")
+    baseline = block.get("historical_majority_baseline_accuracy")
+    diagnostics = _mapping(block.get("diagnostics"))
+    if hit is None:
+        hit = diagnostics.get("historical_direction_hit_rate")
+    if baseline is None:
+        baseline = diagnostics.get("historical_majority_baseline_accuracy")
+    try:
+        return f"{float(hit) - float(baseline):+.1%}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _scope_text(block: Mapping[str, Any]) -> str:
+    value = _mapping(block.get("diagnostics")).get("calibration_scope")
+    if value is None:
+        value = block.get("calibration_scope")
+    return str(value or "N/A")
+
+
 def _evidence_text(block: Mapping[str, Any]) -> str:
     value = block.get("evidence_confidence")
     if value is None:
@@ -146,12 +179,12 @@ def _append_v73_reliability(
 
     lines = [
         "",
-        "## V7.3 预测可靠度",
+        "## V7.5 方向可靠度",
         "",
-        "> `模型证据置信分` 不是胜率。`prior_only`/n=0 只表示模型倾向，不能当作已校准上涨概率；历史方向命中率单独展示。",
+        "> `模型证据分` 不是胜率。方向命中率已按“预测方向是否等于实际涨跌”计算；只有命中率≥52%、成熟样本≥50，且至少高于多数类基线 2 个百分点时，方向模型才允许进入生产动作。",
         "",
-        "| 标的 | 1D | 5D | 10D交易权重 | 20D | 5D历史方向命中率 | 5D模型证据置信分 |",
-        "|---|---|---|---:|---|---:|---:|",
+        "| 标的 | 1D研究倾向 | 5D研究倾向 | 5D方向命中 | 多数基线 | 方向Skill | 校准范围 | 10D生产权重 | 20D研究倾向 | 5D模型证据分 |",
+        "|---|---|---|---:|---:|---:|---|---:|---|---:|",
     ]
     for symbol, horizons in reliability.items():
         h1 = _mapping(horizons.get("1d"))
@@ -160,13 +193,15 @@ def _append_v73_reliability(
         h20 = _mapping(horizons.get("20d"))
         lines.append(
             f"| {symbol} | {_probability_text(h1)} | {_probability_text(h5)} | "
-            f"{_decision_weight_text(h10)} | {_probability_text(h20)} | "
-            f"{_hit_rate_text(h5)} | {_evidence_text(h5)} |"
+            f"{_hit_rate_text(h5)} | {_baseline_text(h5)} | {_skill_text(h5)} | "
+            f"{_scope_text(h5)} | {_decision_weight_text(h10)} | "
+            f"{_probability_text(h20)} | {_evidence_text(h5)} |"
         )
     lines += [
         "",
-        "- 10D 在少于 50 个成熟样本时交易权重固定为 0%，仅保留研究观察。",
-        "- 风险层 `REJECTED/NO_BUY` 仍禁止买入，但在生产复查窗口结束前继续观察实时行情，不再提前冻结当天研究链路。",
+        "- 方向 Skill = 历史方向命中率 − 多数类基线准确率；Skill < +2 个百分点时生产权重固定为 0。",
+        "- 10D 与其他 horizon 使用同一方向 Skill 门；未达标时仅保留研究观察。",
+        "- 风险层 `REJECTED/NO_BUY` 是执行许可，不等于实时看跌；方向信号与执行动作在邮件中分开展示。",
     ]
     return text.rstrip() + "\n" + "\n".join(lines) + "\n"
 
