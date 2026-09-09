@@ -368,6 +368,7 @@ def _to_open_decision(
             probability_up_5d=forecast["p5"],
             expected_return_5d_pct=forecast["return5"],
             market_regime=str(packet.get("_market_regime") or "") or None,
+            allow_current=timing.action != "WAIT_BETTER_ENTRY",
         )
     optimized_price = optimization.ideal_entry_price or timing.expected_better_price
     optimized_improvement = timing.expected_improvement_pct
