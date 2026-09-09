@@ -43,3 +43,15 @@ def test_v6_ignores_inactive_dst_candidate_without_analysis_artifact() -> None:
     assert "startsWith('analysis-reports-')" in text
     assert "needs: upstream-gate" in text
     assert "needs.upstream-gate.outputs.should_run == 'true'" in text
+
+
+def test_open_cron_candidates_respect_github_five_minute_floor() -> None:
+    text = OPEN.read_text(encoding="utf-8")
+    for marker in (
+        "30,35,40,45 13 * * 1-5",
+        "0,30,35,40,45 14 * * 1-5",
+    ):
+        minute_field = marker.split()[0]
+        minutes = sorted(int(value) for value in minute_field.split(","))
+        gaps = [b - a for a, b in zip(minutes, minutes[1:])]
+        assert all(gap >= 5 for gap in gaps)
