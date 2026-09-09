@@ -6,10 +6,14 @@ on:
       - '.github/workflows/02c-us-open-policy-calibration.yml'
       - 'config/us_open_timing_policy.json'
       - 'config/us_open_policy_registry.json'
+      - 'config/us_open_regime_policy.json'
       - 'src/forecasting/timing.py'
+      - 'src/forecasting/regime_policy.py'
       - 'src/forecasting/timing_policy.py'
       - 'scripts/calibrate_us_open_timing.py'
       - 'scripts/promote_us_open_policy.py'
+      - 'scripts/build_regime_policy_challenger.py'
+      - 'scripts/backtest_entry_optimizer.py'
       - 'scripts/check_us_open_policy_health.py'
       - 'tests/test_us_open_policy_promotion.py'
   workflow_dispatch:
@@ -17,8 +21,9 @@ on:
     - cron: '37 13 * * 0'
 
 permissions:
-  contents: read
+  contents: write
   actions: read
+  pull-requests: write
 
 concurrency:
   group: v73-policy-calibration-${{ github.ref }}
@@ -54,8 +59,11 @@ jobs:
           python -m py_compile \
             src/forecasting/timing.py \
             src/forecasting/timing_policy.py \
+            src/forecasting/regime_policy.py \
             scripts/calibrate_us_open_timing.py \
             scripts/promote_us_open_policy.py \
+            scripts/build_regime_policy_challenger.py \
+            scripts/backtest_entry_optimizer.py \
             scripts/check_us_open_policy_health.py
 
   causal-wait-backtest:
@@ -222,6 +230,12 @@ jobs:
             python scripts/check_us_open_policy_health.py \
               --db "$DB" \
               --output open_confirmation_reports/us_open_policy_health.json
+            python scripts/backtest_entry_optimizer.py \
+              --db "$DB" \
+              --output open_confirmation_reports/entry_optimizer_backtest.json
+            python scripts/build_regime_policy_challenger.py \
+              --report open_confirmation_reports/us_open_policy_calibration.json \
+              --output open_confirmation_reports/proposed_us_open_regime_policy.json
           else
             python - <<'PY'
           import json
@@ -238,6 +252,16 @@ jobs:
                   'status': 'no_research_cache',
                   'rollback_recommended': False,
               }, indent=2), encoding='utf-8')
+          Path('open_confirmation_reports/entry_optimizer_backtest.json').write_text(
+              json.dumps({
+                  'version': 'entry-optimizer-backtest-v1',
+                  'status': 'no_research_cache',
+                  'overall': {'samples': 0},
+                  'promotion_check': {'eligible': False},
+              }, indent=2), encoding='utf-8')
+          Path('open_confirmation_reports/proposed_us_open_regime_policy.json').write_text(
+              Path('config/us_open_regime_policy.json').read_text(encoding='utf-8'),
+              encoding='utf-8')
           PY
           fi
 
@@ -250,8 +274,71 @@ jobs:
           report = json.loads(Path('open_confirmation_reports/us_open_policy_calibration.json').read_text(encoding='utf-8'))
           print('calibration_status=', report.get('status'))
           print('promotion_eligible=', (report.get('promotion') or {}).get('eligible'))
-          print('Production promotion remains a reviewed pull request even when eligible=true.')
+          regimes = report.get('regime_calibration') or {}
+          print('regime_eligible=', {
+              key: bool((value or {}).get('eligible'))
+              for key, value in regimes.items()
+          })
+          print('Eligible challengers are promoted only through an automatically-created reviewed PR.')
           PY
+
+      - name: Create automatic Challenger PR
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPORT='open_confirmation_reports/us_open_policy_calibration.json'
+          GLOBAL_ELIGIBLE="$(python - "$REPORT" <<'PY'
+          import json, sys
+          data=json.load(open(sys.argv[1], encoding='utf-8'))
+          print('true' if bool((data.get('promotion') or {}).get('eligible')) else 'false')
+          PY
+          )"
+          REGIME_ELIGIBLE="$(python - "$REPORT" <<'PY'
+          import json, sys
+          data=json.load(open(sys.argv[1], encoding='utf-8'))
+          values=(data.get('regime_calibration') or {}).values()
+          print('true' if any(bool((item or {}).get('eligible')) for item in values) else 'false')
+          PY
+          )"
+          if [ "$GLOBAL_ELIGIBLE" != 'true' ] && [ "$REGIME_ELIGIBLE" != 'true' ]; then
+            echo 'No eligible global or regime Challenger; no PR created.'
+            exit 0
+          fi
+
+          BRANCH="automation/us-open-challenger-$(date -u +%Y%m%d%H%M%S)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH"
+
+          if [ "$GLOBAL_ELIGIBLE" = 'true' ]; then
+            python scripts/promote_us_open_policy.py \
+              --challenger open_confirmation_reports/us_open_timing_policy_challenger.json \
+              --report "$REPORT" \
+              --apply
+          fi
+          if [ "$REGIME_ELIGIBLE" = 'true' ]; then
+            python scripts/build_regime_policy_challenger.py \
+              --report "$REPORT" \
+              --apply
+          fi
+
+          git add config/us_open_timing_policy.json \
+                  config/us_open_policy_registry.json \
+                  config/us_open_regime_policy.json
+          if git diff --cached --quiet; then
+            echo 'Eligible report produced no config diff; no PR created.'
+            exit 0
+          fi
+          git commit -m 'chore: promote calibrated US-open Challenger'
+          git push origin "$BRANCH"
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title 'chore: promote calibrated US-open Challenger' \
+            --body 'Automated weekly Challenger proposal. Includes only calibration-approved global timing tunables and/or regime overrides. CI and human review remain required before merge.'
 
       - name: Upload policy research evidence
         if: always()
@@ -262,5 +349,7 @@ jobs:
             open_confirmation_reports/us_open_policy_calibration.json
             open_confirmation_reports/us_open_policy_health.json
             open_confirmation_reports/us_open_timing_policy_challenger.json
+            open_confirmation_reports/proposed_us_open_regime_policy.json
+            open_confirmation_reports/entry_optimizer_backtest.json
           if-no-files-found: warn
           retention-days: 90
