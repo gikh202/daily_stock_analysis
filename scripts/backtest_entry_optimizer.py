@@ -4,6 +4,8 @@ import argparse
 import json
 import sqlite3
 from pathlib import Path
+
+from scripts.us_open_research_ledger import connect
 from statistics import mean, median
 from typing import Any
 
@@ -13,8 +15,7 @@ def _avg(values: list[float]) -> float | None:
 
 
 def run(db_path: str | Path, *, cost_hurdle_pct: float = 0.10) -> dict[str, Any]:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    conn = connect(db_path)
     try:
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(us_open_signals)")}
         required = {
