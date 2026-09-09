@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from scripts.realtime_email import send_realtime_email
+from scripts.run_us_open_confirmation import _validated_live_price
 
 NY = ZoneInfo("America/New_York")
 
@@ -53,7 +54,8 @@ def _load(path: str | Path) -> tuple[list[dict[str, Any]], dict[str, Mapping[str
 def _session(symbol: str, now: datetime) -> dict[str, Any]:
     import yfinance as yf
 
-    frame = yf.Ticker(symbol).history(
+    ticker = yf.Ticker(symbol)
+    frame = ticker.history(
         period="5d",
         interval="1m",
         auto_adjust=False,
@@ -66,21 +68,44 @@ def _session(symbol: str, now: datetime) -> dict[str, Any]:
         frame.index = frame.index.tz_localize("UTC").tz_convert(NY)
     else:
         frame.index = frame.index.tz_convert(NY)
-    session = frame[frame.index.date == now.date()].between_time("09:30", "16:00")
+    session = frame[
+        (frame.index.date == now.date())
+        & (frame.index <= now)
+    ].between_time("09:30", "16:00")
     if session.empty:
         raise RuntimeError(f"no US regular-session bars for {now.date()}")
-    first, last = session.iloc[0], session.iloc[-1]
+    first = session.iloc[0]
     op = _finite(first.get("Open"))
-    close = _finite(last.get("Close"))
-    if op is None or close is None or op <= 0 or close <= 0:
-        raise RuntimeError("invalid open/close")
+    if op is None or op <= 0:
+        raise RuntimeError("invalid session open")
+    (
+        close,
+        price_source,
+        bar_close,
+        quote_price,
+        validation,
+        quote_day_low,
+        quote_day_high,
+    ) = _validated_live_price(ticker, session, symbol)
     return {
         "price": close,
         "open": op,
-        "high": float(session["High"].max()),
-        "low": float(session["Low"].min()),
+        "high": (
+            float(quote_day_high)
+            if quote_day_high is not None
+            else float(session["High"].max())
+        ),
+        "low": (
+            float(quote_day_low)
+            if quote_day_low is not None
+            else float(session["Low"].min())
+        ),
         "return_from_open_pct": (close / op - 1.0) * 100.0,
         "last_bar": session.index[-1].isoformat(),
+        "price_source": price_source,
+        "bar_close_price": bar_close,
+        "quote_price": quote_price,
+        "price_validation": validation,
     }
 
 
@@ -153,21 +178,30 @@ def run(v6_payload: str | Path, *, notify: bool = True, now: datetime | None = N
         "",
         "> 这是低延迟收盘快讯：先报告实际收盘位置与上一交易计划状态。完整 V4+V6/V7 深度日报随后发送。",
         "",
-        "| 标的 | 收盘价 | 日内涨跌 | 原计划状态 | 5D P(up) | 5D Alpha |",
-        "|---|---:|---:|---|---:|---:|",
+        "| 标的 | 收盘价 | 价格源 | 日内涨跌 | 原计划状态 | 5D P(up) | 5D Alpha |",
+        "|---|---:|---|---:|---|---:|---:|",
     ]
     for row in rows:
         snap, fc = row["snap"], row["forecast"]
         p5 = "N/A" if fc["p5"] is None else f"{fc['p5']:.0%}"
         alpha = _pct(fc["alpha5"])
         lines.append(
-            f"| {row['symbol']} | {_money(snap['price'])} | {_pct(snap['return_from_open_pct'])} | "
+            f"| {row['symbol']} | {_money(snap['price'])} | {snap.get('price_source') or 'N/A'} | "
+            f"{_pct(snap['return_from_open_pct'])} | "
             f"{_state(snap['price'], row['plan'])} | {p5} | {alpha} |"
         )
     lines += ["", "## 明日执行原则", ""]
     for row in rows:
         symbol, snap, plan = row["symbol"], row["snap"], row["plan"]
-        parts = [f"- **{symbol}**：{_state(snap['price'], plan)}"]
+        parts = [
+            f"- **{symbol}**：{_state(snap['price'], plan)}",
+            (
+                f"行情 {snap.get('price_source') or 'N/A'} "
+                f"(1m={_money(snap.get('bar_close_price'))}, "
+                f"quote={_money(snap.get('quote_price'))}, "
+                f"{snap.get('price_validation') or 'N/A'})"
+            ),
+        ]
         if plan["entry_low"] is not None and plan["entry_high"] is not None:
             parts.append(f"原入场 {_money(plan['entry_low'])}–{_money(plan['entry_high'])}")
         if plan["stop"] is not None:
