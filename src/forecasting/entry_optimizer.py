@@ -79,6 +79,7 @@ class EntryOptimizer:
         probability_up_5d: float | None = None,
         expected_return_5d_pct: float | None = None,
         market_regime: str | None = None,
+        allow_current: bool = True,
     ) -> EntryOptimization:
         current = _finite(current_price)
         stop = _finite(stop_loss)
@@ -100,7 +101,7 @@ class EntryOptimizer:
         target1 = target_values[0] if target_values else None
         fallback_return = max(0.50, _finite(expected_return_5d_pct) or 1.0)
 
-        raw: list[tuple[str, float]] = [("current", current)]
+        raw: list[tuple[str, float]] = [("current", current)] if allow_current else []
         if entry_low is not None:
             raw.append(("plan_entry_low", float(entry_low)))
         if entry_high is not None:
@@ -122,6 +123,8 @@ class EntryOptimizer:
         clean: list[tuple[str, float]] = []
         for source, price in raw:
             if price <= stop * 1.002 or price > current * 1.003:
+                continue
+            if not allow_current and price >= current * 0.9995:
                 continue
             if any(abs(price / existing - 1.0) < 0.001 for _, existing in clean):
                 continue
