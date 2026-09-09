@@ -8,11 +8,15 @@ on:
       - 'scripts/run_us_open_timing.py'
       - 'scripts/us_open_research_ledger.py'
       - 'scripts/backtest_wait_better_entry.py'
+      - 'scripts/backtest_entry_optimizer.py'
       - 'scripts/evaluate_wait_backtest.py'
       - 'tests/test_v7_intraday_timing.py'
       - 'tests/test_us_open_research_ledger.py'
       - 'tests/test_wait_better_entry_contract.py'
       - 'tests/test_wait_backtest_evaluation.py'
+      - 'tests/test_entry_optimizer.py'
+      - 'tests/test_entry_optimizer_research.py'
+      - 'tests/test_us_market_low_latency_workflows.py'
   workflow_dispatch:
 
 permissions:
@@ -44,7 +48,10 @@ jobs:
             tests/test_v7_intraday_timing.py \
             tests/test_us_open_research_ledger.py \
             tests/test_wait_better_entry_contract.py \
-            tests/test_wait_backtest_evaluation.py
+            tests/test_wait_backtest_evaluation.py \
+            tests/test_entry_optimizer.py \
+            tests/test_entry_optimizer_research.py \
+            tests/test_us_market_low_latency_workflows.py
 
       - name: Find latest successful V6/V7 artifact
         id: prior-v6

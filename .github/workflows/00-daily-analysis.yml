@@ -1,9 +1,10 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 美股收盘后执行（UTC 22:30；北京时间次日 06:30）
+  # 美股 16:05 ET 后启动深度分析：同时覆盖 EDT/EST，close-gate 只放行真正的收盘候选。
   schedule:
-    - cron: '30 22 * * 1-5'
+    - cron: '5 20 * * 1-5'
+    - cron: '5 21 * * 1-5'
   
   # 手动触发
   workflow_dispatch:
@@ -34,7 +35,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  close-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+    steps:
+      - name: Gate true post-close window
+        id: gate
+        shell: bash
+        run: |
+          RUN=false
+          NY_HM="$(TZ='America/New_York' date '+%H%M')"
+          NY_WD="$(TZ='America/New_York' date '+%u')"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RUN=true
+          elif [ "$NY_WD" -le 5 ] && [ $((10#$NY_HM)) -ge 1600 ] && [ $((10#$NY_HM)) -le 1645 ]; then
+            RUN=true
+          fi
+          echo "should_run=$RUN" >> "$GITHUB_OUTPUT"
+          echo "NY_HM=$NY_HM should_run=$RUN"
+
   analyze:
+    needs: close-gate
+    if: ${{ needs.close-gate.outputs.should_run == 'true' }}
     runs-on: ubuntu-latest
     # 兼容误将 STOCK_LIST 配到同名 Environment variables 的场景；
     # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
@@ -43,9 +66,6 @@ jobs:
     timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '30') }}
     
     steps:
-      - name: 随机延迟（避免固定时间访问）
-        run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
-      
       - name: 检出代码
         uses: actions/checkout@v5
       

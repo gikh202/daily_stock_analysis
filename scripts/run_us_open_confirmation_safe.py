@@ -214,11 +214,11 @@ def _run_with_report_semantics(
 
 
 def _near_open_retry_seconds(now: datetime | None = None) -> float:
-    current = (now or datetime.now(NY)).astimezone(NY)
-    if current.hour != 9 or current.minute < 30 or current.minute >= 35:
-        return 0.0
-    target = current.replace(hour=9, minute=35, second=5, microsecond=0)
-    return max(0.0, min(300.0, (target - current).total_seconds()))
+    # Do not block a latency-sensitive runner for several minutes. The workflow
+    # itself has dense 09:30-09:35 ET retry candidates, so a missing first bar
+    # should finish quickly and let the next candidate re-evaluate.
+    del now
+    return 0.0
 
 
 def _run_once(

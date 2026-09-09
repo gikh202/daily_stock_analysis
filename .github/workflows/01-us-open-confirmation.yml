@@ -5,8 +5,8 @@ on:
   # 09:30 ET 附近密集触发，之后每 30 分钟兜底；等待态继续复查，终态/同状态邮件自动抑制。
   schedule:
     # 同时覆盖 EDT/EST。早于开盘或晚于常规收盘的候选由 gate 自动跳过。
-    - cron: '30,35,45 13 * * 1-5'
-    - cron: '0,30,35,45 14 * * 1-5'
+    - cron: '30-35,45 13 * * 1-5'
+    - cron: '0,30-35,45 14 * * 1-5'
     - cron: '0,30 15-20 * * 1-5'
   workflow_dispatch:
     inputs:
@@ -129,12 +129,12 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+          cache-dependency-path: requirements-realtime.txt
 
       - name: 安装运行依赖
         if: ${{ steps.once.outputs.execute == 'true' }}
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-realtime.txt
 
       - name: 确认当前为美股真实交易时段
         id: trading-session

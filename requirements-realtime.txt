@@ -1,0 +1,5 @@
+# Lightweight dependencies for latency-sensitive US open/close workflows.
+# Keep this intentionally small; deep analysis continues to use requirements.txt.
+yfinance>=0.2.0
+pandas>=2.0.0
+exchange-calendars>=4.13.0

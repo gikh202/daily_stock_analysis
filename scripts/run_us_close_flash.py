@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Mapping
+from zoneinfo import ZoneInfo
+
+from scripts.realtime_email import send_realtime_email
+
+NY = ZoneInfo("America/New_York")
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _finite(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _money(value: float | None) -> str:
+    return "N/A" if value is None else f"${value:.2f}"
+
+
+def _pct(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:+.2f}%"
+
+
+def _load(path: str | Path) -> tuple[list[dict[str, Any]], dict[str, Mapping[str, Any]]]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    packets = [
+        dict(item)
+        for item in (_mapping(payload.get("final_decisions")).get("packets") or [])
+        if isinstance(item, Mapping)
+    ]
+    board = {
+        str(item.get("code") or "").strip().upper(): item
+        for item in (payload.get("board") or [])
+        if isinstance(item, Mapping)
+    }
+    if not packets:
+        raise RuntimeError("prior V6/V7 payload has no final decision packets")
+    return packets, board
+
+
+def _session(symbol: str, now: datetime) -> dict[str, Any]:
+    import yfinance as yf
+
+    frame = yf.Ticker(symbol).history(
+        period="5d",
+        interval="1m",
+        auto_adjust=False,
+        prepost=False,
+        actions=False,
+    )
+    if frame is None or frame.empty:
+        raise RuntimeError("no 1m bars")
+    if getattr(frame.index, "tz", None) is None:
+        frame.index = frame.index.tz_localize("UTC").tz_convert(NY)
+    else:
+        frame.index = frame.index.tz_convert(NY)
+    session = frame[frame.index.date == now.date()].between_time("09:30", "16:00")
+    if session.empty:
+        raise RuntimeError(f"no US regular-session bars for {now.date()}")
+    first, last = session.iloc[0], session.iloc[-1]
+    op = _finite(first.get("Open"))
+    close = _finite(last.get("Close"))
+    if op is None or close is None or op <= 0 or close <= 0:
+        raise RuntimeError("invalid open/close")
+    return {
+        "price": close,
+        "open": op,
+        "high": float(session["High"].max()),
+        "low": float(session["Low"].min()),
+        "return_from_open_pct": (close / op - 1.0) * 100.0,
+        "last_bar": session.index[-1].isoformat(),
+    }
+
+
+def _plan(packet: Mapping[str, Any]) -> dict[str, Any]:
+    execution = _mapping(packet.get("execution"))
+    zone = execution.get("entry_zone")
+    low = high = None
+    if isinstance(zone, (list, tuple)) and len(zone) == 2:
+        low, high = _finite(zone[0]), _finite(zone[1])
+    targets = [
+        value
+        for value in (_finite(item) for item in (execution.get("targets") or []))
+        if value is not None
+    ]
+    return {
+        "entry_low": low,
+        "entry_high": high,
+        "stop": _finite(execution.get("stop_loss")),
+        "targets": targets,
+    }
+
+
+def _forecast(board: Mapping[str, Any]) -> dict[str, float | None]:
+    intel = _mapping(_mapping(board.get("context_features")).get("forecast_intelligence"))
+    horizons = _mapping(intel.get("horizons"))
+    h5 = _mapping(horizons.get("5d"))
+    return {
+        "p5": _finite(h5.get("probability_up")),
+        "ret5": _finite(h5.get("expected_return_pct")),
+        "alpha5": _finite(h5.get("expected_alpha_vs_spy_pct")),
+    }
+
+
+def _state(price: float, plan: Mapping[str, Any]) -> str:
+    low, high, stop = plan.get("entry_low"), plan.get("entry_high"), plan.get("stop")
+    if stop is not None and price <= stop:
+        return "计划失效/触及止损线"
+    if low is not None and high is not None:
+        if low <= price <= high:
+            return "收盘位于计划买入区"
+        if price > high:
+            premium = (price / high - 1.0) * 100.0
+            return f"高于计划买入区 {premium:.2f}%，次日不追价"
+        return "低于原买入区，次日先确认是否止跌"
+    return "原计划无完整买入区，保持等待"
+
+
+def run(v6_payload: str | Path, *, notify: bool = True, now: datetime | None = None) -> dict[str, Any]:
+    now = (now or datetime.now(NY)).astimezone(NY)
+    packets, board = _load(v6_payload)
+    rows: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for packet in packets:
+        symbol = str(_mapping(packet.get("identity")).get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        try:
+            snap = _session(symbol, now)
+            plan = _plan(packet)
+            fc = _forecast(board.get(symbol, {}))
+            rows.append({"symbol": symbol, "snap": snap, "plan": plan, "forecast": fc})
+        except Exception as exc:
+            errors.append(f"{symbol}: {type(exc).__name__}: {exc}")
+
+    if not rows:
+        raise RuntimeError("close flash has no usable session data")
+
+    lines = [
+        f"# 美股收盘快讯 · {now.strftime('%Y-%m-%d %H:%M ET')}",
+        "",
+        "> 这是低延迟收盘快讯：先报告实际收盘位置与上一交易计划状态。完整 V4+V6/V7 深度日报随后发送。",
+        "",
+        "| 标的 | 收盘价 | 日内涨跌 | 原计划状态 | 5D P(up) | 5D Alpha |",
+        "|---|---:|---:|---|---:|---:|",
+    ]
+    for row in rows:
+        snap, fc = row["snap"], row["forecast"]
+        p5 = "N/A" if fc["p5"] is None else f"{fc['p5']:.0%}"
+        alpha = _pct(fc["alpha5"])
+        lines.append(
+            f"| {row['symbol']} | {_money(snap['price'])} | {_pct(snap['return_from_open_pct'])} | "
+            f"{_state(snap['price'], row['plan'])} | {p5} | {alpha} |"
+        )
+    lines += ["", "## 明日执行原则", ""]
+    for row in rows:
+        symbol, snap, plan = row["symbol"], row["snap"], row["plan"]
+        parts = [f"- **{symbol}**：{_state(snap['price'], plan)}"]
+        if plan["entry_low"] is not None and plan["entry_high"] is not None:
+            parts.append(f"原入场 {_money(plan['entry_low'])}–{_money(plan['entry_high'])}")
+        if plan["stop"] is not None:
+            parts.append(f"止损 {_money(plan['stop'])}")
+        lines.append("；".join(parts))
+    if errors:
+        lines += ["", "## 数据降级", *[f"- {item}" for item in errors[:10]]]
+    report = "\n".join(lines) + "\n"
+    if notify:
+        send_realtime_email(
+            f"美股收盘快讯 {now.strftime('%Y-%m-%d')}",
+            report,
+            sender_name="AI 美股收盘快讯",
+        )
+    return {"symbols": len(rows), "errors": errors, "report": report}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Low-latency US close flash")
+    parser.add_argument("--v6-payload", required=True)
+    parser.add_argument("--output", default="close_flash_reports/us_close_flash_latest.md")
+    parser.add_argument("--no-notify", action="store_true")
+    args = parser.parse_args()
+    result = run(args.v6_payload, notify=not args.no_notify)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(result["report"], encoding="utf-8")
+    print(json.dumps({k: v for k, v in result.items() if k != "report"}, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

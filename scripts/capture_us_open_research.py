@@ -13,6 +13,7 @@ from scripts.us_open_research_ledger import (
     _normalize_frame,
     _parse_dt,
     export_summary,
+    record_intraday_bars,
     record_signal,
     settle_pending,
 )
@@ -164,6 +165,7 @@ def capture(
             continue
         try:
             frame = fetch_recent_history(symbol)
+            record_intraday_bars(db, symbol=symbol, frame=frame)
             snapshot = reconstruct_snapshot_from_frame(symbol=symbol, decision=decision, frame=frame)
             inserted = record_signal(
                 db,

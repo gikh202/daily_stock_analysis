@@ -40,6 +40,7 @@ class Observation:
     expected_improvement_pct: float
     expected_better_price: float
     better_entry_hit: bool
+    market_regime: str = "unknown"
 
     @property
     def close_price(self) -> float:
@@ -93,10 +94,13 @@ def load_observations(db_path: str | Path) -> list[Observation]:
         missing = sorted(required - columns)
         if missing:
             raise RuntimeError(f"research ledger missing columns: {missing}")
+        regime_expr = (
+            "market_regime" if "market_regime" in columns else "'unknown' AS market_regime"
+        )
         rows = conn.execute(
-            """
+            f"""
             SELECT id, session_date, symbol, signal_price, decision_json,
-                   close_return_pct, mfe_pct, better_entry_hit
+                   close_return_pct, mfe_pct, better_entry_hit, {regime_expr}
             FROM us_open_signals
             WHERE settled_at IS NOT NULL
               AND decision_status IN ('BUY_NOW','WAIT_BETTER_ENTRY')
@@ -130,6 +134,7 @@ def load_observations(db_path: str | Path) -> list[Observation]:
                 expected_improvement_pct=float(improvement),
                 expected_better_price=better_price,
                 better_entry_hit=bool(hit),
+                market_regime=str(row["market_regime"] or "unknown").strip().lower(),
             )
         )
     return result
@@ -318,6 +323,54 @@ def _public_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in metrics.items() if key != "wait_alphas"}
 
 
+def _regime_calibration(
+    rows: Sequence[Observation],
+    active: TimingPolicy,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    regimes = sorted({row.market_regime for row in rows if row.market_regime and row.market_regime != "unknown"})
+    for regime in regimes:
+        subset = [row for row in rows if row.market_regime == regime]
+        train, oos = _split(subset)
+        if len(subset) < 20 or len(train) < 12 or len(oos) < 6:
+            result[regime] = {
+                "eligible": False,
+                "reason": "insufficient_regime_samples",
+                "samples": len(subset),
+                "train_samples": len(train),
+                "oos_samples": len(oos),
+            }
+            continue
+        scored = [
+            (_objective(evaluate_policy(train, candidate)), candidate)
+            for candidate in _candidate_grid(active)
+        ]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        best = scored[0][1]
+        champion = evaluate_policy(oos, active)
+        challenger = evaluate_policy(oos, best)
+        eligible = bool(
+            int(challenger.get("wait_count") or 0) >= 3
+            and float(challenger.get("avg_timing_alpha_pct") or -999.0) > 0.0
+            and float(challenger.get("avg_return_pct") or -999.0)
+            > float(champion.get("avg_return_pct") or -999.0)
+            and float(challenger.get("missed_continuation_rate") or 0.0) <= 0.35
+        )
+        result[regime] = {
+            "eligible": eligible,
+            "samples": len(subset),
+            "train_samples": len(train),
+            "oos_samples": len(oos),
+            "proposed": {
+                "wait_threshold": best.wait_threshold,
+                "min_expected_improvement_pct": best.min_expected_improvement_pct,
+            },
+            "champion_oos": _public_metrics(champion),
+            "challenger_oos": _public_metrics(challenger),
+        }
+    return result
+
+
 def calibrate(
     db_path: str | Path,
     *,
@@ -374,6 +427,7 @@ def calibrate(
         champion_oos=_public_metrics(champion_oos),
         challenger_oos=_public_metrics(challenger_oos),
         walk_forward=walk,
+        regime_calibration=_regime_calibration(rows, active),
         promotion=gate,
     )
     return report, challenger

@@ -16,29 +16,24 @@
 
 ## 2. 生产调度
 
-### 收盘/日常主分析
+### 收盘低延迟快讯与日常主分析
 
-`00-daily-analysis.yml` 当前定时为：
+`00a-us-close-flash.yml` 使用 20:00/21:00 UTC 两个 EDT/EST 候选，并以 `America/New_York` + XNYS 交易日门控只放行真实 **16:00 ET**。该链路只安装 `requirements-realtime.txt`，复用最近成功的 V6/V7 收盘计划，先发送实际收盘位置、原计划状态和次日不追价原则。
 
-```text
-30 22 * * 1-5
-```
-
-即 UTC 22:30。工作流内部仍会执行交易日和数据完整性检查。
-
-### 美股开盘后确认
-
-`01-us-open-confirmation.yml` 的目标检查点是纽约时间 **09:45 ET（常规开盘后 15 分钟）**。由于 GitHub Actions `schedule` 不是实时调度器，主工作流同时配置多个 EDT/EST 候选点，并再次使用 `America/New_York` 本地时间门控。
-
-主链路显式执行：
+`00-daily-analysis.yml` 的深度分析候选改为：
 
 ```text
-V4 workflow_dispatch
-  -> 等待成功
-  -> 取得准确 V4 run id
-  -> V6 workflow_dispatch(upstream_run_id=<V4 run id>)
-  -> 等待最终 V6/通知成功
+5 20 * * 1-5
+5 21 * * 1-5
 ```
+
+纽约时间 Gate 只放行真实 **16:05 ET** 后的候选。旧的 22:30 UTC 固定调度与 0–60 秒随机启动等待已移除。V4 成功后仍由 `03-v6-daily.yml` 接续 V6/V7 与最终 Production Gate。
+
+### 美股开盘确认
+
+`01-us-open-confirmation.yml` 从纽约时间 **09:30 ET** 开始候选触发，并在 09:30–09:35 密集补偿。首轮只要求至少一根新鲜 1 分钟 K 线即可给出保守执行状态；后续候选自然累积更多开盘证据。该实时链路只安装 `requirements-realtime.txt`，并使用轻量 SMTP 发信，不再为了单封执行邮件加载完整通知/分析依赖。
+
+盘中状态直接复用上一收盘成功 V6/V7 Artifact，不会重新启动一轮完整 V4/V6 分析。非终态继续按既有 schedule 复查；终态和语义未变化状态继续由缓存去重。
 
 ### 调度 watchdog
 

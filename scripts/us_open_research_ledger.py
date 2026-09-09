@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
-SCHEMA_VERSION = "us-open-research-ledger-v3"
+SCHEMA_VERSION = "us-open-research-ledger-v4"
 
 
 def _json(value: Any) -> str:
@@ -68,6 +68,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
             packet_json TEXT NOT NULL,
             snapshot_json TEXT NOT NULL,
             decision_json TEXT NOT NULL,
+            market_regime TEXT,
             settled_at TEXT,
             close_return_pct REAL,
             return_60m_pct REAL,
@@ -80,6 +81,10 @@ def connect(path: str | Path) -> sqlite3.Connection:
             better_entry_hit INTEGER,
             best_future_improvement_pct REAL,
             minutes_to_reference_better_price REAL,
+            ideal_entry_hit INTEGER,
+            ideal_entry_policy_return_pct REAL,
+            ideal_entry_alpha_vs_immediate_pct REAL,
+            minutes_to_ideal_entry REAL,
             close_plan_json TEXT,
             execution_transition TEXT,
             outcome_json TEXT
@@ -88,6 +93,20 @@ def connect(path: str | Path) -> sqlite3.Connection:
             ON us_open_signals(session_date, symbol, id);
         CREATE INDEX IF NOT EXISTS ix_us_open_signals_status_settled
             ON us_open_signals(decision_status, settled_at, session_date);
+        CREATE TABLE IF NOT EXISTS us_intraday_bars (
+            symbol TEXT NOT NULL,
+            session_date TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            bar_time TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            PRIMARY KEY(symbol, interval, bar_time)
+        );
+        CREATE INDEX IF NOT EXISTS ix_us_intraday_bars_session
+            ON us_intraday_bars(session_date, symbol, interval, bar_time);
         """
     )
     columns = {
@@ -100,9 +119,18 @@ def connect(path: str | Path) -> sqlite3.Connection:
         "minutes_to_reference_better_price": "REAL",
         "close_plan_json": "TEXT",
         "execution_transition": "TEXT",
+        "market_regime": "TEXT",
+        "ideal_entry_hit": "INTEGER",
+        "ideal_entry_policy_return_pct": "REAL",
+        "ideal_entry_alpha_vs_immediate_pct": "REAL",
+        "minutes_to_ideal_entry": "REAL",
     }.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE us_open_signals ADD COLUMN {name} {ddl}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_us_open_signals_regime "
+        "ON us_open_signals(market_regime, session_date, symbol)"
+    )
     return conn
 
 def signal_key(
@@ -186,8 +214,8 @@ def record_signal(
                 policy_version, source_run_id, source_trade_date,
                 evaluated_at, signal_bar_time, signal_price,
                 decision_status, packet_json, snapshot_json, decision_json,
-                close_plan_json, execution_transition
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                market_regime, close_plan_json, execution_transition
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 SCHEMA_VERSION,
@@ -204,6 +232,7 @@ def record_signal(
                 _json(packet),
                 _json(snapshot),
                 _json(decision),
+                str(decision.get("market_regime") or "").strip().lower() or None,
                 _json(close_plan),
                 transition,
             ),
@@ -220,6 +249,109 @@ def _normalize_frame(frame: Any) -> Any:
     else:
         frame.index = index.tz_convert(NY)
     return frame[~frame.index.duplicated(keep="last")].sort_index()
+
+
+def _store_intraday_bars_conn(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    frame: Any,
+) -> dict[str, int]:
+    frame = _normalize_frame(frame)
+    if frame is None or frame.empty:
+        return {"1m": 0, "5m": 0}
+    regular = frame.between_time("09:30", "16:00").copy()
+    if regular.empty:
+        return {"1m": 0, "5m": 0}
+
+    def write(interval: str, data: Any) -> int:
+        rows = []
+        for ts, bar in data.iterrows():
+            op, high, low, close = (
+                _finite(bar.get("Open")),
+                _finite(bar.get("High")),
+                _finite(bar.get("Low")),
+                _finite(bar.get("Close")),
+            )
+            if None in {op, high, low, close}:
+                continue
+            rows.append(
+                (
+                    symbol.strip().upper(),
+                    ts.date().isoformat(),
+                    interval,
+                    ts.isoformat(),
+                    op,
+                    high,
+                    low,
+                    close,
+                    _finite(bar.get("Volume")) or 0.0,
+                )
+            )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO us_intraday_bars(
+                symbol, session_date, interval, bar_time,
+                open, high, low, close, volume
+            ) VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            rows,
+        )
+        return len(rows)
+
+    one_minute = write("1m", regular)
+    five = regular.resample("5min").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+    ).dropna(subset=["Open", "High", "Low", "Close"])
+    five_minute = write("5m", five)
+    return {"1m": one_minute, "5m": five_minute}
+
+
+def record_intraday_bars(
+    path: str | Path,
+    *,
+    symbol: str,
+    frame: Any,
+) -> dict[str, int]:
+    with connect(path) as conn:
+        return _store_intraday_bars_conn(conn, symbol=symbol, frame=frame)
+
+
+def _stored_session_frame(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    session_date: date,
+) -> Any:
+    rows = conn.execute(
+        """
+        SELECT bar_time, open, high, low, close, volume
+        FROM us_intraday_bars
+        WHERE symbol=? AND session_date=? AND interval='1m'
+        ORDER BY bar_time
+        """,
+        (symbol.strip().upper(), session_date.isoformat()),
+    ).fetchall()
+    if not rows:
+        return None
+    latest = _parse_dt(rows[-1]["bar_time"])
+    # Opening captures are partial; only trust the local store for settlement
+    # after it contains a closing-region bar.
+    if latest is None or (latest.hour * 60 + latest.minute) < (15 * 60 + 55):
+        return None
+    import pandas as pd
+
+    index = pd.DatetimeIndex([_parse_dt(row["bar_time"]) for row in rows])
+    return pd.DataFrame(
+        {
+            "Open": [row["open"] for row in rows],
+            "High": [row["high"] for row in rows],
+            "Low": [row["low"] for row in rows],
+            "Close": [row["close"] for row in rows],
+            "Volume": [row["volume"] for row in rows],
+        },
+        index=index,
+    )
 
 
 def fetch_session_history(symbol: str, session_date: date) -> Any:
@@ -314,6 +446,31 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
                 0.0, (first_time - signal_time).total_seconds() / 60.0
             )
 
+    ideal_entry = _finite(decision.get("ideal_entry_price"))
+    ideal_entry_hit = None
+    ideal_entry_policy_return = None
+    ideal_entry_alpha = None
+    minutes_to_ideal = None
+    if ideal_entry is not None and ideal_entry > 0:
+        if ideal_entry >= signal_price * 0.9995:
+            ideal_entry_hit = True
+            minutes_to_ideal = 0.0
+            ideal_entry_policy_return = close_return
+            ideal_entry_alpha = 0.0
+        else:
+            ideal_matching = wait_future[wait_future["Low"] <= ideal_entry]
+            ideal_entry_hit = not ideal_matching.empty
+            if ideal_entry_hit:
+                first_time = ideal_matching.index[0]
+                minutes_to_ideal = max(
+                    0.0, (first_time - signal_time).total_seconds() / 60.0
+                )
+                ideal_entry_policy_return = (close_price / ideal_entry - 1.0) * 100.0
+            else:
+                # The policy stayed in cash when the optimized limit was not touched.
+                ideal_entry_policy_return = 0.0
+            ideal_entry_alpha = ideal_entry_policy_return - close_return
+
     stop_hit = False
     target1_hit = False
     first_touch = "close"
@@ -356,6 +513,10 @@ def compute_outcome(row: Mapping[str, Any], frame: Any) -> dict[str, Any] | None
         "better_entry_hit": better_entry_hit,
         "best_future_improvement_pct": best_future_improvement,
         "minutes_to_reference_better_price": minutes_to_reference,
+        "ideal_entry_hit": ideal_entry_hit,
+        "ideal_entry_policy_return_pct": ideal_entry_policy_return,
+        "ideal_entry_alpha_vs_immediate_pct": ideal_entry_alpha,
+        "minutes_to_ideal_entry": minutes_to_ideal,
         "expected_wait_minutes": wait_minutes,
         "wait_window_end": wait_cutoff.isoformat(),
     }
@@ -381,7 +542,13 @@ def settle_pending(
             row = dict(raw)
             try:
                 session_date = date.fromisoformat(str(row["session_date"]))
-                frame = history_fetcher(str(row["symbol"]), session_date)
+                symbol = str(row["symbol"])
+                frame = _stored_session_frame(
+                    conn, symbol=symbol, session_date=session_date
+                )
+                if frame is None:
+                    frame = history_fetcher(symbol, session_date)
+                    _store_intraday_bars_conn(conn, symbol=symbol, frame=frame)
                 outcome = compute_outcome(row, frame)
                 if outcome is None:
                     failed += 1
@@ -393,7 +560,10 @@ def settle_pending(
                         mfe_pct=?, mae_pct=?, stop_hit=?, target1_hit=?,
                         first_touch=?, modeled_exit_return_pct=?,
                         better_entry_hit=?, best_future_improvement_pct=?,
-                        minutes_to_reference_better_price=?, outcome_json=?
+                        minutes_to_reference_better_price=?,
+                        ideal_entry_hit=?, ideal_entry_policy_return_pct=?,
+                        ideal_entry_alpha_vs_immediate_pct=?, minutes_to_ideal_entry=?,
+                        outcome_json=?
                     WHERE id=?
                     """,
                     (
@@ -413,6 +583,14 @@ def settle_pending(
                         ),
                         outcome["best_future_improvement_pct"],
                         outcome["minutes_to_reference_better_price"],
+                        (
+                            None
+                            if outcome["ideal_entry_hit"] is None
+                            else int(bool(outcome["ideal_entry_hit"]))
+                        ),
+                        outcome["ideal_entry_policy_return_pct"],
+                        outcome["ideal_entry_alpha_vs_immediate_pct"],
+                        outcome["minutes_to_ideal_entry"],
                         _json(outcome),
                         int(row["id"]),
                     ),
@@ -452,6 +630,23 @@ def summary(path: str | Path) -> dict[str, Any]:
             ORDER BY session_date, symbol, id
             """
         ).fetchall()
+        entry_rows = conn.execute(
+            """
+            SELECT market_regime, ideal_entry_hit,
+                   ideal_entry_policy_return_pct,
+                   ideal_entry_alpha_vs_immediate_pct,
+                   minutes_to_ideal_entry
+            FROM us_open_signals
+            WHERE settled_at IS NOT NULL AND ideal_entry_hit IS NOT NULL
+            ORDER BY session_date, symbol, id
+            """
+        ).fetchall()
+        bar_counts = {
+            str(row[0]): int(row[1])
+            for row in conn.execute(
+                "SELECT interval, COUNT(*) FROM us_intraday_bars GROUP BY interval"
+            ).fetchall()
+        }
         transition_rows = conn.execute(
             """
             SELECT execution_transition, COUNT(*)
@@ -469,6 +664,20 @@ def summary(path: str | Path) -> dict[str, Any]:
     wait_hits = [int(row[0]) for row in wait_rows if row[0] is not None]
     wait_improvements = [float(row[1]) for row in wait_rows if row[1] is not None]
     wait_minutes = [float(row[2]) for row in wait_rows if row[2] is not None]
+    ideal_hits = [int(row[1]) for row in entry_rows if row[1] is not None]
+    ideal_returns = [float(row[2]) for row in entry_rows if row[2] is not None]
+    ideal_alphas = [float(row[3]) for row in entry_rows if row[3] is not None]
+    ideal_minutes = [float(row[4]) for row in entry_rows if row[4] is not None]
+    regime_entry_stats: dict[str, dict[str, Any]] = {}
+    for regime in sorted({str(row[0] or "unknown") for row in entry_rows}):
+        subset = [row for row in entry_rows if str(row[0] or "unknown") == regime]
+        hits = [int(row[1]) for row in subset if row[1] is not None]
+        alphas = [float(row[3]) for row in subset if row[3] is not None]
+        regime_entry_stats[regime] = {
+            "samples": len(subset),
+            "ideal_entry_hit_rate": (sum(hits) / len(hits)) if hits else None,
+            "avg_alpha_vs_immediate_pct": mean(alphas) if alphas else None,
+        }
     execution_transition_stats = {
         str(row[0]): int(row[1])
         for row in transition_rows
@@ -476,6 +685,17 @@ def summary(path: str | Path) -> dict[str, Any]:
     }
     return {
         "schema_version": SCHEMA_VERSION,
+        "intraday_bar_counts": bar_counts,
+        "entry_optimizer": {
+            "settled_samples": len(entry_rows),
+            "ideal_entry_hit_rate": (
+                sum(ideal_hits) / len(ideal_hits) if ideal_hits else None
+            ),
+            "avg_policy_return_pct": mean(ideal_returns) if ideal_returns else None,
+            "avg_alpha_vs_immediate_pct": mean(ideal_alphas) if ideal_alphas else None,
+            "avg_minutes_to_ideal_entry": mean(ideal_minutes) if ideal_minutes else None,
+            "by_regime": regime_entry_stats,
+        },
         "execution_transition_stats": execution_transition_stats,
         "signals": total,
         "settled": settled,
