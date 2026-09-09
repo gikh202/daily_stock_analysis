@@ -26,7 +26,7 @@ from src.forecasting.regime_policy import load_regime_timing_policy
 
 logger = logging.getLogger("us_open_timing")
 NY = ZoneInfo("America/New_York")
-POLICY_VERSION = "us-open-timing-v7.5"
+POLICY_VERSION = "us-open-timing-v7.6"
 ACTION_LABELS = {
     "BUY_NOW": "现在可以买（首仓）",
     "WAIT_BETTER_ENTRY": "等更好买点",
@@ -717,6 +717,14 @@ def _signature(decisions: Sequence[OpenTimingDecision]) -> str:
             "symbol": item.symbol,
             "execution_status": item.execution_status,
             "action": item.action,
+            "direction_signal": item.direction_signal,
+            "forecast_tradeable_5d": item.forecast_tradeable_5d,
+            "reliability_sample_bucket": item.calibration_samples_5d // 10,
+            "reliability_hit_bucket": (
+                None
+                if item.historical_hit_rate_5d is None
+                else round(item.historical_hit_rate_5d, 2)
+            ),
             "better_bucket": min(9, max(0, int(item.better_entry_score * 10.0))),
             "ideal_entry": round(item.ideal_entry_price, 2) if item.ideal_entry_price else None,
             "no_chase": round(item.no_chase_above, 2) if item.no_chase_above else None,
@@ -865,9 +873,13 @@ def run(
             status: sum(item.execution_status == status for item in decisions)
             for status in EXECUTION_STATUS_LABELS
         },
+        "direction_signal_counts": {
+            signal: sum(item.direction_signal == signal for item in decisions)
+            for signal in DIRECTION_SIGNAL_LABELS
+        },
     }
     payload = {
-        "version": "us-open-timing-v7.2",
+        "version": "us-open-timing-v7.6",
         "policy_version": POLICY_VERSION,
         "better_entry_metric": {
             "field": "better_entry_score",
@@ -917,7 +929,7 @@ def run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="V7.2 U.S. open intraday timing decision with three-state close authorization"
+        description="V7.6 U.S. open timing with direction-skill quarantine and three-state execution authorization"
     )
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")
