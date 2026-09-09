@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DAILY = ROOT / ".github" / "workflows" / "00-daily-analysis.yml"
 CLOSE_FLASH = ROOT / ".github" / "workflows" / "00a-us-close-flash.yml"
 OPEN = ROOT / ".github" / "workflows" / "01-us-open-confirmation.yml"
+V6 = ROOT / ".github" / "workflows" / "03-v6-daily.yml"
 
 
 def test_deep_close_schedule_has_no_artificial_delay() -> None:
@@ -33,3 +34,12 @@ def test_open_path_is_lightweight_and_dense_at_open() -> None:
     assert "cron: '0,30-35,45 14 * * 1-5'" in text
     assert "requirements-realtime.txt" in text
     assert "pip install -r requirements.txt" not in text
+
+
+def test_v6_ignores_inactive_dst_candidate_without_analysis_artifact() -> None:
+    text = V6.read_text(encoding="utf-8")
+    assert "id: gate" in text
+    assert "listWorkflowRunArtifacts" in text
+    assert "startsWith('analysis-reports-')" in text
+    assert "needs: upstream-gate" in text
+    assert "needs.upstream-gate.outputs.should_run == 'true'" in text
