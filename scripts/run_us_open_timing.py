@@ -22,6 +22,7 @@ from scripts.run_us_open_confirmation import ConfirmationDecision, LiveSnapshot,
 from scripts.run_us_open_confirmation_v2 import classify_confirmation_v2
 from src.forecasting import IntradayTimingModel
 from src.forecasting.entry_optimizer import EntryOptimization, EntryOptimizer
+from src.forecasting.regime_policy import load_regime_timing_policy
 
 logger = logging.getLogger("us_open_timing")
 NY = ZoneInfo("America/New_York")
@@ -324,7 +325,10 @@ def _to_open_decision(
 
     effective_status, effective_reason = _effective_timing_base(packet, base)
     ext = _extended_intraday(base.symbol, evaluated_at, snapshot)
-    timing = IntradayTimingModel().assess(
+    timing_model = IntradayTimingModel(
+        policy=load_regime_timing_policy(packet.get("_market_regime"))
+    )
+    timing = timing_model.assess(
         base_status=effective_status,
         current_price=snapshot.current_price,
         entry_low=base.entry_low,
