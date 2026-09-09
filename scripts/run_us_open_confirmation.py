@@ -152,7 +152,9 @@ def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapsho
         raise RuntimeError(f"{symbol}: no regular-session bars for {today}")
 
     opening = _opening_window(frame, today)
-    if len(opening) < 5:
+    # Low-latency first pass: one fresh 1m bar is enough to emit a conservative
+    # execution state. Later scheduled passes naturally gain the full opening window.
+    if len(opening) < 1:
         raise RuntimeError(f"{symbol}: opening window incomplete ({len(opening)} bars)")
 
     last = session.iloc[-1]
