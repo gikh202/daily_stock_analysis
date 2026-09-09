@@ -55,8 +55,10 @@ def send_realtime_email(
     sender = str(sender or os.getenv("EMAIL_SENDER") or "").strip()
     password = str(password or os.getenv("EMAIL_PASSWORD") or "").strip()
     receiver_list = list(receivers or _receivers(os.getenv("EMAIL_RECEIVERS")))
-    if not sender or not password or not receiver_list:
-        raise RuntimeError("EMAIL_SENDER/EMAIL_PASSWORD/EMAIL_RECEIVERS are required")
+    if not sender or not password:
+        raise RuntimeError("EMAIL_SENDER/EMAIL_PASSWORD are required")
+    if not receiver_list:
+        receiver_list = [sender]
 
     host, port, use_ssl = _smtp_settings(sender)
     msg = EmailMessage()

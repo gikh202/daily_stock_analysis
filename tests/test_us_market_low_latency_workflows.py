@@ -64,3 +64,10 @@ def test_open_workflow_deployment_can_smoke_trigger_live_gate() -> None:
     assert ".github/workflows/01-us-open-confirmation.yml" in text
     assert '"$HM" -lt 930' in text
     assert '"$HM" -ge 1600' in text
+
+
+def test_realtime_email_code_changes_smoke_trigger_open_workflow() -> None:
+    text = OPEN.read_text(encoding="utf-8")
+    assert "scripts/realtime_email.py" in text
+    assert "scripts/run_us_open_timing.py" in text
+    assert "scripts/run_us_open_confirmation_safe.py" in text

@@ -15,6 +15,9 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/01-us-open-confirmation.yml'
+      - 'scripts/realtime_email.py'
+      - 'scripts/run_us_open_timing.py'
+      - 'scripts/run_us_open_confirmation_safe.py'
   workflow_dispatch:
     inputs:
       force_resend:
