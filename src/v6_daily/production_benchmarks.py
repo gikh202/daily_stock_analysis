@@ -12,7 +12,7 @@ from data_provider.yfinance_fetcher import YfinanceFetcher
 
 
 BENCHMARK_CODES = ("SPY", "QQQ")
-DEFAULT_HISTORY_DAYS = 730
+DEFAULT_HISTORY_DAYS = 1465
 REQUIRED_COLUMNS = {"code", "date", "open", "high", "low", "close", "volume"}
 OPTIONAL_COLUMNS = (
     "amount",
