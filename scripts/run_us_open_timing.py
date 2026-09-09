@@ -427,6 +427,12 @@ def _money(value: float | None) -> str:
     return "N/A" if value is None else f"${value:.2f}"
 
 
+def _money_range(low: float | None, high: float | None) -> str:
+    if low is None or high is None:
+        return "N/A"
+    return f"${low:.2f}–${high:.2f}"
+
+
 def _pct(value: float | None, *, probability: bool = False) -> str:
     if value is None:
         return "N/A"
@@ -474,7 +480,7 @@ def render_markdown(
             f"| {item.symbol} | **{_execution_label(item.execution_status)}** | **{item.label}** | "
             f"{_money(item.current_price)} | {_pct(item.probability_up_1d, probability=True)} | "
             f"{_pct(item.probability_up_5d, probability=True)} | {_money(item.ideal_entry_price)} | "
-            f"{_money(item.acceptable_entry_low)}–{_money(item.acceptable_entry_high)} | "
+            f"{_money_range(item.acceptable_entry_low, item.acceptable_entry_high)} | "
             f"{_money(item.no_chase_above)} |"
         )
     for index, item in enumerate(decisions, 1):
@@ -491,7 +497,7 @@ def render_markdown(
         if item.ideal_entry_price is not None:
             lines.append(
                 f"- **买点优化**：理想 {_money(item.ideal_entry_price)}（{item.entry_candidate_source or 'candidate'}）；"
-                f"可接受 {_money(item.acceptable_entry_low)}–{_money(item.acceptable_entry_high)}；"
+                f"可接受 {_money_range(item.acceptable_entry_low, item.acceptable_entry_high)}；"
                 f"高于 {_money(item.no_chase_above)} 不追；候选触达评分 "
                 f"{_pct(item.entry_touch_score, probability=True)}；EV score "
                 f"{item.entry_ev_score if item.entry_ev_score is not None else 'N/A'}"
