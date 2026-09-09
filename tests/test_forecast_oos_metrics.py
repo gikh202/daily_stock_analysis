@@ -46,6 +46,8 @@ def test_ab_summary_reports_majority_skill_inverse_and_directional_alpha() -> No
     assert summary["inverse_directional_accuracy_pct"] == 0.0
     assert summary["directional_alpha_pct"] == 0.5
     assert summary["alpha_samples"] == 4
+    assert summary["signal_directional_alpha_pct"] == 0.5
+    assert summary["signal_alpha_samples"] == 4
 
 
 def test_ab_summary_exposes_zero_skill_for_majority_only_prediction() -> None:
