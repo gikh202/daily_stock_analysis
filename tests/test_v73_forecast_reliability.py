@@ -42,10 +42,23 @@ def test_probability_return_reconciliation_removes_bearish_positive_conflict() -
 
 
 def test_10d_is_quarantined_until_reliability_floor() -> None:
-    assert _decision_weight(10, "mature", 49) == 0.0
-    assert _decision_weight(10, "shrunk", 100) == 0.0
-    assert _decision_weight(10, "mature", 50) > 0.0
-    assert _decision_weight(20, "prior_only", 0) == 0.0
+    assert _decision_weight(10, "mature", 49, hit_rate=0.70) == 0.0
+    assert _decision_weight(10, "shrunk", 100, hit_rate=0.70) == 0.0
+    assert _decision_weight(
+        10,
+        "mature",
+        50,
+        hit_rate=0.60,
+        majority_baseline=0.50,
+    ) > 0.0
+    assert _decision_weight(
+        10,
+        "mature",
+        80,
+        hit_rate=0.60,
+        majority_baseline=0.60,
+    ) == 0.0
+    assert _decision_weight(20, "prior_only", 0, hit_rate=0.70) == 0.0
 
 
 def _hierarchical_db(path: Path) -> None:
