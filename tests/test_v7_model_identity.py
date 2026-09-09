@@ -104,6 +104,8 @@ def test_paired_promotion_metrics_do_not_reverse_after_promotion(tmp_path: Path)
     assert metrics["majority_baseline_accuracy"] == pytest.approx(1.0)
     assert metrics["challenger_direction_accuracy"] == pytest.approx(1.0)
     assert metrics["challenger_direction_skill"] == pytest.approx(0.0)
+    assert metrics["challenger_bullish_samples"] == 10
+    assert metrics["challenger_bullish_mean_alpha_pct"] == pytest.approx(0.5)
 
     selection = history.select_champion(
         as_of_date="2026-03-01",
@@ -208,12 +210,16 @@ def test_challenger_promotes_only_when_it_beats_champion_and_real_baselines(tmp_
     assert metrics["challenger_direction_skill"] == pytest.approx(0.5)
     assert metrics["challenger_brier_score"] < metrics["base_rate_brier_score"]
     assert metrics["challenger_log_loss"] < metrics["base_rate_log_loss"]
+    assert metrics["challenger_bullish_samples"] == 10
+    assert metrics["challenger_bullish_positive_alpha_rate"] == pytest.approx(1.0)
+    assert metrics["challenger_bullish_mean_alpha_pct"] == pytest.approx(1.0)
 
     selection = history.select_champion(
         as_of_date="2026-03-15",
         horizon_days=5,
         regime="risk_on",
         min_promotion_samples=10,
+        min_bullish_alpha_samples=5,
     )
     assert selection["status"] == "promoted"
     assert selection["champion_model"] == "momentum_challenger"
