@@ -93,9 +93,6 @@ def connect(path: str | Path) -> sqlite3.Connection:
             ON us_open_signals(session_date, symbol, id);
         CREATE INDEX IF NOT EXISTS ix_us_open_signals_status_settled
             ON us_open_signals(decision_status, settled_at, session_date);
-        CREATE INDEX IF NOT EXISTS ix_us_open_signals_regime
-            ON us_open_signals(market_regime, session_date, symbol);
-
         CREATE TABLE IF NOT EXISTS us_intraday_bars (
             symbol TEXT NOT NULL,
             session_date TEXT NOT NULL,
@@ -130,6 +127,10 @@ def connect(path: str | Path) -> sqlite3.Connection:
     }.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE us_open_signals ADD COLUMN {name} {ddl}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_us_open_signals_regime "
+        "ON us_open_signals(market_regime, session_date, symbol)"
+    )
     return conn
 
 def signal_key(
