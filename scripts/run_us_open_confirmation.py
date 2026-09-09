@@ -44,6 +44,10 @@ class LiveSnapshot:
     volume_ratio: float | None
     bar_count: int
     last_bar_time: str
+    price_source: str = "yfinance_1m"
+    bar_close_price: float | None = None
+    quote_price: float | None = None
+    price_validation: str = "bar_only"
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,146 @@ def _opening_window(frame: Any, session_date: Any) -> Any:
     return session.between_time("09:30", "09:44")
 
 
+def _fast_info_number(info: Any, *names: str) -> float | None:
+    for name in names:
+        try:
+            value = getattr(info, name, None)
+        except Exception:
+            value = None
+        number = _finite(value)
+        if number is not None and number > 0:
+            return number
+    return None
+
+
+def _validated_live_price(
+    ticker: Any,
+    session: Any,
+    symbol: str,
+) -> tuple[float, str, float, float | None, str, float | None, float | None]:
+    """Cross-check the latest 1m close against Yahoo's quote snapshot.
+
+    The 1m chart feed occasionally emits isolated bad ticks. A quote/day-range
+    conflict is treated as a data-quality problem, not as a tradable price.
+    """
+    bar_price = _finite(session.iloc[-1].get("Close"))
+    if bar_price is None or bar_price <= 0:
+        raise RuntimeError(f"{symbol}: invalid latest 1m close")
+
+    quote_price = day_low = day_high = None
+    try:
+        info = ticker.fast_info
+        if info is not None:
+            quote_price = _fast_info_number(info, "lastPrice", "last_price")
+            day_low = _fast_info_number(info, "dayLow", "day_low")
+            day_high = _fast_info_number(info, "dayHigh", "day_high")
+    except Exception as exc:
+        logger.info("%s fast_info quote unavailable: %s", symbol, exc)
+
+    recent = [
+        value
+        for value in (_finite(v) for v in session["Close"].tail(6).tolist()[:-1])
+        if value is not None and value > 0
+    ]
+    recent_median = median(recent) if recent else None
+
+    valid_day_range = bool(
+        day_low is not None
+        and day_high is not None
+        and 0 < day_low <= day_high
+    )
+    if quote_price is not None:
+        if valid_day_range and not (day_low * 0.995 <= quote_price <= day_high * 1.005):
+            logger.warning(
+                "%s fast_info last price %.4f is outside quote day range %.4f-%.4f",
+                symbol,
+                quote_price,
+                day_low,
+                day_high,
+            )
+            quote_price = None
+
+    if quote_price is not None:
+        gap_pct = abs(bar_price / quote_price - 1.0) * 100.0
+        bar_outside_range = bool(
+            valid_day_range
+            and not (day_low * 0.997 <= bar_price <= day_high * 1.003)
+        )
+        if bar_outside_range:
+            logger.warning(
+                "%s rejected bad 1m close %.4f; fast_info=%.4f day_range=%.4f-%.4f",
+                symbol,
+                bar_price,
+                quote_price,
+                day_low,
+                day_high,
+            )
+            return (
+                quote_price,
+                "yfinance_fast_info",
+                bar_price,
+                quote_price,
+                "bar_outside_quote_day_range",
+                day_low,
+                day_high,
+            )
+
+        if gap_pct <= 0.75:
+            return (
+                quote_price,
+                "yfinance_fast_info",
+                bar_price,
+                quote_price,
+                "cross_checked",
+                day_low,
+                day_high,
+            )
+
+        if recent_median is not None:
+            bar_dev = abs(bar_price / recent_median - 1.0) * 100.0
+            quote_dev = abs(quote_price / recent_median - 1.0) * 100.0
+            if quote_dev + 0.25 < bar_dev:
+                logger.warning(
+                    "%s rejected divergent 1m close %.4f; quote %.4f is closer to recent median %.4f",
+                    symbol,
+                    bar_price,
+                    quote_price,
+                    recent_median,
+                )
+                return (
+                    quote_price,
+                    "yfinance_fast_info",
+                    bar_price,
+                    quote_price,
+                    "bar_diverged_from_recent_market",
+                    day_low,
+                    day_high,
+                )
+
+        raise RuntimeError(
+            f"{symbol}: conflicting live prices bar={bar_price:.4f} "
+            f"quote={quote_price:.4f} gap={gap_pct:.2f}%"
+        )
+
+    if recent_median is not None:
+        bar_dev = abs(bar_price / recent_median - 1.0) * 100.0
+        if bar_dev > 1.50:
+            raise RuntimeError(
+                f"{symbol}: unvalidated 1m price outlier bar={bar_price:.4f} "
+                f"recent_median={recent_median:.4f} deviation={bar_dev:.2f}%"
+            )
+
+    return (
+        bar_price,
+        "yfinance_1m",
+        bar_price,
+        None,
+        "bar_only_no_quote",
+        day_low,
+        day_high,
+    )
+
+
 def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapshot:
     try:
         import yfinance as yf
@@ -147,7 +291,10 @@ def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapsho
         frame.index = index.tz_convert(NY)
 
     today = now_ny.date()
-    session = frame[frame.index.date == today]
+    session = frame[
+        (frame.index.date == today)
+        & (frame.index <= now_ny)
+    ]
     if session.empty:
         raise RuntimeError(f"{symbol}: no regular-session bars for {today}")
 
@@ -157,12 +304,19 @@ def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapsho
     if len(opening) < 1:
         raise RuntimeError(f"{symbol}: opening window incomplete ({len(opening)} bars)")
 
-    last = session.iloc[-1]
     first = session.iloc[0]
-    current_price = _finite(last.get("Close"))
+    (
+        current_price,
+        price_source,
+        bar_close_price,
+        quote_price,
+        price_validation,
+        quote_day_low,
+        quote_day_high,
+    ) = _validated_live_price(ticker, session, symbol)
     session_open = _finite(first.get("Open"))
-    if current_price is None or session_open is None or current_price <= 0 or session_open <= 0:
-        raise RuntimeError(f"{symbol}: invalid current/open price")
+    if session_open is None or session_open <= 0:
+        raise RuntimeError(f"{symbol}: invalid session open price")
 
     prior_volumes: list[float] = []
     prior_dates = sorted({item for item in frame.index.date if item < today}, reverse=True)
@@ -186,8 +340,16 @@ def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapsho
         symbol=symbol,
         current_price=current_price,
         session_open=session_open,
-        session_high=float(session["High"].max()),
-        session_low=float(session["Low"].min()),
+        session_high=(
+            float(quote_day_high)
+            if quote_day_high is not None
+            else float(session["High"].max())
+        ),
+        session_low=(
+            float(quote_day_low)
+            if quote_day_low is not None
+            else float(session["Low"].min())
+        ),
         opening_15m_high=float(opening["High"].max()),
         opening_15m_low=float(opening["Low"].min()),
         return_from_open_pct=(current_price / session_open - 1.0) * 100.0,
@@ -196,6 +358,10 @@ def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapsho
         volume_ratio=volume_ratio,
         bar_count=int(len(session)),
         last_bar_time=session.index[-1].isoformat(),
+        price_source=price_source,
+        bar_close_price=bar_close_price,
+        quote_price=quote_price,
+        price_validation=price_validation,
     )
 
 

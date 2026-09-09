@@ -10,6 +10,8 @@ on:
       - 'scripts/backfill_v6_accuracy_history.py'
       - 'src/v6_daily/research_backfill.py'
       - 'tests/test_v73_forecast_maturity_threshold.py'
+      - 'tests/test_v7_model_identity.py'
+      - 'tests/test_forecast_engine_ab_metrics.py'
       - '.github/workflows/03-forecast-engine-ab-walk-forward.yml'
   workflow_dispatch:
 
@@ -55,10 +57,13 @@ jobs:
           pip install -c head/constraints-production.txt -r head/requirements.txt
           python -m pip install --disable-pip-version-check pytest
 
-      - name: Run Forecast maturity threshold tests
+      - name: Run Forecast promotion and AB metric tests
         run: |
           cd head
-          pytest -q --noconftest tests/test_v73_forecast_maturity_threshold.py
+          pytest -q --noconftest \
+            tests/test_v73_forecast_maturity_threshold.py \
+            tests/test_v7_model_identity.py \
+            tests/test_forecast_engine_ab_metrics.py
 
       - name: Restore latest production source database
         uses: actions/cache/restore@v5

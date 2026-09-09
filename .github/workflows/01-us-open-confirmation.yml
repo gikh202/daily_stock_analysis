@@ -17,6 +17,8 @@ on:
       - '.github/workflows/01-us-open-confirmation.yml'
       - 'scripts/realtime_email.py'
       - 'scripts/run_us_open_timing.py'
+      - 'scripts/run_us_open_confirmation.py'
+      - 'scripts/run_us_open_confirmation_v2.py'
       - 'scripts/run_us_open_confirmation_safe.py'
   workflow_dispatch:
     inputs:

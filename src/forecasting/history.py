@@ -471,15 +471,39 @@ class ForecastHistory:
         symbol: str | None = None,
         instrument_type: str | None = None,
     ) -> Dict[str, Any]:
-        """Compare Champion and Challenger only on paired native predictions."""
+        """Compare native Champion/Challenger predictions against real baselines.
+
+        Direction accuracy alone is insufficient in a skewed market. The report
+        therefore includes the majority-class baseline and a probabilistic
+        base-rate baseline, plus inverse-signal diagnostics for research only.
+        """
+        empty = {
+            "samples": 0,
+            "positive_rate": None,
+            "majority_baseline_accuracy": None,
+            "base_rate_brier_score": None,
+            "base_rate_log_loss": None,
+            "champion_direction_accuracy": None,
+            "challenger_direction_accuracy": None,
+            "champion_direction_skill": None,
+            "challenger_direction_skill": None,
+            "champion_inverse_direction_accuracy": None,
+            "challenger_inverse_direction_accuracy": None,
+            "champion_inverse_direction_skill": None,
+            "challenger_inverse_direction_skill": None,
+            "champion_bullish_samples": 0,
+            "challenger_bullish_samples": 0,
+            "champion_bullish_positive_alpha_rate": None,
+            "challenger_bullish_positive_alpha_rate": None,
+            "champion_bullish_mean_alpha_pct": None,
+            "challenger_bullish_mean_alpha_pct": None,
+            "champion_brier_score": None,
+            "challenger_brier_score": None,
+            "champion_log_loss": None,
+            "challenger_log_loss": None,
+        }
         if _valid_date(as_of_date) is None:
-            return {
-                "samples": 0,
-                "champion_brier_score": None,
-                "challenger_brier_score": None,
-                "champion_log_loss": None,
-                "challenger_log_loss": None,
-            }
+            return dict(empty)
         rows = self._metric_rows(
             as_of_date=as_of_date,
             horizon_days=horizon_days,
@@ -487,35 +511,107 @@ class ForecastHistory:
             symbol=symbol,
             instrument_type=instrument_type,
         )
-        paired: list[tuple[float, float, int]] = []
+        paired: list[tuple[float, float, int, float | None]] = []
         for row in rows:
             champion_p = self._row_probability(row, "probability_up")
             challenger_p = self._row_probability(row, "challenger_probability_up")
             ret = _finite(row["return_pct"])
             if champion_p is None or challenger_p is None or ret is None:
                 continue
-            paired.append((champion_p, challenger_p, int(ret > 0.0)))
+            paired.append(
+                (
+                    champion_p,
+                    challenger_p,
+                    int(ret > 0.0),
+                    _finite(row["excess_vs_spy_pct"]),
+                )
+            )
         if not paired:
-            return {
-                "samples": 0,
-                "champion_brier_score": None,
-                "challenger_brier_score": None,
-                "champion_log_loss": None,
-                "challenger_log_loss": None,
-            }
+            return dict(empty)
+
+        n = len(paired)
+        positive_rate = sum(y for _, _, y, _ in paired) / n
+        majority_baseline = max(positive_rate, 1.0 - positive_rate)
+        champion_hits = sum(int((p >= 0.50) == bool(y)) for p, _, y, _ in paired)
+        challenger_hits = sum(int((p >= 0.50) == bool(y)) for _, p, y, _ in paired)
+        champion_inverse_hits = sum(
+            int(((1.0 - p) >= 0.50) == bool(y)) for p, _, y, _ in paired
+        )
+        challenger_inverse_hits = sum(
+            int(((1.0 - p) >= 0.50) == bool(y)) for _, p, y, _ in paired
+        )
+        champion_accuracy = champion_hits / n
+        challenger_accuracy = challenger_hits / n
+        champion_inverse_accuracy = champion_inverse_hits / n
+        challenger_inverse_accuracy = challenger_inverse_hits / n
+        champion_bullish_alphas = [
+            alpha
+            for champion_p, _, _, alpha in paired
+            if champion_p >= 0.58 and alpha is not None
+        ]
+        challenger_bullish_alphas = [
+            alpha
+            for _, challenger_p, _, alpha in paired
+            if challenger_p >= 0.58 and alpha is not None
+        ]
+
         return {
-            "samples": len(paired),
+            "samples": n,
+            "positive_rate": positive_rate,
+            "majority_baseline_accuracy": majority_baseline,
+            "base_rate_brier_score": statistics.fmean(
+                (positive_rate - y) ** 2 for _, _, y, _ in paired
+            ),
+            "base_rate_log_loss": statistics.fmean(
+                _log_loss(positive_rate, y) for _, _, y, _ in paired
+            ),
+            "champion_direction_accuracy": champion_accuracy,
+            "challenger_direction_accuracy": challenger_accuracy,
+            "champion_direction_skill": champion_accuracy - majority_baseline,
+            "challenger_direction_skill": challenger_accuracy - majority_baseline,
+            "champion_inverse_direction_accuracy": champion_inverse_accuracy,
+            "challenger_inverse_direction_accuracy": challenger_inverse_accuracy,
+            "champion_inverse_direction_skill": (
+                champion_inverse_accuracy - majority_baseline
+            ),
+            "challenger_inverse_direction_skill": (
+                challenger_inverse_accuracy - majority_baseline
+            ),
+            "champion_bullish_samples": len(champion_bullish_alphas),
+            "challenger_bullish_samples": len(challenger_bullish_alphas),
+            "champion_bullish_positive_alpha_rate": (
+                None
+                if not champion_bullish_alphas
+                else sum(value > 0.0 for value in champion_bullish_alphas)
+                / len(champion_bullish_alphas)
+            ),
+            "challenger_bullish_positive_alpha_rate": (
+                None
+                if not challenger_bullish_alphas
+                else sum(value > 0.0 for value in challenger_bullish_alphas)
+                / len(challenger_bullish_alphas)
+            ),
+            "champion_bullish_mean_alpha_pct": (
+                None
+                if not champion_bullish_alphas
+                else statistics.fmean(champion_bullish_alphas)
+            ),
+            "challenger_bullish_mean_alpha_pct": (
+                None
+                if not challenger_bullish_alphas
+                else statistics.fmean(challenger_bullish_alphas)
+            ),
             "champion_brier_score": statistics.fmean(
-                (p - y) ** 2 for p, _, y in paired
+                (p - y) ** 2 for p, _, y, _ in paired
             ),
             "challenger_brier_score": statistics.fmean(
-                (p - y) ** 2 for _, p, y in paired
+                (p - y) ** 2 for _, p, y, _ in paired
             ),
             "champion_log_loss": statistics.fmean(
-                _log_loss(p, y) for p, _, y in paired
+                _log_loss(p, y) for p, _, y, _ in paired
             ),
             "challenger_log_loss": statistics.fmean(
-                _log_loss(p, y) for _, p, y in paired
+                _log_loss(p, y) for _, p, y, _ in paired
             ),
         }
 
@@ -529,6 +625,14 @@ class ForecastHistory:
         instrument_type: str | None = None,
         min_promotion_samples: int = 200,
         min_brier_improvement: float = 0.01,
+        min_log_loss_improvement: float = 0.005,
+        min_direction_accuracy: float = 0.52,
+        min_direction_skill: float = 0.02,
+        min_direction_improvement: float = 0.01,
+        min_bullish_alpha_samples: int = 30,
+        min_bullish_positive_alpha_rate: float = 0.52,
+        min_bullish_mean_alpha_pct: float = 0.10,
+        min_bullish_alpha_improvement_pct: float = 0.05,
     ) -> Dict[str, Any]:
         paired = self.paired_model_metrics(
             as_of_date=as_of_date,
@@ -539,21 +643,112 @@ class ForecastHistory:
         )
         champion = {
             "samples": paired["samples"],
+            "direction_accuracy": paired["champion_direction_accuracy"],
+            "direction_skill": paired["champion_direction_skill"],
             "brier_score": paired["champion_brier_score"],
             "log_loss": paired["champion_log_loss"],
+            "bullish_samples": paired["champion_bullish_samples"],
+            "bullish_positive_alpha_rate": paired[
+                "champion_bullish_positive_alpha_rate"
+            ],
+            "bullish_mean_alpha_pct": paired["champion_bullish_mean_alpha_pct"],
         }
         challenger = {
             "samples": paired["samples"],
+            "direction_accuracy": paired["challenger_direction_accuracy"],
+            "direction_skill": paired["challenger_direction_skill"],
             "brier_score": paired["challenger_brier_score"],
             "log_loss": paired["challenger_log_loss"],
+            "bullish_samples": paired["challenger_bullish_samples"],
+            "bullish_positive_alpha_rate": paired[
+                "challenger_bullish_positive_alpha_rate"
+            ],
+            "bullish_mean_alpha_pct": paired["challenger_bullish_mean_alpha_pct"],
         }
-        promote = bool(
-            paired["samples"] >= int(min_promotion_samples)
-            and champion["brier_score"] is not None
-            and challenger["brier_score"] is not None
-            and challenger["brier_score"]
-            <= champion["brier_score"] - float(min_brier_improvement)
+        baseline = {
+            "positive_rate": paired["positive_rate"],
+            "majority_accuracy": paired["majority_baseline_accuracy"],
+            "brier_score": paired["base_rate_brier_score"],
+            "log_loss": paired["base_rate_log_loss"],
+        }
+
+        gates = {
+            "enough_samples": paired["samples"] >= int(min_promotion_samples),
+            "direction_accuracy_floor": bool(
+                challenger["direction_accuracy"] is not None
+                and challenger["direction_accuracy"] >= float(min_direction_accuracy)
+            ),
+            "beats_majority_baseline": bool(
+                challenger["direction_skill"] is not None
+                and challenger["direction_skill"] >= float(min_direction_skill)
+            ),
+            "beats_champion_direction": bool(
+                challenger["direction_accuracy"] is not None
+                and champion["direction_accuracy"] is not None
+                and challenger["direction_accuracy"]
+                >= champion["direction_accuracy"] + float(min_direction_improvement)
+            ),
+            "beats_champion_brier": bool(
+                challenger["brier_score"] is not None
+                and champion["brier_score"] is not None
+                and challenger["brier_score"]
+                <= champion["brier_score"] - float(min_brier_improvement)
+            ),
+            "beats_base_rate_brier": bool(
+                challenger["brier_score"] is not None
+                and baseline["brier_score"] is not None
+                and challenger["brier_score"]
+                <= baseline["brier_score"] - float(min_brier_improvement)
+            ),
+            "beats_champion_log_loss": bool(
+                challenger["log_loss"] is not None
+                and champion["log_loss"] is not None
+                and challenger["log_loss"]
+                <= champion["log_loss"] - float(min_log_loss_improvement)
+            ),
+            "beats_base_rate_log_loss": bool(
+                challenger["log_loss"] is not None
+                and baseline["log_loss"] is not None
+                and challenger["log_loss"]
+                <= baseline["log_loss"] - float(min_log_loss_improvement)
+            ),
+            "bullish_alpha_sample_floor": (
+                challenger["bullish_samples"] >= int(min_bullish_alpha_samples)
+            ),
+            "bullish_positive_alpha_rate": bool(
+                challenger["bullish_positive_alpha_rate"] is not None
+                and challenger["bullish_positive_alpha_rate"]
+                >= float(min_bullish_positive_alpha_rate)
+            ),
+            "bullish_mean_alpha_positive": bool(
+                challenger["bullish_mean_alpha_pct"] is not None
+                and challenger["bullish_mean_alpha_pct"]
+                >= float(min_bullish_mean_alpha_pct)
+            ),
+            "beats_champion_bullish_alpha": bool(
+                challenger["bullish_mean_alpha_pct"] is not None
+                and (
+                    champion["bullish_mean_alpha_pct"] is None
+                    or challenger["bullish_mean_alpha_pct"]
+                    >= champion["bullish_mean_alpha_pct"]
+                    + float(min_bullish_alpha_improvement_pct)
+                )
+            ),
+        }
+        promote = bool(gates and all(gates.values()))
+        blocked_reasons = [name for name, passed in gates.items() if not passed]
+
+        inverse_skill = paired.get("challenger_inverse_direction_skill")
+        normal_skill = paired.get("challenger_direction_skill")
+        reverse_signal_warning = bool(
+            inverse_skill is not None
+            and inverse_skill >= float(min_direction_skill)
+            and (
+                normal_skill is None
+                or inverse_skill >= normal_skill + 0.05
+            )
         )
+
         return {
             "champion_model": (
                 "momentum_challenger" if promote else "calibrated_ensemble"
@@ -568,9 +763,34 @@ class ForecastHistory:
             ),
             "promotion_min_samples": int(min_promotion_samples),
             "min_brier_improvement": float(min_brier_improvement),
-            "evaluation_basis": "paired_forward_only",
+            "min_log_loss_improvement": float(min_log_loss_improvement),
+            "min_direction_accuracy": float(min_direction_accuracy),
+            "min_direction_skill": float(min_direction_skill),
+            "min_direction_improvement": float(min_direction_improvement),
+            "min_bullish_alpha_samples": int(min_bullish_alpha_samples),
+            "min_bullish_positive_alpha_rate": float(
+                min_bullish_positive_alpha_rate
+            ),
+            "min_bullish_mean_alpha_pct": float(min_bullish_mean_alpha_pct),
+            "min_bullish_alpha_improvement_pct": float(
+                min_bullish_alpha_improvement_pct
+            ),
+            "evaluation_basis": (
+                "paired_forward_only_vs_champion_majority_and_base_rate"
+            ),
             "scope_policy": "symbol_to_instrument_type_to_regime_to_global",
             "paired_samples": paired["samples"],
+            "baseline_metrics": baseline,
             "champion_metrics": champion,
             "challenger_metrics": challenger,
+            "promotion_gates": gates,
+            "blocked_reasons": blocked_reasons,
+            "reverse_signal_shadow": {
+                "production_enabled": False,
+                "challenger_inverse_direction_accuracy": paired.get(
+                    "challenger_inverse_direction_accuracy"
+                ),
+                "challenger_inverse_direction_skill": inverse_skill,
+                "warning": reverse_signal_warning,
+            },
         }

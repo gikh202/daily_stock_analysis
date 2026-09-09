@@ -252,10 +252,15 @@ def test_promotion_metrics_use_only_paired_forward_predictions(tmp_path: Path) -
         regime="risk_on",
         min_promotion_samples=20,
     )
-    assert selection["evaluation_basis"] == "paired_forward_only"
+    assert (
+        selection["evaluation_basis"]
+        == "paired_forward_only_vs_champion_majority_and_base_rate"
+    )
     assert selection["paired_samples"] == 40
     assert selection["champion_metrics"]["samples"] == 40
     assert selection["challenger_metrics"]["samples"] == 40
+    assert selection["baseline_metrics"]["majority_accuracy"] is not None
+    assert selection["promotion_gates"]
 
 
 class _PerHorizonHistory:
