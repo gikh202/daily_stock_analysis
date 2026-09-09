@@ -83,15 +83,16 @@ def test_safe_runner_supports_actions_direct_script_invocation() -> None:
     assert "actual execution clock" in result.stdout
 
 
-def test_timing_policy_import_keeps_notification_stack_lazy() -> None:
+def test_timing_policy_import_keeps_notification_stack_lightweight() -> None:
     text = TIMING_RUNNER.read_text(encoding="utf-8")
     prefix, notify_block = text.split("def _notify", 1)
     assert "from src.notification import NotificationService" not in prefix
-    assert "from src.notification import NotificationService" in notify_block
+    assert "from src.notification import NotificationService" not in notify_block
+    assert "from scripts.realtime_email import send_realtime_email" in notify_block
 
 
-def test_near_open_retry_waits_only_until_minimum_opening_window() -> None:
-    assert _near_open_retry_seconds(datetime(2026, 8, 20, 9, 31, tzinfo=NY)) == 245.0
+def test_near_open_retry_never_blocks_runner_for_bar_warmup() -> None:
+    assert _near_open_retry_seconds(datetime(2026, 8, 20, 9, 31, tzinfo=NY)) == 0.0
     assert _near_open_retry_seconds(datetime(2026, 8, 20, 9, 35, tzinfo=NY)) == 0.0
     assert _near_open_retry_seconds(datetime(2026, 8, 20, 10, 5, tzinfo=NY)) == 0.0
 
