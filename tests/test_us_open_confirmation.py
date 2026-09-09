@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 
 from scripts.run_us_open_confirmation import (
     LiveSnapshot,
+    _validated_live_price,
     classify_confirmation,
     render_markdown,
 )
@@ -176,3 +178,78 @@ def test_report_makes_now_action_unambiguous():
     assert "不追，等回踩" in report
     assert "首仓不超过 10.0%" in report
     assert "V6 run `123456`" in report
+
+
+
+class _FastInfo:
+    def __init__(self, *, last_price=None, day_low=None, day_high=None):
+        self.last_price = last_price
+        self.day_low = day_low
+        self.day_high = day_high
+
+
+class _Ticker:
+    def __init__(self, info):
+        self.fast_info = info
+
+
+def _session(closes):
+    return pd.DataFrame(
+        {
+            "Open": closes,
+            "High": [value + 0.2 for value in closes],
+            "Low": [value - 0.2 for value in closes],
+            "Close": closes,
+            "Volume": [1000] * len(closes),
+        }
+    )
+
+
+def test_live_price_rejects_last_bar_outside_quote_day_range():
+    ticker = _Ticker(_FastInfo(last_price=335.40, day_low=333.22, day_high=339.67))
+    price, source, bar, quote, validation, low, high = _validated_live_price(
+        ticker,
+        _session([335.1, 335.3, 335.2, 335.4, 335.5, 329.92]),
+        "GOOGL",
+    )
+    assert price == pytest.approx(335.40)
+    assert source == "yfinance_fast_info"
+    assert bar == pytest.approx(329.92)
+    assert quote == pytest.approx(335.40)
+    assert validation == "bar_outside_quote_day_range"
+    assert low == pytest.approx(333.22)
+    assert high == pytest.approx(339.67)
+
+
+def test_live_price_prefers_fresh_quote_when_bar_and_quote_agree():
+    ticker = _Ticker(_FastInfo(last_price=491.25, day_low=490.15, day_high=495.19))
+    price, source, bar, quote, validation, _, _ = _validated_live_price(
+        ticker,
+        _session([491.0, 491.1, 491.15, 491.2, 491.22, 491.07]),
+        "MSFT",
+    )
+    assert price == pytest.approx(491.25)
+    assert source == "yfinance_fast_info"
+    assert bar == pytest.approx(491.07)
+    assert quote == pytest.approx(491.25)
+    assert validation == "cross_checked"
+
+
+def test_live_price_fails_closed_on_unresolved_large_source_conflict():
+    ticker = _Ticker(_FastInfo(last_price=105.0))
+    with pytest.raises(RuntimeError, match="conflicting live prices"):
+        _validated_live_price(
+            ticker,
+            _session([100.0, 100.1, 100.0, 100.1, 100.0, 95.0]),
+            "TEST",
+        )
+
+
+def test_live_price_without_quote_rejects_isolated_outlier():
+    ticker = _Ticker(None)
+    with pytest.raises(RuntimeError, match="unvalidated 1m price outlier"):
+        _validated_live_price(
+            ticker,
+            _session([100.0, 100.1, 100.0, 100.1, 100.0, 96.0]),
+            "TEST",
+        )
