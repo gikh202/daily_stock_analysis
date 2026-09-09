@@ -45,6 +45,30 @@ class ForecastHorizon:
             return None
 
     @property
+    def historical_positive_rate(self) -> Optional[float]:
+        value = self.diagnostics.get("historical_positive_rate")
+        try:
+            return None if value is None else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def historical_majority_baseline_accuracy(self) -> Optional[float]:
+        value = self.diagnostics.get("historical_majority_baseline_accuracy")
+        try:
+            return None if value is None else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def historical_direction_skill(self) -> Optional[float]:
+        hit = self.historical_direction_hit_rate
+        baseline = self.historical_majority_baseline_accuracy
+        if hit is None or baseline is None:
+            return None
+        return hit - baseline
+
+    @property
     def probability_semantics(self) -> str:
         return str(
             self.diagnostics.get("probability_semantics")
@@ -59,6 +83,11 @@ class ForecastHorizon:
         payload = asdict(self)
         payload["evidence_confidence"] = self.evidence_confidence
         payload["historical_direction_hit_rate"] = self.historical_direction_hit_rate
+        payload["historical_positive_rate"] = self.historical_positive_rate
+        payload["historical_majority_baseline_accuracy"] = (
+            self.historical_majority_baseline_accuracy
+        )
+        payload["historical_direction_skill"] = self.historical_direction_skill
         payload["probability_semantics"] = self.probability_semantics
         return payload
 

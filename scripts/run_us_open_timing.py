@@ -26,7 +26,7 @@ from src.forecasting.regime_policy import load_regime_timing_policy
 
 logger = logging.getLogger("us_open_timing")
 NY = ZoneInfo("America/New_York")
-POLICY_VERSION = "us-open-timing-v7.5"
+POLICY_VERSION = "us-open-timing-v7.6"
 ACTION_LABELS = {
     "BUY_NOW": "现在可以买（首仓）",
     "WAIT_BETTER_ENTRY": "等更好买点",
@@ -39,6 +39,12 @@ EXECUTION_STATUS_LABELS = {
     "FULL_APPROVED": "完全批准",
     "CONDITIONAL_APPROVED": "条件批准",
     "REJECTED": "风险拒绝",
+}
+DIRECTION_SIGNAL_LABELS = {
+    "BULLISH": "看涨",
+    "BEARISH": "看跌",
+    "NEUTRAL": "中性",
+    "NO_SIGNAL": "无有效信号",
 }
 
 
@@ -83,6 +89,13 @@ class OpenTimingDecision:
     entry_ev_score: float | None = None
     entry_candidates: tuple[dict[str, Any], ...] = ()
     market_regime: str | None = None
+    direction_signal: str = "NO_SIGNAL"
+    forecast_tradeable_5d: bool = False
+    calibration_samples_5d: int = 0
+    calibration_status_5d: str = "prior_only"
+    historical_hit_rate_5d: float | None = None
+    majority_baseline_5d: float | None = None
+    calibration_scope_5d: str | None = None
 
 
 def _finite(value: Any) -> float | None:
@@ -139,7 +152,7 @@ def _effective_timing_base(
     return base.status, base.reason
 
 
-def _extract_forecast(packet: Mapping[str, Any]) -> dict[str, float | None]:
+def _extract_forecast(packet: Mapping[str, Any]) -> dict[str, Any]:
     intelligence = _mapping(packet.get("forecast_intelligence"))
     horizons = _mapping(intelligence.get("horizons")) or _mapping(
         packet.get("horizon_forecasts")
@@ -148,14 +161,66 @@ def _extract_forecast(packet: Mapping[str, Any]) -> dict[str, float | None]:
     def bucket(name: str) -> Mapping[str, Any]:
         return _mapping(horizons.get(name))
 
+    def meta(block: Mapping[str, Any]) -> dict[str, Any]:
+        diagnostics = _mapping(block.get("diagnostics"))
+        status = str(block.get("calibration_status") or "prior_only").strip().lower()
+        try:
+            samples = max(0, int(block.get("calibration_samples") or 0))
+        except (TypeError, ValueError):
+            samples = 0
+        hit = _finite(block.get("historical_direction_hit_rate"))
+        if hit is None:
+            hit = _finite(diagnostics.get("historical_direction_hit_rate"))
+        baseline = _finite(block.get("historical_majority_baseline_accuracy"))
+        if baseline is None:
+            baseline = _finite(
+                diagnostics.get("historical_majority_baseline_accuracy")
+            )
+        scope = str(
+            diagnostics.get("calibration_scope")
+            or block.get("calibration_scope")
+            or ""
+        ).strip() or None
+        tradeable = bool(
+            status == "mature"
+            and samples >= 50
+            and hit is not None
+            and hit >= 0.52
+            and (baseline is None or hit >= baseline + 0.02)
+        )
+        return {
+            "status": status,
+            "samples": samples,
+            "hit": hit,
+            "baseline": baseline,
+            "scope": scope,
+            "tradeable": tradeable,
+        }
+
     h1, h5, h20 = bucket("1d"), bucket("5d"), bucket("20d")
+    m1, m5, m20 = meta(h1), meta(h5), meta(h20)
+    p5 = _finite(h5.get("probability_up"))
+    return5 = _finite(h5.get("expected_return_pct"))
+    direction_signal = "NO_SIGNAL"
+    if m5["tradeable"] and p5 is not None and return5 is not None:
+        if p5 >= 0.58 and return5 > 0:
+            direction_signal = "BULLISH"
+        elif p5 <= 0.42 and return5 < 0:
+            direction_signal = "BEARISH"
+        else:
+            direction_signal = "NEUTRAL"
+
     return {
         "p1": _finite(h1.get("probability_up")),
-        "p5": _finite(h5.get("probability_up")),
+        "p5": p5,
         "p20": _finite(h20.get("probability_up")),
-        "return5": _finite(h5.get("expected_return_pct")),
+        "return5": return5,
         "alpha5": _finite(h5.get("expected_alpha_vs_spy_pct")),
         "confidence": _finite(h5.get("forecast_confidence")),
+        "meta1": m1,
+        "meta5": m5,
+        "meta20": m20,
+        "direction_signal": direction_signal,
     }
 
 
@@ -307,6 +372,13 @@ def _to_open_decision(
         execution_status=contract["status"],
         conditional_entry_price=contract["conditional_entry_price"],
         conditional_entry_reason=contract["conditional_entry_reason"],
+        direction_signal=forecast["direction_signal"],
+        forecast_tradeable_5d=bool(forecast["meta5"]["tradeable"]),
+        calibration_samples_5d=int(forecast["meta5"]["samples"]),
+        calibration_status_5d=str(forecast["meta5"]["status"]),
+        historical_hit_rate_5d=_finite(forecast["meta5"]["hit"]),
+        majority_baseline_5d=_finite(forecast["meta5"]["baseline"]),
+        calibration_scope_5d=forecast["meta5"]["scope"],
     )
     if snapshot is None:
         return OpenTimingDecision(
@@ -340,16 +412,31 @@ def _to_open_decision(
         last_5m_return_pct=_finite(ext["last_5m_return_pct"]),
         intraday_volatility_pct=_finite(ext["intraday_volatility_pct"]),
         minutes_since_open=int(ext["minutes_since_open"] or 0),
-        probability_up_1d=forecast["p1"],
-        probability_up_5d=forecast["p5"],
+        probability_up_1d=(
+            forecast["p1"] if forecast["meta5"]["tradeable"] else 0.50
+        ),
+        probability_up_5d=(
+            forecast["p5"] if forecast["meta5"]["tradeable"] else 0.50
+        ),
     )
+    action = timing.action
     reason = (
         effective_reason
         if timing.action in {"NO_BUY", "INVALIDATED", "DATA_UNAVAILABLE"}
         else f"{effective_reason}；择时判断：{timing.rationale}"
     )
+    if action in {"BUY_NOW", "WAIT_BETTER_ENTRY"} and not forecast["meta5"]["tradeable"]:
+        action = "WAIT_CONFIRMATION"
+        reason += (
+            "；5D方向模型未通过生产可靠度门（至少50个成熟样本、"
+            "方向命中率≥52%，且需高于多数类基线至少2个百分点），"
+            "本轮禁止把研究倾向升级为可执行买入。"
+        )
     optimization = EntryOptimization(None, None, None, None, None, None, None, ())
-    if timing.action in {"BUY_NOW", "WAIT_BETTER_ENTRY", "WAIT_CONFIRMATION"}:
+    if (
+        forecast["meta5"]["tradeable"]
+        and action in {"BUY_NOW", "WAIT_BETTER_ENTRY", "WAIT_CONFIRMATION"}
+    ):
         optimization = EntryOptimizer().optimize(
             current_price=snapshot.current_price,
             stop_loss=base.stop_loss,
@@ -368,21 +455,27 @@ def _to_open_decision(
             probability_up_5d=forecast["p5"],
             expected_return_5d_pct=forecast["return5"],
             market_regime=str(packet.get("_market_regime") or "") or None,
-            allow_current=timing.action != "WAIT_BETTER_ENTRY",
+            allow_current=action != "WAIT_BETTER_ENTRY",
         )
-    optimized_price = optimization.ideal_entry_price or timing.expected_better_price
-    optimized_improvement = timing.expected_improvement_pct
+    optimized_price = (
+        optimization.ideal_entry_price or timing.expected_better_price
+        if forecast["meta5"]["tradeable"]
+        else None
+    )
+    optimized_improvement = (
+        timing.expected_improvement_pct if forecast["meta5"]["tradeable"] else 0.0
+    )
     if optimized_price is not None and optimized_price < snapshot.current_price:
         optimized_improvement = max(
             optimized_improvement,
             (snapshot.current_price / optimized_price - 1.0) * 100.0,
         )
     return OpenTimingDecision(
-        action=timing.action,
-        label=ACTION_LABELS.get(timing.action, timing.action),
+        action=action,
+        label=ACTION_LABELS.get(action, action),
         reason=reason,
         starter_position_pct=(
-            base.starter_position_pct if timing.action == "BUY_NOW" else 0.0
+            base.starter_position_pct if action == "BUY_NOW" else 0.0
         ),
         better_entry_score=timing.better_entry_probability,
         better_entry_probability=timing.better_entry_probability,
@@ -443,6 +536,28 @@ def _execution_label(status: str) -> str:
     return EXECUTION_STATUS_LABELS.get(status, status or "未知")
 
 
+def _direction_label(signal: str) -> str:
+    return DIRECTION_SIGNAL_LABELS.get(signal, signal or "无有效信号")
+
+
+def _reliability_text(item: OpenTimingDecision) -> str:
+    hit = (
+        "N/A"
+        if item.historical_hit_rate_5d is None
+        else f"{item.historical_hit_rate_5d:.1%}"
+    )
+    baseline = (
+        "N/A"
+        if item.majority_baseline_5d is None
+        else f"{item.majority_baseline_5d:.1%}"
+    )
+    state = "可用于生产" if item.forecast_tradeable_5d else "研究观察"
+    return (
+        f"{state} · n={item.calibration_samples_5d} · 命中 {hit} · "
+        f"多数基线 {baseline}"
+    )
+
+
 def render_markdown(
     decisions: Sequence[OpenTimingDecision],
     *,
@@ -472,14 +587,15 @@ def render_markdown(
         lines.append(f"- **上一收盘决策来源**：run `{source_run_id}`")
     lines += [
         "",
-        "| 标的 | 收盘授权 | 当前动作 | 当前价 | 1D上涨概率 | 5D上涨概率 | 理想买点 | 可接受区 | 禁止追价 |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+        "| 标的 | 收盘授权 | 方向信号 | 执行动作 | 当前价 | 5D可靠度 | 理想买点 | 可接受区 | 禁止追价 |",
+        "|---|---|---|---|---:|---|---:|---:|---:|",
     ]
     for item in decisions:
         lines.append(
-            f"| {item.symbol} | **{_execution_label(item.execution_status)}** | **{item.label}** | "
-            f"{_money(item.current_price)} | {_pct(item.probability_up_1d, probability=True)} | "
-            f"{_pct(item.probability_up_5d, probability=True)} | {_money(item.ideal_entry_price)} | "
+            f"| {item.symbol} | **{_execution_label(item.execution_status)}** | "
+            f"**{_direction_label(item.direction_signal)}** | **{item.label}** | "
+            f"{_money(item.current_price)} | {_reliability_text(item)} | "
+            f"{_money(item.ideal_entry_price)} | "
             f"{_money_range(item.acceptable_entry_low, item.acceptable_entry_high)} | "
             f"{_money(item.no_chase_above)} |"
         )
@@ -490,8 +606,9 @@ def render_markdown(
             "",
             f"- **收盘执行状态**：{_execution_label(item.execution_status)} (`{item.execution_status}`)",
             f"- **当前判断**：{item.reason}",
+            f"- **方向信号**：{_direction_label(item.direction_signal)}；5D可靠度：{_reliability_text(item)}",
             f"- **当前价**：{_money(item.current_price)}；较开盘 {_pct(item.return_from_open_pct)}",
-            f"- **预测**：1D {_pct(item.probability_up_1d, probability=True)} / 5D {_pct(item.probability_up_5d, probability=True)} / 20D {_pct(item.probability_up_20d, probability=True)}；5D 期望收益 {_pct(item.expected_return_5d_pct)}；5D 相对 SPY Alpha {_pct(item.expected_alpha_5d_pct)}",
+            f"- **研究倾向（不等于交易信号）**：1D {_pct(item.probability_up_1d, probability=True)} / 5D {_pct(item.probability_up_5d, probability=True)} / 20D {_pct(item.probability_up_20d, probability=True)}；5D 期望收益 {_pct(item.expected_return_5d_pct)}；5D 相对 SPY Alpha {_pct(item.expected_alpha_5d_pct)}",
             f"- **择时**：更好买点启发式评分（未校准） {_pct(item.better_entry_score, probability=True)}；预计可改善 {item.expected_improvement_pct:.2f}%；参考更优价 {_money(item.expected_better_price)}",
         ]
         if item.ideal_entry_price is not None:
@@ -512,7 +629,7 @@ def render_markdown(
             )
         if item.forecast_confidence is not None:
             lines.append(
-                f"- **预测可信度**：{item.forecast_confidence:.0%}（与证据覆盖率分开；低样本会自动收缩）"
+                f"- **模型证据分**：{item.forecast_confidence:.0%}（不是胜率；低样本/无方向 skill 时不能用于生产动作）"
             )
         if item.entry_low is not None and item.entry_high is not None:
             lines.append(
@@ -542,7 +659,9 @@ def render_markdown(
         "- `等更好买点` 不是看空，而是当前价格的等待期望值高于立即追入。",
         "- `等待确认` 表示当前仍缺执行条件，首仓保持 0%。",
         "- 止损、计划失效和收盘风险否决是硬边界，盘中模型不能绕过。",
-        "- 收盘层上涨概率和期望收益来自历史校准，不是收益保证。",
+        "- “方向信号”和“执行动作”是两件事：方向模型无效时显示“无有效信号”，风控许可仍可独立为 REJECTED/CONDITIONAL_APPROVED。",
+        "- 少于 50 个成熟样本、方向命中率低于 52%，或未超过多数类基线至少 2 个百分点时，方向模型生产权重固定为 0。",
+        "- 收盘层上涨概率和期望收益仅作为研究倾向，不是收益保证；未通过可靠度门时不得驱动买入动作。",
         "- `更好买点评分` 当前是盘中启发式 score，不是校准概率；Research Ledger 会按多时点 outcome 验证，样本不足前不得表述为胜率。",
         "",
     ]
@@ -598,6 +717,14 @@ def _signature(decisions: Sequence[OpenTimingDecision]) -> str:
             "symbol": item.symbol,
             "execution_status": item.execution_status,
             "action": item.action,
+            "direction_signal": item.direction_signal,
+            "forecast_tradeable_5d": item.forecast_tradeable_5d,
+            "reliability_sample_bucket": item.calibration_samples_5d // 10,
+            "reliability_hit_bucket": (
+                None
+                if item.historical_hit_rate_5d is None
+                else round(item.historical_hit_rate_5d, 2)
+            ),
             "better_bucket": min(9, max(0, int(item.better_entry_score * 10.0))),
             "ideal_entry": round(item.ideal_entry_price, 2) if item.ideal_entry_price else None,
             "no_chase": round(item.no_chase_above, 2) if item.no_chase_above else None,
@@ -746,9 +873,13 @@ def run(
             status: sum(item.execution_status == status for item in decisions)
             for status in EXECUTION_STATUS_LABELS
         },
+        "direction_signal_counts": {
+            signal: sum(item.direction_signal == signal for item in decisions)
+            for signal in DIRECTION_SIGNAL_LABELS
+        },
     }
     payload = {
-        "version": "us-open-timing-v7.2",
+        "version": "us-open-timing-v7.6",
         "policy_version": POLICY_VERSION,
         "better_entry_metric": {
             "field": "better_entry_score",
@@ -798,7 +929,7 @@ def run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="V7.2 U.S. open intraday timing decision with three-state close authorization"
+        description="V7.6 U.S. open timing with direction-skill quarantine and three-state execution authorization"
     )
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")

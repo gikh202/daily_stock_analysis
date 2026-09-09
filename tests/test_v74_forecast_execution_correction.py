@@ -18,6 +18,7 @@ def _horizon(
     samples: int,
     status: str,
     hit_rate: float | None,
+    majority_baseline: float | None = None,
     expected_return: float = 0.5,
     alpha: float = 0.2,
     confidence: float = 0.8,
@@ -46,7 +47,10 @@ def _horizon(
         challenger_probability_up=probability,
         direction=direction,
         score=probability * 100.0,
-        diagnostics={"historical_direction_hit_rate": hit_rate},
+        diagnostics={
+            "historical_direction_hit_rate": hit_rate,
+            "historical_majority_baseline_accuracy": majority_baseline,
+        },
     )
 
 
@@ -112,7 +116,7 @@ def test_research_direction_is_preserved_while_execution_uses_trading_direction(
     assert execution["direction"] == "neutral"
 
 
-def test_poor_mature_hit_rate_is_zero_weight_and_mid_hit_rate_is_low_weight() -> None:
+def test_only_direction_skill_above_baseline_gets_trading_weight() -> None:
     poor = _horizon(
         5,
         probability=0.35,
@@ -127,15 +131,25 @@ def test_poor_mature_hit_rate_is_zero_weight_and_mid_hit_rate_is_low_weight() ->
         status="mature",
         hit_rate=0.49,
     )
+    no_skill = _horizon(
+        5,
+        probability=0.60,
+        samples=80,
+        status="mature",
+        hit_rate=0.60,
+        majority_baseline=0.60,
+    )
     validated = _horizon(
         5,
         probability=0.60,
         samples=80,
         status="mature",
-        hit_rate=0.56,
+        hit_rate=0.64,
+        majority_baseline=0.60,
     )
     assert forecast_reliability_weight(poor) == 0.0
-    assert 0.0 < forecast_reliability_weight(middling) < 0.10
+    assert forecast_reliability_weight(middling) == 0.0
+    assert forecast_reliability_weight(no_skill) == 0.0
     assert forecast_reliability_weight(validated) == 0.8
 
 

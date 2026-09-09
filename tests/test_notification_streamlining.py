@@ -7,7 +7,11 @@ from zoneinfo import ZoneInfo
 import sitecustomize
 from scripts.realtime_email import _markdown_html
 from scripts.run_us_open_confirmation_safe import _near_open_retry_seconds
-from scripts.run_us_open_timing import _semantic_price_state, _should_notify
+from scripts.run_us_open_timing import (
+    _extract_forecast,
+    _semantic_price_state,
+    _should_notify,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -177,3 +181,78 @@ def test_realtime_open_report_never_renders_na_to_na_range() -> None:
     assert "def _money_range" in text
     assert 'return "N/A"' in text
     assert "_money_range(item.acceptable_entry_low, item.acceptable_entry_high)" in text
+
+
+def test_low_sample_forecast_is_research_only_no_direction_signal() -> None:
+    packet = {
+        "forecast_intelligence": {
+            "horizons": {
+                "1d": {
+                    "probability_up": 0.70,
+                    "calibration_status": "shrunk",
+                    "calibration_samples": 34,
+                },
+                "5d": {
+                    "probability_up": 0.68,
+                    "expected_return_pct": 1.2,
+                    "expected_alpha_vs_spy_pct": 0.8,
+                    "forecast_confidence": 0.9,
+                    "calibration_status": "shrunk",
+                    "calibration_samples": 31,
+                    "historical_direction_hit_rate": 0.80,
+                    "historical_majority_baseline_accuracy": 0.55,
+                },
+                "20d": {
+                    "probability_up": 0.72,
+                    "calibration_status": "prior_only",
+                    "calibration_samples": 0,
+                },
+            }
+        }
+    }
+    forecast = _extract_forecast(packet)
+    assert forecast["meta5"]["tradeable"] is False
+    assert forecast["direction_signal"] == "NO_SIGNAL"
+
+
+def test_forecast_requires_skill_above_majority_baseline_for_direction_signal() -> None:
+    no_skill_packet = {
+        "forecast_intelligence": {
+            "horizons": {
+                "5d": {
+                    "probability_up": 0.65,
+                    "expected_return_pct": 1.0,
+                    "calibration_status": "mature",
+                    "calibration_samples": 100,
+                    "historical_direction_hit_rate": 0.60,
+                    "historical_majority_baseline_accuracy": 0.60,
+                }
+            }
+        }
+    }
+    skilled_packet = {
+        "forecast_intelligence": {
+            "horizons": {
+                "5d": {
+                    "probability_up": 0.65,
+                    "expected_return_pct": 1.0,
+                    "calibration_status": "mature",
+                    "calibration_samples": 100,
+                    "historical_direction_hit_rate": 0.64,
+                    "historical_majority_baseline_accuracy": 0.60,
+                }
+            }
+        }
+    }
+    assert _extract_forecast(no_skill_packet)["direction_signal"] == "NO_SIGNAL"
+    skilled = _extract_forecast(skilled_packet)
+    assert skilled["meta5"]["tradeable"] is True
+    assert skilled["direction_signal"] == "BULLISH"
+
+
+def test_open_report_separates_direction_signal_from_execution_action() -> None:
+    text = TIMING_RUNNER.read_text(encoding="utf-8")
+    assert "方向信号" in text
+    assert "执行动作" in text
+    assert "研究倾向（不等于交易信号）" in text
+    assert "多数类基线" in text
