@@ -21,10 +21,11 @@ if str(ROOT) not in sys.path:
 from scripts.run_us_open_confirmation import ConfirmationDecision, LiveSnapshot, fetch_live_snapshot
 from scripts.run_us_open_confirmation_v2 import classify_confirmation_v2
 from src.forecasting import IntradayTimingModel
+from src.forecasting.entry_optimizer import EntryOptimization, EntryOptimizer
 
 logger = logging.getLogger("us_open_timing")
 NY = ZoneInfo("America/New_York")
-POLICY_VERSION = "us-open-timing-v7.2"
+POLICY_VERSION = "us-open-timing-v7.5"
 ACTION_LABELS = {
     "BUY_NOW": "现在可以买（首仓）",
     "WAIT_BETTER_ENTRY": "等更好买点",
@@ -72,6 +73,14 @@ class OpenTimingDecision:
     execution_status: str = "REJECTED"
     conditional_entry_price: float | None = None
     conditional_entry_reason: str | None = None
+    ideal_entry_price: float | None = None
+    acceptable_entry_low: float | None = None
+    acceptable_entry_high: float | None = None
+    no_chase_above: float | None = None
+    entry_candidate_source: str | None = None
+    entry_touch_score: float | None = None
+    entry_ev_score: float | None = None
+    entry_candidates: tuple[dict[str, Any], ...] = ()
 
 
 def _finite(value: Any) -> float | None:
@@ -170,6 +179,11 @@ def load_runtime_packets(path: str | Path) -> list[dict[str, Any]]:
             _mapping(board.get("context_features")).get("forecast_intelligence")
         )
         packet["horizon_forecasts"] = _mapping(board.get("horizon_forecasts"))
+        packet["_market_regime"] = (
+            str(board.get("market_regime") or "").strip().lower()
+            or str(_mapping(board.get("context_features")).get("market_regime") or "").strip().lower()
+            or None
+        )
     return packets
 
 
@@ -180,7 +194,7 @@ def _extended_intraday(
         import yfinance as yf
 
         frame = yf.Ticker(symbol).history(
-            period="1d",
+            period="5d",
             interval="1m",
             auto_adjust=False,
             prepost=False,
@@ -215,12 +229,34 @@ def _extended_intraday(
             if len(minute_returns) >= 3
             else (base.session_high / max(base.session_low, 1e-9) - 1.0) * 100.0 * 0.35
         )
+        opening = session.between_time("09:30", "09:44")
+        opening_range_low = (
+            float(opening["Low"].min()) if not opening.empty else None
+        )
+        close_series = session["Close"].dropna()
+        ema20 = (
+            float(close_series.ewm(span=20, adjust=False).mean().iloc[-1])
+            if not close_series.empty
+            else None
+        )
+        previous_close = None
+        prior_dates = sorted(
+            {item for item in frame.index.date if item < now.date()},
+            reverse=True,
+        )
+        if prior_dates:
+            prior = frame[frame.index.date == prior_dates[0]].between_time("09:30", "16:00")
+            if not prior.empty:
+                previous_close = _finite(prior.iloc[-1].get("Close"))
         minutes = max(0, int((now.hour * 60 + now.minute) - (9 * 60 + 30)))
         return {
             "session_vwap": vwap,
             "last_5m_return_pct": last5,
             "intraday_volatility_pct": intraday_vol,
             "minutes_since_open": minutes,
+            "ema20": ema20,
+            "opening_range_low": opening_range_low,
+            "previous_close": previous_close,
         }
     except Exception as exc:
         logger.info("%s extended timing fields unavailable: %s", symbol, exc)
@@ -233,6 +269,9 @@ def _extended_intraday(
             "last_5m_return_pct": base.return_from_open_pct,
             "intraday_volatility_pct": range_vol,
             "minutes_since_open": minutes,
+            "ema20": None,
+            "opening_range_low": base.opening_15m_low,
+            "previous_close": None,
         }
 
 
@@ -304,6 +343,34 @@ def _to_open_decision(
         if timing.action in {"NO_BUY", "INVALIDATED", "DATA_UNAVAILABLE"}
         else f"{effective_reason}；择时判断：{timing.rationale}"
     )
+    optimization = EntryOptimization(None, None, None, None, None, None, None, ())
+    if timing.action in {"BUY_NOW", "WAIT_BETTER_ENTRY", "WAIT_CONFIRMATION"}:
+        optimization = EntryOptimizer().optimize(
+            current_price=snapshot.current_price,
+            stop_loss=base.stop_loss,
+            targets=base.targets,
+            entry_low=base.entry_low,
+            entry_high=base.entry_high,
+            session_low=snapshot.session_low,
+            session_high=snapshot.session_high,
+            session_vwap=_finite(ext["session_vwap"]),
+            ema20=_finite(ext["ema20"]),
+            opening_range_low=_finite(ext["opening_range_low"]),
+            previous_close=_finite(ext["previous_close"]),
+            intraday_volatility_pct=_finite(ext["intraday_volatility_pct"]),
+            last_5m_return_pct=_finite(ext["last_5m_return_pct"]),
+            probability_up_1d=forecast["p1"],
+            probability_up_5d=forecast["p5"],
+            expected_return_5d_pct=forecast["return5"],
+            market_regime=str(packet.get("_market_regime") or "") or None,
+        )
+    optimized_price = optimization.ideal_entry_price or timing.expected_better_price
+    optimized_improvement = timing.expected_improvement_pct
+    if optimized_price is not None and optimized_price < snapshot.current_price:
+        optimized_improvement = max(
+            optimized_improvement,
+            (snapshot.current_price / optimized_price - 1.0) * 100.0,
+        )
     return OpenTimingDecision(
         action=timing.action,
         label=ACTION_LABELS.get(timing.action, timing.action),
@@ -313,10 +380,18 @@ def _to_open_decision(
         ),
         better_entry_score=timing.better_entry_probability,
         better_entry_probability=timing.better_entry_probability,
-        expected_better_price=timing.expected_better_price,
-        expected_improvement_pct=timing.expected_improvement_pct,
+        expected_better_price=optimized_price,
+        expected_improvement_pct=optimized_improvement,
         recheck_minutes=timing.recheck_minutes,
         terminal=timing.terminal,
+        ideal_entry_price=optimization.ideal_entry_price,
+        acceptable_entry_low=optimization.acceptable_entry_low,
+        acceptable_entry_high=optimization.acceptable_entry_high,
+        no_chase_above=optimization.no_chase_above,
+        entry_candidate_source=optimization.candidate_source,
+        entry_touch_score=optimization.touch_score,
+        entry_ev_score=optimization.expected_value_score,
+        entry_candidates=tuple(item.to_dict() if hasattr(item, "to_dict") else asdict(item) for item in optimization.candidates),
         **common,
     )
 
@@ -384,15 +459,16 @@ def render_markdown(
         lines.append(f"- **上一收盘决策来源**：run `{source_run_id}`")
     lines += [
         "",
-        "| 标的 | 收盘授权 | 当前动作 | 当前价 | 1D上涨概率 | 5D上涨概率 | 更好买点评分* | 预计更优价 |",
-        "|---|---|---|---:|---:|---:|---:|---:|",
+        "| 标的 | 收盘授权 | 当前动作 | 当前价 | 1D上涨概率 | 5D上涨概率 | 理想买点 | 可接受区 | 禁止追价 |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for item in decisions:
         lines.append(
             f"| {item.symbol} | **{_execution_label(item.execution_status)}** | **{item.label}** | "
             f"{_money(item.current_price)} | {_pct(item.probability_up_1d, probability=True)} | "
-            f"{_pct(item.probability_up_5d, probability=True)} | "
-            f"{_pct(item.better_entry_score, probability=True)} | {_money(item.expected_better_price)} |"
+            f"{_pct(item.probability_up_5d, probability=True)} | {_money(item.ideal_entry_price)} | "
+            f"{_money(item.acceptable_entry_low)}–{_money(item.acceptable_entry_high)} | "
+            f"{_money(item.no_chase_above)} |"
         )
     for index, item in enumerate(decisions, 1):
         lines += [
@@ -405,6 +481,14 @@ def render_markdown(
             f"- **预测**：1D {_pct(item.probability_up_1d, probability=True)} / 5D {_pct(item.probability_up_5d, probability=True)} / 20D {_pct(item.probability_up_20d, probability=True)}；5D 期望收益 {_pct(item.expected_return_5d_pct)}；5D 相对 SPY Alpha {_pct(item.expected_alpha_5d_pct)}",
             f"- **择时**：更好买点启发式评分（未校准） {_pct(item.better_entry_score, probability=True)}；预计可改善 {item.expected_improvement_pct:.2f}%；参考更优价 {_money(item.expected_better_price)}",
         ]
+        if item.ideal_entry_price is not None:
+            lines.append(
+                f"- **买点优化**：理想 {_money(item.ideal_entry_price)}（{item.entry_candidate_source or 'candidate'}）；"
+                f"可接受 {_money(item.acceptable_entry_low)}–{_money(item.acceptable_entry_high)}；"
+                f"高于 {_money(item.no_chase_above)} 不追；候选触达评分 "
+                f"{_pct(item.entry_touch_score, probability=True)}；EV score "
+                f"{item.entry_ev_score if item.entry_ev_score is not None else 'N/A'}"
+            )
         if item.conditional_entry_price is not None:
             lines.append(
                 f"- **收盘条件价**：{_money(item.conditional_entry_price)}；原因 `{item.conditional_entry_reason or 'conditional_entry'}`"
@@ -502,6 +586,8 @@ def _signature(decisions: Sequence[OpenTimingDecision]) -> str:
             "execution_status": item.execution_status,
             "action": item.action,
             "better_bucket": min(9, max(0, int(item.better_entry_score * 10.0))),
+            "ideal_entry": round(item.ideal_entry_price, 2) if item.ideal_entry_price else None,
+            "no_chase": round(item.no_chase_above, 2) if item.no_chase_above else None,
             "price_state": _semantic_price_state(
                 item.current_price, item.entry_low, item.entry_high, item.stop_loss
             ),
