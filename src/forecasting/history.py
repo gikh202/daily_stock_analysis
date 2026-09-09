@@ -490,6 +490,12 @@ class ForecastHistory:
             "champion_direction_skill": None,
             "challenger_direction_skill": None,
             "challenger_vs_inverse_margin": None,
+            "champion_signal_samples": 0,
+            "challenger_signal_samples": 0,
+            "champion_signal_accuracy": None,
+            "challenger_signal_accuracy": None,
+            "champion_signal_coverage": None,
+            "challenger_signal_coverage": None,
             "champion_brier_score": None,
             "challenger_brier_score": None,
             "champion_log_loss": None,
@@ -497,6 +503,10 @@ class ForecastHistory:
             "alpha_samples": 0,
             "champion_directional_alpha_pct": None,
             "challenger_directional_alpha_pct": None,
+            "champion_signal_alpha_samples": 0,
+            "challenger_signal_alpha_samples": 0,
+            "champion_signal_directional_alpha_pct": None,
+            "challenger_signal_directional_alpha_pct": None,
         }
         if _valid_date(as_of_date) is None:
             return empty
@@ -541,6 +551,30 @@ class ForecastHistory:
         champion_skill = champion_accuracy - majority_baseline
         challenger_skill = challenger_accuracy - majority_baseline
 
+        champion_signal_rows = [
+            (champion_p, y, alpha)
+            for champion_p, _, y, alpha in paired
+            if champion_p >= 0.58 or champion_p <= 0.42
+        ]
+        challenger_signal_rows = [
+            (challenger_p, y, alpha)
+            for _, challenger_p, y, alpha in paired
+            if challenger_p >= 0.58 or challenger_p <= 0.42
+        ]
+
+        def signal_accuracy(
+            values: Sequence[tuple[float, int, Optional[float]]]
+        ) -> Optional[float]:
+            if not values:
+                return None
+            return statistics.fmean(
+                int((p >= 0.50) == bool(y))
+                for p, y, _ in values
+            )
+
+        champion_signal_accuracy = signal_accuracy(champion_signal_rows)
+        challenger_signal_accuracy = signal_accuracy(challenger_signal_rows)
+
         alpha_rows = [
             (champion_p, challenger_p, alpha)
             for champion_p, challenger_p, _, alpha in paired
@@ -563,6 +597,33 @@ class ForecastHistory:
             else None
         )
 
+        champion_signal_alpha_rows = [
+            (p, float(alpha))
+            for p, _, alpha in champion_signal_rows
+            if alpha is not None
+        ]
+        challenger_signal_alpha_rows = [
+            (p, float(alpha))
+            for p, _, alpha in challenger_signal_rows
+            if alpha is not None
+        ]
+        champion_signal_alpha = (
+            statistics.fmean(
+                (1.0 if p >= 0.50 else -1.0) * alpha
+                for p, alpha in champion_signal_alpha_rows
+            )
+            if champion_signal_alpha_rows
+            else None
+        )
+        challenger_signal_alpha = (
+            statistics.fmean(
+                (1.0 if p >= 0.50 else -1.0) * alpha
+                for p, alpha in challenger_signal_alpha_rows
+            )
+            if challenger_signal_alpha_rows
+            else None
+        )
+
         return {
             "samples": n,
             "scope": scope,
@@ -576,6 +637,12 @@ class ForecastHistory:
             "challenger_vs_inverse_margin": (
                 challenger_accuracy - inverse_accuracy
             ),
+            "champion_signal_samples": len(champion_signal_rows),
+            "challenger_signal_samples": len(challenger_signal_rows),
+            "champion_signal_accuracy": champion_signal_accuracy,
+            "challenger_signal_accuracy": challenger_signal_accuracy,
+            "champion_signal_coverage": len(champion_signal_rows) / n,
+            "challenger_signal_coverage": len(challenger_signal_rows) / n,
             "champion_brier_score": statistics.fmean(
                 (p - y) ** 2 for p, _, y, _ in paired
             ),
@@ -591,6 +658,10 @@ class ForecastHistory:
             "alpha_samples": len(alpha_rows),
             "champion_directional_alpha_pct": champion_directional_alpha,
             "challenger_directional_alpha_pct": challenger_directional_alpha,
+            "champion_signal_alpha_samples": len(champion_signal_alpha_rows),
+            "challenger_signal_alpha_samples": len(challenger_signal_alpha_rows),
+            "champion_signal_directional_alpha_pct": champion_signal_alpha,
+            "challenger_signal_directional_alpha_pct": challenger_signal_alpha,
         }
 
     def select_champion(
@@ -605,10 +676,13 @@ class ForecastHistory:
         min_directional_accuracy: float = 0.52,
         min_direction_skill: float = 0.02,
         min_direction_accuracy_improvement: float = 0.005,
+        min_signal_samples: int = 50,
+        min_signal_accuracy: float = 0.55,
+        min_signal_accuracy_improvement: float = 0.005,
         min_brier_improvement: float = 0.001,
         min_log_loss_improvement: float = 0.002,
         min_directional_alpha_improvement_pct: float = 0.05,
-        min_alpha_samples: int | None = None,
+        min_alpha_samples: int = 50,
     ) -> Dict[str, Any]:
         """Select a model only after strict multi-metric forward OOS evidence.
 
@@ -625,11 +699,8 @@ class ForecastHistory:
             symbol=symbol,
             instrument_type=instrument_type,
         )
-        alpha_floor = (
-            int(min_promotion_samples)
-            if min_alpha_samples is None
-            else max(1, int(min_alpha_samples))
-        )
+        alpha_floor = max(1, int(min_alpha_samples))
+        signal_floor = max(1, int(min_signal_samples))
         specific_scope = (
             not str(symbol or "").strip()
             or paired["scope"] in {"symbol", "symbol_regime"}
@@ -639,21 +710,37 @@ class ForecastHistory:
             "samples": paired["samples"],
             "directional_accuracy": paired["champion_directional_accuracy"],
             "direction_skill": paired["champion_direction_skill"],
+            "signal_samples": paired["champion_signal_samples"],
+            "signal_accuracy": paired["champion_signal_accuracy"],
+            "signal_coverage": paired["champion_signal_coverage"],
             "brier_score": paired["champion_brier_score"],
             "log_loss": paired["champion_log_loss"],
             "directional_alpha_pct": paired["champion_directional_alpha_pct"],
             "alpha_samples": paired["alpha_samples"],
+            "signal_directional_alpha_pct": paired[
+                "champion_signal_directional_alpha_pct"
+            ],
+            "signal_alpha_samples": paired["champion_signal_alpha_samples"],
         }
         challenger = {
             "samples": paired["samples"],
             "directional_accuracy": paired["challenger_directional_accuracy"],
             "direction_skill": paired["challenger_direction_skill"],
+            "signal_samples": paired["challenger_signal_samples"],
+            "signal_accuracy": paired["challenger_signal_accuracy"],
+            "signal_coverage": paired["challenger_signal_coverage"],
             "brier_score": paired["challenger_brier_score"],
             "log_loss": paired["challenger_log_loss"],
             "directional_alpha_pct": paired[
                 "challenger_directional_alpha_pct"
             ],
             "alpha_samples": paired["alpha_samples"],
+            "signal_directional_alpha_pct": paired[
+                "challenger_signal_directional_alpha_pct"
+            ],
+            "signal_alpha_samples": paired[
+                "challenger_signal_alpha_samples"
+            ],
         }
 
         def present(value: Any) -> bool:
@@ -686,6 +773,21 @@ class ForecastHistory:
                 and challenger["directional_accuracy"]
                 > paired["inverse_challenger_directional_accuracy"]
             ),
+            "signal_sample_floor": (
+                int(challenger["signal_samples"] or 0) >= signal_floor
+            ),
+            "signal_accuracy_floor": bool(
+                present(challenger["signal_accuracy"])
+                and challenger["signal_accuracy"]
+                >= float(min_signal_accuracy)
+            ),
+            "beats_champion_signal_accuracy": bool(
+                present(champion["signal_accuracy"])
+                and present(challenger["signal_accuracy"])
+                and challenger["signal_accuracy"]
+                >= champion["signal_accuracy"]
+                + float(min_signal_accuracy_improvement)
+            ),
             "brier_improves": bool(
                 present(champion["brier_score"])
                 and present(challenger["brier_score"])
@@ -698,16 +800,18 @@ class ForecastHistory:
                 and challenger["log_loss"]
                 <= champion["log_loss"] - float(min_log_loss_improvement)
             ),
-            "alpha_sample_floor": paired["alpha_samples"] >= alpha_floor,
+            "alpha_sample_floor": (
+                int(challenger["signal_alpha_samples"] or 0) >= alpha_floor
+            ),
             "directional_alpha_positive": bool(
-                present(challenger["directional_alpha_pct"])
-                and challenger["directional_alpha_pct"] > 0.0
+                present(challenger["signal_directional_alpha_pct"])
+                and challenger["signal_directional_alpha_pct"] > 0.0
             ),
             "directional_alpha_improves": bool(
-                present(champion["directional_alpha_pct"])
-                and present(challenger["directional_alpha_pct"])
-                and challenger["directional_alpha_pct"]
-                >= champion["directional_alpha_pct"]
+                present(champion["signal_directional_alpha_pct"])
+                and present(challenger["signal_directional_alpha_pct"])
+                and challenger["signal_directional_alpha_pct"]
+                >= champion["signal_directional_alpha_pct"]
                 + float(min_directional_alpha_improvement_pct)
             ),
         }
@@ -729,10 +833,15 @@ class ForecastHistory:
             "promotion_gate_version": "v8-oos-multimetric-skill.1",
             "promotion_min_samples": int(min_promotion_samples),
             "promotion_min_alpha_samples": alpha_floor,
+            "promotion_min_signal_samples": signal_floor,
             "min_directional_accuracy": float(min_directional_accuracy),
             "min_direction_skill": float(min_direction_skill),
             "min_direction_accuracy_improvement": float(
                 min_direction_accuracy_improvement
+            ),
+            "min_signal_accuracy": float(min_signal_accuracy),
+            "min_signal_accuracy_improvement": float(
+                min_signal_accuracy_improvement
             ),
             "min_brier_improvement": float(min_brier_improvement),
             "min_log_loss_improvement": float(min_log_loss_improvement),
