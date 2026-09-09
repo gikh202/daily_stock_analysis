@@ -70,4 +70,6 @@ def test_realtime_email_code_changes_smoke_trigger_open_workflow() -> None:
     text = OPEN.read_text(encoding="utf-8")
     assert "scripts/realtime_email.py" in text
     assert "scripts/run_us_open_timing.py" in text
+    assert "scripts/run_us_open_confirmation.py" in text
+    assert "scripts/run_us_open_confirmation_v2.py" in text
     assert "scripts/run_us_open_confirmation_safe.py" in text
