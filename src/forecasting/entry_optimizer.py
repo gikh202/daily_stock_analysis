@@ -174,11 +174,11 @@ class EntryOptimizer:
                 extension += max(0.0, range_pos - 0.65)
 
             continuation_risk = _clamp(
-                max(0.0, directional_edge - 0.50) * 1.6
-                + max(0.0, momentum) / 2.0
-                + (0.05 if regime == "risk_on" else 0.0),
+                max(0.0, directional_edge - 0.50) * 0.8
+                + max(0.0, momentum) / 3.0
+                + (0.02 if regime == "risk_on" else 0.0),
                 0.0,
-                0.50,
+                0.25,
             )
             quality = (
                 0.42 * rr_score
