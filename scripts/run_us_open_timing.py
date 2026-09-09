@@ -539,20 +539,20 @@ def _should_notify(
 def _notify(
     report_path: Path, decisions: Sequence[OpenTimingDecision], session_date: str
 ) -> bool:
-    from src.notification import NotificationService
+    # Realtime path deliberately bypasses the heavyweight multi-channel
+    # NotificationService import graph. Deep reports still use the full service.
+    from scripts.realtime_email import send_realtime_email
 
-    service = NotificationService()
-    if not service.is_available():
-        return False
-    return bool(
-        service.send(
-            report_path.read_text(encoding="utf-8"),
-            email_stock_codes=[item.symbol for item in decisions if item.symbol],
-            email_send_to_all=True,
-            route_type="report",
-            severity="info",
-            dedup_key=f"us-open-timing-{session_date}",
-        )
+    buy = sum(item.action == "BUY_NOW" for item in decisions)
+    wait = sum(
+        item.action in {"WAIT_BETTER_ENTRY", "WAIT_CONFIRMATION"}
+        for item in decisions
+    )
+    subject = f"美股开盘决策 {session_date}｜可买{buy} 等待{wait}"
+    return send_realtime_email(
+        subject,
+        report_path.read_text(encoding="utf-8"),
+        sender_name="AI 美股开盘决策",
     )
 
 
