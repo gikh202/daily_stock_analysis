@@ -348,47 +348,51 @@ def run(
         )
 
     settlement_stock_db_path = stock_db_path
+    benchmark_enabled = _truthy(
+        os.getenv("V6_BENCHMARK_SETTLEMENT_ENABLED", "false")
+    )
     benchmark_settlement: Dict[str, Any] = {
         "version": "v6-benchmark-settlement-clone-v1",
-        "status": "degraded",
+        "status": "disabled" if not benchmark_enabled else "degraded",
         "ready": False,
-        "reason": "not_attempted",
+        "reason": "disabled" if not benchmark_enabled else "not_attempted",
     }
     settlement_candidate = str(
         Path(stock_db_path).with_name("stock_analysis_benchmark_settlement.db")
     )
-    try:
-        benchmark_settlement = prepare_benchmark_settlement_db(
-            stock_db_path,
-            settlement_candidate,
-        )
-        if (
-            benchmark_settlement.get("ready") is True
-            and benchmark_settlement.get("source_unchanged") is True
-            and str(
-                benchmark_settlement.get("settlement_quick_check") or ""
-            ).strip().lower() == "ok"
-        ):
-            settlement_stock_db_path = settlement_candidate
-        else:
-            logger.warning(
-                "[V8] benchmark settlement clone unavailable; Alpha gates remain "
-                "observation-only for missing benchmark rows: %s",
-                benchmark_settlement,
+    if benchmark_enabled:
+        try:
+            benchmark_settlement = prepare_benchmark_settlement_db(
+                stock_db_path,
+                settlement_candidate,
             )
-    except Exception as exc:
-        benchmark_settlement = {
-            "version": "v6-benchmark-settlement-clone-v1",
-            "status": "degraded",
-            "ready": False,
-            "reason": "exception",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-        logger.warning(
-            "[V8] benchmark settlement hydration failed; continuing V6 without "
-            "blocking report/notification: %s",
-            benchmark_settlement["error"],
-        )
+            if (
+                benchmark_settlement.get("ready") is True
+                and benchmark_settlement.get("source_unchanged") is True
+                and str(
+                    benchmark_settlement.get("settlement_quick_check") or ""
+                ).strip().lower() == "ok"
+            ):
+                settlement_stock_db_path = settlement_candidate
+            else:
+                logger.warning(
+                    "[V8] benchmark settlement clone unavailable; Alpha gates remain "
+                    "observation-only for missing benchmark rows: %s",
+                    benchmark_settlement,
+                )
+        except Exception as exc:
+            benchmark_settlement = {
+                "version": "v6-benchmark-settlement-clone-v1",
+                "status": "degraded",
+                "ready": False,
+                "reason": "exception",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            logger.warning(
+                "[V8] benchmark settlement hydration failed; continuing V6 without "
+                "blocking report/notification: %s",
+                benchmark_settlement["error"],
+            )
 
     maturation = mature_normalized_outcomes(store, settlement_stock_db_path)
     benchmark_repair = backfill_missing_benchmark_outcomes(
@@ -420,6 +424,7 @@ def run(
         "skipped_unusable": skipped_unusable,
         "new_outcomes": maturation["evaluated"],
         "not_yet_mature": maturation["not_yet_mature"],
+        "benchmark_settlement_enabled": benchmark_enabled,
         "benchmark_settlement_status": benchmark_settlement.get("status"),
         "benchmark_settlement_ready": bool(
             benchmark_settlement.get("ready")
