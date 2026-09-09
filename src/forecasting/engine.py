@@ -237,14 +237,21 @@ def _joint_expected_return(
     return reconciled, probability_implied, coherence_weight
 
 
-def _decision_weight(horizon: int, status: str, samples: int) -> float:
-    """Reliability weight exposed to downstream fusion; 10D is quarantined until mature."""
-    if status == "prior_only" or samples <= 0:
+def _decision_weight(
+    horizon: int,
+    status: str,
+    samples: int,
+    *,
+    hit_rate: float | None = None,
+    majority_baseline: float | None = None,
+) -> float:
+    """Research/report weight aligned with the production direction-skill gate."""
+    if status != "mature" or samples < 50:
         return 0.0
-    if horizon == 10 and samples < 50:
+    if hit_rate is None or hit_rate < 0.52:
         return 0.0
-    if status != "mature":
-        return 0.10 if horizon != 10 else 0.0
+    if majority_baseline is not None and hit_rate < majority_baseline + 0.02:
+        return 0.0
     return min(1.0, samples / 100.0) * (0.35 if horizon == 10 else 1.0)
 
 
@@ -444,7 +451,13 @@ class V7ForecastEngine:
                 else "historically_calibrated_probability"
             )
             decision_weight = _decision_weight(
-                horizon, active_calibration.status, active_calibration.samples
+                horizon,
+                active_calibration.status,
+                active_calibration.samples,
+                hit_rate=active_calibration.historical_direction_hit_rate,
+                majority_baseline=(
+                    active_calibration.historical_majority_baseline_accuracy
+                ),
             )
 
             horizons[f"{horizon}d"] = ForecastHorizon(
