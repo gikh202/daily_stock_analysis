@@ -69,6 +69,8 @@ class CalibrationProfile:
     source: str
     historical_direction_hit_rate: Optional[float] = None
     calibration_scope: str = "global"
+    historical_positive_rate: Optional[float] = None
+    historical_majority_baseline_accuracy: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -363,9 +365,17 @@ class ForecastHistory:
                 f"{source}:{probability_key}", None, scope,
             )
 
-        hits = sum(y for _, y, _ in outcomes)
-        hit_rate = hits / n
-        posterior = (hits + self.prior_strength * raw) / (n + self.prior_strength)
+        positives = sum(y for _, y, _ in outcomes)
+        positive_rate = positives / n
+        direction_hits = sum(
+            int((p >= 0.50) == bool(y))
+            for p, y, _ in outcomes
+        )
+        hit_rate = direction_hits / n
+        majority_baseline = max(positive_rate, 1.0 - positive_rate)
+        posterior = (
+            positives + self.prior_strength * raw
+        ) / (n + self.prior_strength)
         brier = statistics.fmean((p - y) ** 2 for p, y, _ in outcomes)
         logloss = statistics.fmean(_log_loss(p, y) for p, y, _ in outcomes)
         bins: Dict[int, list[tuple[float, int]]] = {}
@@ -397,6 +407,8 @@ class ForecastHistory:
             f"{source}:{probability_key}",
             hit_rate,
             scope,
+            positive_rate,
+            majority_baseline,
         )
 
     def _metric_rows(
