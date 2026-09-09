@@ -17,7 +17,7 @@ HORIZONS = (1, 5, 10, 20)
 CONTEXT_HORIZONS = (1, 5, 10, 20, 60)
 DEFAULT_CODES = ("MSFT", "GOOGL", "QQQM", "VOO")
 DEFAULT_ETFS = {"QQQM", "VOO", "SPY", "QQQ"}
-METHOD = "strict-no-lookahead-price-only-forecast-engine-ab-v1"
+METHOD = "strict-no-lookahead-price-only-forecast-engine-ab-v2-skill-alpha"
 _BENCH_INDEX_CACHE: dict[int, tuple[list[str], dict[str, int]]] = {}
 
 
@@ -362,39 +362,125 @@ def _summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {
             "samples": 0,
+            "positive_rate_pct": None,
+            "majority_baseline_accuracy_pct": None,
             "directional_accuracy_pct": None,
+            "direction_skill_pp": None,
+            "inverse_directional_accuracy_pct": None,
             "non_neutral_signal_accuracy_pct": None,
             "non_neutral_samples": 0,
             "neutral_rate_pct": None,
             "brier_score": None,
             "log_loss": None,
+            "directional_alpha_pct": None,
+            "alpha_samples": 0,
             "return_mae_pct": None,
             "mature_share_pct": None,
         }
-    binary_hits = [int((float(row["probability_up"]) >= 0.5) == (float(row["realized_return_pct"]) > 0.0)) for row in rows]
-    signal_rows = [row for row in rows if str(row.get("direction")) in {"bullish", "bearish"}]
+
+    outcomes = [
+        int(float(row["realized_return_pct"]) > 0.0)
+        for row in rows
+    ]
+    predictions = [
+        int(float(row["probability_up"]) >= 0.5)
+        for row in rows
+    ]
+    binary_hits = [
+        int(prediction == outcome)
+        for prediction, outcome in zip(predictions, outcomes)
+    ]
+    positive_rate = statistics.fmean(outcomes)
+    majority_baseline = max(positive_rate, 1.0 - positive_rate)
+    directional_accuracy = statistics.fmean(binary_hits)
+    inverse_accuracy = 1.0 - directional_accuracy
+
+    signal_rows = [
+        row
+        for row in rows
+        if str(row.get("direction")) in {"bullish", "bearish"}
+    ]
     signal_hits = [
-        int((str(row["direction"]) == "bullish" and float(row["realized_return_pct"]) > 0.0)
-            or (str(row["direction"]) == "bearish" and float(row["realized_return_pct"]) < 0.0))
+        int(
+            (
+                str(row["direction"]) == "bullish"
+                and float(row["realized_return_pct"]) > 0.0
+            )
+            or (
+                str(row["direction"]) == "bearish"
+                and float(row["realized_return_pct"]) < 0.0
+            )
+        )
         for row in signal_rows
     ]
-    outcomes = [int(float(row["realized_return_pct"]) > 0.0) for row in rows]
-    brier = [(float(row["probability_up"]) - outcome) ** 2 for row, outcome in zip(rows, outcomes)]
-    losses = [_log_loss(float(row["probability_up"]), outcome) for row, outcome in zip(rows, outcomes)]
-    return_errors = [abs(float(row["expected_return_pct"]) - float(row["realized_return_pct"])) for row in rows]
-    mature = [str(row.get("calibration_status")) == "mature" for row in rows]
+    brier = [
+        (float(row["probability_up"]) - outcome) ** 2
+        for row, outcome in zip(rows, outcomes)
+    ]
+    losses = [
+        _log_loss(float(row["probability_up"]), outcome)
+        for row, outcome in zip(rows, outcomes)
+    ]
+    alpha_values = [
+        (
+            1.0 if float(row["probability_up"]) >= 0.5 else -1.0
+        )
+        * float(row["realized_excess_vs_spy_pct"])
+        for row in rows
+        if _finite(row.get("realized_excess_vs_spy_pct")) is not None
+    ]
+    return_errors = [
+        abs(
+            float(row["expected_return_pct"])
+            - float(row["realized_return_pct"])
+        )
+        for row in rows
+    ]
+    mature = [
+        str(row.get("calibration_status")) == "mature"
+        for row in rows
+    ]
     return {
         "samples": len(rows),
-        "directional_accuracy_pct": round(100.0 * sum(binary_hits) / len(binary_hits), 3),
-        "non_neutral_signal_accuracy_pct": None if not signal_hits else round(100.0 * sum(signal_hits) / len(signal_hits), 3),
+        "positive_rate_pct": round(100.0 * positive_rate, 3),
+        "majority_baseline_accuracy_pct": round(
+            100.0 * majority_baseline, 3
+        ),
+        "directional_accuracy_pct": round(
+            100.0 * directional_accuracy, 3
+        ),
+        "direction_skill_pp": round(
+            100.0 * (directional_accuracy - majority_baseline), 3
+        ),
+        "inverse_directional_accuracy_pct": round(
+            100.0 * inverse_accuracy, 3
+        ),
+        "non_neutral_signal_accuracy_pct": (
+            None
+            if not signal_hits
+            else round(
+                100.0 * sum(signal_hits) / len(signal_hits), 3
+            )
+        ),
         "non_neutral_samples": len(signal_rows),
-        "neutral_rate_pct": round(100.0 * (len(rows) - len(signal_rows)) / len(rows), 3),
+        "neutral_rate_pct": round(
+            100.0 * (len(rows) - len(signal_rows)) / len(rows), 3
+        ),
         "brier_score": round(statistics.fmean(brier), 6),
         "log_loss": round(statistics.fmean(losses), 6),
-        "return_mae_pct": round(statistics.fmean(return_errors), 6),
-        "mature_share_pct": round(100.0 * sum(mature) / len(mature), 3),
+        "directional_alpha_pct": (
+            None
+            if not alpha_values
+            else round(statistics.fmean(alpha_values), 6)
+        ),
+        "alpha_samples": len(alpha_values),
+        "return_mae_pct": round(
+            statistics.fmean(return_errors), 6
+        ),
+        "mature_share_pct": round(
+            100.0 * sum(mature) / len(mature), 3
+        ),
     }
-
 
 def _variant_report(observations: Sequence[Mapping[str, Any]], *, label: str, engine_version: str, years: int) -> dict[str, Any]:
     by_horizon: dict[str, Any] = {}
@@ -518,6 +604,11 @@ def _run_variant(args: argparse.Namespace) -> None:
                     "calibration_status": str(payload.get("calibration_status") or "prior_only"),
                     "calibration_samples": int(payload.get("calibration_samples") or 0),
                     "realized_return_pct": round(float(outcome["return_pct"]), 8),
+                    "realized_excess_vs_spy_pct": (
+                        None
+                        if _finite(outcome.get("excess_vs_spy_pct")) is None
+                        else round(float(outcome["excess_vs_spy_pct"]), 8)
+                    ),
                     "end_trade_date": outcome["end_trade_date"],
                 }
             )
@@ -544,7 +635,16 @@ def _run_variant(args: argparse.Namespace) -> None:
 
 def _metric_delta(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"samples": int(new.get("samples") or 0)}
-    for key in ("directional_accuracy_pct", "non_neutral_signal_accuracy_pct", "brier_score", "log_loss", "return_mae_pct", "mature_share_pct"):
+    for key in (
+        "directional_accuracy_pct",
+        "direction_skill_pp",
+        "non_neutral_signal_accuracy_pct",
+        "brier_score",
+        "log_loss",
+        "directional_alpha_pct",
+        "return_mae_pct",
+        "mature_share_pct",
+    ):
         left, right = _finite(old.get(key)), _finite(new.get(key))
         result[key] = None if left is None or right is None else round(right - left, 6)
     return result
@@ -592,9 +692,11 @@ def _paired_comparison(old_payload: Mapping[str, Any], new_payload: Mapping[str,
         "new_engine_version": new_report.get("engine_version"),
         "delta_semantics": {
             "directional_accuracy_pct": "positive is better",
+            "direction_skill_pp": "positive is better; skill is accuracy minus majority baseline",
             "non_neutral_signal_accuracy_pct": "positive is better",
             "brier_score": "negative is better",
             "log_loss": "negative is better",
+            "directional_alpha_pct": "positive is better",
             "return_mae_pct": "negative is better",
             "mature_share_pct": "descriptive only",
         },
@@ -609,44 +711,75 @@ def _fmt(value: Any, digits: int = 3) -> str:
     return "N/A" if number is None else f"{number:.{digits}f}"
 
 
-def _markdown(old: Mapping[str, Any], new: Mapping[str, Any], comparison: Mapping[str, Any]) -> str:
+def _markdown(
+    old: Mapping[str, Any],
+    new: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+) -> str:
     lines = [
-        "# V7.3 Forecast Engine AB Walk-Forward Backtest",
+        "# Forecast Engine AB Walk-Forward Backtest",
         "",
-        "> Actual V7.1 and V7.3 Forecast Engine implementations are replayed on identical price-only deterministic as-of inputs. Each engine owns a separate calibration DB; an outcome becomes visible only when `end_trade_date < as_of`.",
+        "> Old and new Forecast Engine implementations are replayed on identical price-only deterministic as-of inputs. Each engine owns a separate calibration DB; an outcome becomes visible only when `end_trade_date < as_of`.",
         "",
         f"- Old: `{old['report'].get('engine_version')}`",
         f"- New: `{new['report'].get('engine_version')}`",
         f"- Paired observations: **{comparison.get('paired_observations', 0)}**",
-        "- Metrics: binary directional accuracy (P(up) >= 50%), non-neutral signal accuracy, Brier, log loss, return MAE.",
+        "- Core promotion metrics: directional accuracy, majority baseline, direction Skill, inverse control, Brier, log loss, realized directional alpha.",
+        "- Direction Skill = directional accuracy − majority-class baseline accuracy. Positive Skill is required before a model can be considered genuinely predictive.",
         "- Scope limitation: this is a deterministic OHLCV reconstruction of Forecast Engine inputs, not a historical replay of unavailable news/LLM snapshots.",
         "",
         "## Overall by horizon",
         "",
-        "| Horizon | Model | N | Dir Acc | Signal Acc | Brier | Log loss | Return MAE | Mature share |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Horizon | Model | N | Dir Acc | Majority | Skill | Inverse | Signal Acc | Brier | Log loss | Dir Alpha | Return MAE | Mature |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for horizon in ("1d", "5d", "10d", "20d"):
-        for label, payload in (("V7.1", old), ("V7.3", new)):
+        for label, payload in (("Old", old), ("New", new)):
             metric = payload["report"]["by_horizon"][horizon]
             lines.append(
-                f"| {horizon} | {label} | {metric['samples']} | {_fmt(metric['directional_accuracy_pct'])}% | {_fmt(metric['non_neutral_signal_accuracy_pct'])}% | {_fmt(metric['brier_score'], 6)} | {_fmt(metric['log_loss'], 6)} | {_fmt(metric['return_mae_pct'], 4)}% | {_fmt(metric['mature_share_pct'])}% |"
+                f"| {horizon} | {label} | {metric['samples']} | "
+                f"{_fmt(metric['directional_accuracy_pct'])}% | "
+                f"{_fmt(metric['majority_baseline_accuracy_pct'])}% | "
+                f"{_fmt(metric['direction_skill_pp'])}pp | "
+                f"{_fmt(metric['inverse_directional_accuracy_pct'])}% | "
+                f"{_fmt(metric['non_neutral_signal_accuracy_pct'])}% | "
+                f"{_fmt(metric['brier_score'], 6)} | "
+                f"{_fmt(metric['log_loss'], 6)} | "
+                f"{_fmt(metric['directional_alpha_pct'], 4)}% | "
+                f"{_fmt(metric['return_mae_pct'], 4)}% | "
+                f"{_fmt(metric['mature_share_pct'])}% |"
             )
         delta = comparison["by_horizon"][horizon]
         lines.append(
-            f"| {horizon} | Δ V7.3−V7.1 | {delta['samples']} | {_fmt(delta['directional_accuracy_pct'])}pp | {_fmt(delta['non_neutral_signal_accuracy_pct'])}pp | {_fmt(delta['brier_score'], 6)} | {_fmt(delta['log_loss'], 6)} | {_fmt(delta['return_mae_pct'], 4)}% | {_fmt(delta['mature_share_pct'])}pp |"
+            f"| {horizon} | Δ New−Old | {delta['samples']} | "
+            f"{_fmt(delta['directional_accuracy_pct'])}pp | — | "
+            f"{_fmt(delta['direction_skill_pp'])}pp | — | "
+            f"{_fmt(delta['non_neutral_signal_accuracy_pct'])}pp | "
+            f"{_fmt(delta['brier_score'], 6)} | "
+            f"{_fmt(delta['log_loss'], 6)} | "
+            f"{_fmt(delta['directional_alpha_pct'], 4)}% | "
+            f"{_fmt(delta['return_mae_pct'], 4)}% | "
+            f"{_fmt(delta['mature_share_pct'])}pp |"
         )
+
     lines.extend(["", "## Stock / ETF split", ""])
-    lines.append("| Type | Horizon | Δ Dir Acc | Δ Brier | Δ Log loss | Δ Return MAE |")
-    lines.append("|---|---|---:|---:|---:|---:|")
+    lines.append(
+        "| Type | Horizon | Δ Dir Acc | Δ Skill | Δ Brier | Δ Log loss | Δ Dir Alpha | Δ Return MAE |"
+    )
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
     for instrument, horizons in comparison["by_instrument_type"].items():
         for horizon in ("1d", "5d", "10d", "20d"):
             delta = horizons[horizon]
             lines.append(
-                f"| {instrument} | {horizon} | {_fmt(delta['directional_accuracy_pct'])}pp | {_fmt(delta['brier_score'], 6)} | {_fmt(delta['log_loss'], 6)} | {_fmt(delta['return_mae_pct'], 4)}% |"
+                f"| {instrument} | {horizon} | "
+                f"{_fmt(delta['directional_accuracy_pct'])}pp | "
+                f"{_fmt(delta['direction_skill_pp'])}pp | "
+                f"{_fmt(delta['brier_score'], 6)} | "
+                f"{_fmt(delta['log_loss'], 6)} | "
+                f"{_fmt(delta['directional_alpha_pct'], 4)}% | "
+                f"{_fmt(delta['return_mae_pct'], 4)}% |"
             )
     return "\n".join(lines) + "\n"
-
 
 def _run_ab(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir).resolve()
