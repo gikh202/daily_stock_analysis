@@ -72,7 +72,7 @@ def test_open_report_distinguishes_tendency_hit_rate_and_evidence_score(
 
     assert "**模型证据置信分**" in report
     assert "| 标的 | 1D预测 | 5D预测 | 更好买点评分 |" in report
-    assert "## V7.3 预测可靠度" in report
+    assert "## V7.5 方向可靠度" in report
     assert "倾向 77%（未校准 n=0）" in report
     assert "概率 55%（mature, n=50）" in report
     assert "| MSFT |" in report
