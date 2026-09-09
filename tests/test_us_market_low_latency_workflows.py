@@ -55,3 +55,12 @@ def test_open_cron_candidates_respect_github_five_minute_floor() -> None:
         minutes = sorted(int(value) for value in minute_field.split(","))
         gaps = [b - a for a, b in zip(minutes, minutes[1:])]
         assert all(gap >= 5 for gap in gaps)
+
+
+def test_open_workflow_deployment_can_smoke_trigger_live_gate() -> None:
+    text = OPEN.read_text(encoding="utf-8")
+    assert "push:" in text
+    assert "branches: [main]" in text
+    assert ".github/workflows/01-us-open-confirmation.yml" in text
+    assert '"$HM" -lt 930' in text
+    assert '"$HM" -ge 1600' in text
