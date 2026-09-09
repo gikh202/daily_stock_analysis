@@ -26,8 +26,12 @@ def _payload() -> dict:
                                 "probability_up": 0.55,
                                 "calibration_status": "mature",
                                 "calibration_samples": 50,
-                                "historical_direction_hit_rate": 0.52,
+                                "historical_direction_hit_rate": 0.54,
+                                "historical_majority_baseline_accuracy": 0.50,
                                 "evidence_confidence": 0.78,
+                                "diagnostics": {
+                                    "calibration_scope": "symbol",
+                                },
                             },
                             "10d": {
                                 "probability_up": 0.51,
@@ -70,14 +74,17 @@ def test_open_report_distinguishes_tendency_hit_rate_and_evidence_score(
     )
     report = _append_v73_reliability(source, reliability)
 
-    assert "**模型证据置信分**" in report
-    assert "| 标的 | 1D预测 | 5D预测 | 更好买点评分 |" in report
+    assert "**模型证据分**" in report
+    assert "| 标的 | 1D研究倾向 | 5D研究倾向 | 更好买点评分 |" in report
     assert "## V7.5 方向可靠度" in report
     assert "倾向 77%（未校准 n=0）" in report
     assert "概率 55%（mature, n=50）" in report
     assert "| MSFT |" in report
     assert "| 0% |" in report
-    assert "52.0%" in report
+    assert "54.0%" in report
+    assert "50.0%" in report
+    assert "+4.0%" in report
+    assert "symbol" in report
     assert "78%" in report
-    assert "模型证据置信分` 不是胜率" in report
-    assert "10D 在少于 50 个成熟样本时交易权重固定为 0%" in report
+    assert "模型证据分` 不是胜率" in report
+    assert "10D 与其他 horizon 使用同一方向 Skill 门" in report
