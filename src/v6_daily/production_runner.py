@@ -31,9 +31,13 @@ from .legacy_retirement import assert_legacy_retirement_ready
 from .legacy_write_guard import assert_legacy_facts_unchanged, snapshot_legacy_facts
 from .normalized_accuracy_lab import run_normalized_accuracy_lab
 from .normalized_manifest_store import NormalizedV6ManifestStore
+from .production_benchmarks import prepare_benchmark_settlement_db
 from .production_cutover import cutover_daily_payload
 from .production_import_guard import assert_production_import_graph_clean
-from .production_outcomes import mature_normalized_outcomes
+from .production_outcomes import (
+    backfill_missing_benchmark_outcomes,
+    mature_normalized_outcomes,
+)
 from .production_read_store import ProductionV6ReadStore
 from .production_report import render_daily_markdown, write_daily_report
 from .production_write_store import ProductionV6WriteStore
@@ -343,10 +347,61 @@ def run(
             "[V6.2] SEC/FRED 当前快照未注入历史/旧分析记录；仅作为当期报告背景展示"
         )
 
-    maturation = mature_normalized_outcomes(store, stock_db_path)
+    settlement_stock_db_path = stock_db_path
+    benchmark_enabled = _truthy(
+        os.getenv("V6_BENCHMARK_SETTLEMENT_ENABLED", "false")
+    )
+    benchmark_settlement: Dict[str, Any] = {
+        "version": "v6-benchmark-settlement-clone-v1",
+        "status": "disabled" if not benchmark_enabled else "degraded",
+        "ready": False,
+        "reason": "disabled" if not benchmark_enabled else "not_attempted",
+    }
+    settlement_candidate = str(
+        Path(stock_db_path).with_name("stock_analysis_benchmark_settlement.db")
+    )
+    if benchmark_enabled:
+        try:
+            benchmark_settlement = prepare_benchmark_settlement_db(
+                stock_db_path,
+                settlement_candidate,
+            )
+            if (
+                benchmark_settlement.get("ready") is True
+                and benchmark_settlement.get("source_unchanged") is True
+                and str(
+                    benchmark_settlement.get("settlement_quick_check") or ""
+                ).strip().lower() == "ok"
+            ):
+                settlement_stock_db_path = settlement_candidate
+            else:
+                logger.warning(
+                    "[V8] benchmark settlement clone unavailable; Alpha gates remain "
+                    "observation-only for missing benchmark rows: %s",
+                    benchmark_settlement,
+                )
+        except Exception as exc:
+            benchmark_settlement = {
+                "version": "v6-benchmark-settlement-clone-v1",
+                "status": "degraded",
+                "ready": False,
+                "reason": "exception",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            logger.warning(
+                "[V8] benchmark settlement hydration failed; continuing V6 without "
+                "blocking report/notification: %s",
+                benchmark_settlement["error"],
+            )
+
+    maturation = mature_normalized_outcomes(store, settlement_stock_db_path)
+    benchmark_repair = backfill_missing_benchmark_outcomes(
+        store,
+        settlement_stock_db_path,
+    )
     accuracy_lab = run_normalized_accuracy_lab(
         v6_db_path,
-        stock_db_path,
+        settlement_stock_db_path,
         report_dir=report_dir,
         active_engine_version=engine.version,
         min_samples=max(3, int(min_samples)),
@@ -369,6 +424,15 @@ def run(
         "skipped_unusable": skipped_unusable,
         "new_outcomes": maturation["evaluated"],
         "not_yet_mature": maturation["not_yet_mature"],
+        "benchmark_settlement_enabled": benchmark_enabled,
+        "benchmark_settlement_status": benchmark_settlement.get("status"),
+        "benchmark_settlement_ready": bool(
+            benchmark_settlement.get("ready")
+        ),
+        "benchmark_source_unchanged": benchmark_settlement.get(
+            "source_unchanged"
+        ),
+        "benchmark_alpha_repair": benchmark_repair,
         "accuracy_lab_status": accuracy_lab.get("status"),
         "new_shadow_forecasts": lab_run.get("new_shadow_forecasts", 0),
         "new_shadow_outcomes": lab_run.get("new_shadow_outcomes", 0),

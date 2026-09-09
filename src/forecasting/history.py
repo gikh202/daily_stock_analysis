@@ -479,6 +479,7 @@ class ForecastHistory:
         """
         empty = {
             "samples": 0,
+            "scope": "global",
             "positive_rate": None,
             "majority_baseline_accuracy": None,
             "base_rate_brier_score": None,
@@ -491,6 +492,12 @@ class ForecastHistory:
             "challenger_inverse_direction_accuracy": None,
             "champion_inverse_direction_skill": None,
             "challenger_inverse_direction_skill": None,
+            "champion_signal_samples": 0,
+            "challenger_signal_samples": 0,
+            "champion_signal_accuracy": None,
+            "challenger_signal_accuracy": None,
+            "champion_signal_coverage": None,
+            "challenger_signal_coverage": None,
             "champion_bullish_samples": 0,
             "challenger_bullish_samples": 0,
             "champion_bullish_positive_alpha_rate": None,
@@ -504,12 +511,15 @@ class ForecastHistory:
         }
         if _valid_date(as_of_date) is None:
             return dict(empty)
-        rows = self._metric_rows(
+        all_rows = self._rows(
             as_of_date=as_of_date,
             horizon_days=horizon_days,
-            regime=regime,
+        )
+        rows, scope, _ = self._hierarchical_scope(
+            all_rows,
             symbol=symbol,
             instrument_type=instrument_type,
+            regime=regime,
         )
         paired: list[tuple[float, float, int, float | None]] = []
         for row in rows:
@@ -527,7 +537,7 @@ class ForecastHistory:
                 )
             )
         if not paired:
-            return dict(empty)
+            return {**empty, "scope": scope}
 
         n = len(paired)
         positive_rate = sum(y for _, _, y, _ in paired) / n
@@ -544,6 +554,32 @@ class ForecastHistory:
         challenger_accuracy = challenger_hits / n
         champion_inverse_accuracy = champion_inverse_hits / n
         challenger_inverse_accuracy = challenger_inverse_hits / n
+        champion_signal_rows = [
+            (p, y)
+            for p, _, y, _ in paired
+            if p >= 0.58 or p <= 0.42
+        ]
+        challenger_signal_rows = [
+            (p, y)
+            for _, p, y, _ in paired
+            if p >= 0.58 or p <= 0.42
+        ]
+        champion_signal_accuracy = (
+            None
+            if not champion_signal_rows
+            else statistics.fmean(
+                int((p >= 0.50) == bool(y))
+                for p, y in champion_signal_rows
+            )
+        )
+        challenger_signal_accuracy = (
+            None
+            if not challenger_signal_rows
+            else statistics.fmean(
+                int((p >= 0.50) == bool(y))
+                for p, y in challenger_signal_rows
+            )
+        )
         champion_bullish_alphas = [
             alpha
             for champion_p, _, _, alpha in paired
@@ -557,6 +593,7 @@ class ForecastHistory:
 
         return {
             "samples": n,
+            "scope": scope,
             "positive_rate": positive_rate,
             "majority_baseline_accuracy": majority_baseline,
             "base_rate_brier_score": statistics.fmean(
@@ -577,6 +614,12 @@ class ForecastHistory:
             "challenger_inverse_direction_skill": (
                 challenger_inverse_accuracy - majority_baseline
             ),
+            "champion_signal_samples": len(champion_signal_rows),
+            "challenger_signal_samples": len(challenger_signal_rows),
+            "champion_signal_accuracy": champion_signal_accuracy,
+            "challenger_signal_accuracy": challenger_signal_accuracy,
+            "champion_signal_coverage": len(champion_signal_rows) / n,
+            "challenger_signal_coverage": len(challenger_signal_rows) / n,
             "champion_bullish_samples": len(champion_bullish_alphas),
             "challenger_bullish_samples": len(challenger_bullish_alphas),
             "champion_bullish_positive_alpha_rate": (
@@ -629,6 +672,9 @@ class ForecastHistory:
         min_direction_accuracy: float = 0.52,
         min_direction_skill: float = 0.02,
         min_direction_improvement: float = 0.01,
+        min_signal_samples: int | None = None,
+        min_signal_accuracy: float = 0.55,
+        min_signal_improvement: float = 0.005,
         min_bullish_alpha_samples: int = 30,
         min_bullish_positive_alpha_rate: float = 0.52,
         min_bullish_mean_alpha_pct: float = 0.10,
@@ -645,6 +691,9 @@ class ForecastHistory:
             "samples": paired["samples"],
             "direction_accuracy": paired["champion_direction_accuracy"],
             "direction_skill": paired["champion_direction_skill"],
+            "signal_samples": paired["champion_signal_samples"],
+            "signal_accuracy": paired["champion_signal_accuracy"],
+            "signal_coverage": paired["champion_signal_coverage"],
             "brier_score": paired["champion_brier_score"],
             "log_loss": paired["champion_log_loss"],
             "bullish_samples": paired["champion_bullish_samples"],
@@ -657,6 +706,9 @@ class ForecastHistory:
             "samples": paired["samples"],
             "direction_accuracy": paired["challenger_direction_accuracy"],
             "direction_skill": paired["challenger_direction_skill"],
+            "signal_samples": paired["challenger_signal_samples"],
+            "signal_accuracy": paired["challenger_signal_accuracy"],
+            "signal_coverage": paired["challenger_signal_coverage"],
             "brier_score": paired["challenger_brier_score"],
             "log_loss": paired["challenger_log_loss"],
             "bullish_samples": paired["challenger_bullish_samples"],
@@ -672,7 +724,17 @@ class ForecastHistory:
             "log_loss": paired["base_rate_log_loss"],
         }
 
+        signal_floor = (
+            max(5, min(50, int(min_promotion_samples) // 4))
+            if min_signal_samples is None
+            else max(1, int(min_signal_samples))
+        )
+        symbol_specific_scope = bool(
+            not str(symbol or "").strip()
+            or paired.get("scope") in {"symbol", "symbol_regime"}
+        )
         gates = {
+            "symbol_specific_scope": symbol_specific_scope,
             "enough_samples": paired["samples"] >= int(min_promotion_samples),
             "direction_accuracy_floor": bool(
                 challenger["direction_accuracy"] is not None
@@ -687,6 +749,27 @@ class ForecastHistory:
                 and champion["direction_accuracy"] is not None
                 and challenger["direction_accuracy"]
                 >= champion["direction_accuracy"] + float(min_direction_improvement)
+            ),
+            "beats_inverse_signal": bool(
+                challenger["direction_accuracy"] is not None
+                and paired.get("challenger_inverse_direction_accuracy") is not None
+                and challenger["direction_accuracy"]
+                > paired["challenger_inverse_direction_accuracy"]
+            ),
+            "signal_sample_floor": (
+                int(challenger["signal_samples"] or 0) >= signal_floor
+            ),
+            "signal_accuracy_floor": bool(
+                challenger["signal_accuracy"] is not None
+                and challenger["signal_accuracy"] >= float(min_signal_accuracy)
+            ),
+            "beats_champion_signal": bool(
+                challenger["signal_accuracy"] is not None
+                and (
+                    champion["signal_accuracy"] is None
+                    or challenger["signal_accuracy"]
+                    >= champion["signal_accuracy"] + float(min_signal_improvement)
+                )
             ),
             "beats_champion_brier": bool(
                 challenger["brier_score"] is not None
@@ -767,6 +850,9 @@ class ForecastHistory:
             "min_direction_accuracy": float(min_direction_accuracy),
             "min_direction_skill": float(min_direction_skill),
             "min_direction_improvement": float(min_direction_improvement),
+            "min_signal_samples": signal_floor,
+            "min_signal_accuracy": float(min_signal_accuracy),
+            "min_signal_improvement": float(min_signal_improvement),
             "min_bullish_alpha_samples": int(min_bullish_alpha_samples),
             "min_bullish_positive_alpha_rate": float(
                 min_bullish_positive_alpha_rate
@@ -778,13 +864,19 @@ class ForecastHistory:
             "evaluation_basis": (
                 "paired_forward_only_vs_champion_majority_and_base_rate"
             ),
+            "promotion_gate_version": "v8-symbol-horizon-strong-signal.1",
             "scope_policy": "symbol_to_instrument_type_to_regime_to_global",
+            "promotion_scope_policy": (
+                "symbol_or_symbol_regime_only_for_symbol_specific_promotion"
+            ),
+            "evaluation_scope": paired.get("scope"),
             "paired_samples": paired["samples"],
             "baseline_metrics": baseline,
             "champion_metrics": champion,
             "challenger_metrics": challenger,
             "promotion_gates": gates,
             "blocked_reasons": blocked_reasons,
+            "promotion_failures": blocked_reasons,
             "reverse_signal_shadow": {
                 "production_enabled": False,
                 "challenger_inverse_direction_accuracy": paired.get(

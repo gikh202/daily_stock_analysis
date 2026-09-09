@@ -12,6 +12,7 @@ on:
       - 'tests/test_v73_forecast_maturity_threshold.py'
       - 'tests/test_v7_model_identity.py'
       - 'tests/test_forecast_engine_ab_metrics.py'
+      - 'tests/test_v8_forecast_promotion_scope.py'
       - '.github/workflows/03-forecast-engine-ab-walk-forward.yml'
   workflow_dispatch:
 
@@ -63,7 +64,8 @@ jobs:
           pytest -q --noconftest \
             tests/test_v73_forecast_maturity_threshold.py \
             tests/test_v7_model_identity.py \
-            tests/test_forecast_engine_ab_metrics.py
+            tests/test_forecast_engine_ab_metrics.py \
+            tests/test_v8_forecast_promotion_scope.py
 
       - name: Restore latest production source database
         uses: actions/cache/restore@v5
