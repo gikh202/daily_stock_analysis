@@ -81,6 +81,7 @@ class OpenTimingDecision:
     entry_touch_score: float | None = None
     entry_ev_score: float | None = None
     entry_candidates: tuple[dict[str, Any], ...] = ()
+    market_regime: str | None = None
 
 
 def _finite(value: Any) -> float | None:
@@ -392,6 +393,7 @@ def _to_open_decision(
         entry_touch_score=optimization.touch_score,
         entry_ev_score=optimization.expected_value_score,
         entry_candidates=tuple(item.to_dict() if hasattr(item, "to_dict") else asdict(item) for item in optimization.candidates),
+        market_regime=str(packet.get("_market_regime") or "") or None,
         **common,
     )
 
