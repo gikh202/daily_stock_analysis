@@ -1,4 +1,4 @@
-name: V7.3 Forecast Engine AB Walk-Forward
+name: V8 Forecast Promotion AB Walk-Forward
 
 on:
   pull_request:
@@ -10,6 +10,8 @@ on:
       - 'scripts/backfill_v6_accuracy_history.py'
       - 'src/v6_daily/research_backfill.py'
       - 'tests/test_v73_forecast_maturity_threshold.py'
+      - 'tests/test_v7_forecast_calibration.py'
+      - 'tests/test_forecast_oos_metrics.py'
       - '.github/workflows/03-forecast-engine-ab-walk-forward.yml'
   workflow_dispatch:
 
@@ -29,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Checkout V7.3 candidate
+      - name: Checkout V8 candidate
         uses: actions/checkout@v5
         with:
           path: head
@@ -55,10 +57,13 @@ jobs:
           pip install -c head/constraints-production.txt -r head/requirements.txt
           python -m pip install --disable-pip-version-check pytest
 
-      - name: Run Forecast maturity threshold tests
+      - name: Run Forecast promotion contract tests
         run: |
           cd head
-          pytest -q --noconftest tests/test_v73_forecast_maturity_threshold.py
+          pytest -q --noconftest \
+            tests/test_v73_forecast_maturity_threshold.py \
+            tests/test_v7_forecast_calibration.py \
+            tests/test_forecast_oos_metrics.py
 
       - name: Restore latest production source database
         uses: actions/cache/restore@v5
@@ -165,7 +170,7 @@ jobs:
           print('AB harness optimization: PASS (date-scoped history cache + replay indexes)')
           PY
 
-      - name: Run V7.1 vs V7.3 strict 3-year walk-forward AB
+      - name: Run V7.1 vs V8 strict 3-year walk-forward AB
         shell: bash
         run: |
           python head/scripts/run_forecast_engine_ab_walk_forward.py \
