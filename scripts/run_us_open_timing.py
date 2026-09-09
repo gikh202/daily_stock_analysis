@@ -26,7 +26,7 @@ from src.forecasting.regime_policy import load_regime_timing_policy
 
 logger = logging.getLogger("us_open_timing")
 NY = ZoneInfo("America/New_York")
-POLICY_VERSION = "us-open-timing-v7.6"
+POLICY_VERSION = "us-open-timing-v8.0"
 ACTION_LABELS = {
     "BUY_NOW": "现在可以买（首仓）",
     "WAIT_BETTER_ENTRY": "等更好买点",
@@ -96,6 +96,10 @@ class OpenTimingDecision:
     historical_hit_rate_5d: float | None = None
     majority_baseline_5d: float | None = None
     calibration_scope_5d: str | None = None
+    price_source: str | None = None
+    bar_close_price: float | None = None
+    quote_price: float | None = None
+    price_validation: str | None = None
 
 
 def _finite(value: Any) -> float | None:
@@ -379,6 +383,10 @@ def _to_open_decision(
         historical_hit_rate_5d=_finite(forecast["meta5"]["hit"]),
         majority_baseline_5d=_finite(forecast["meta5"]["baseline"]),
         calibration_scope_5d=forecast["meta5"]["scope"],
+        price_source=(snapshot.price_source if snapshot is not None else None),
+        bar_close_price=(snapshot.bar_close_price if snapshot is not None else None),
+        quote_price=(snapshot.quote_price if snapshot is not None else None),
+        price_validation=(snapshot.price_validation if snapshot is not None else None),
     )
     if snapshot is None:
         return OpenTimingDecision(
@@ -587,15 +595,15 @@ def render_markdown(
         lines.append(f"- **上一收盘决策来源**：run `{source_run_id}`")
     lines += [
         "",
-        "| 标的 | 收盘授权 | 方向信号 | 执行动作 | 当前价 | 5D可靠度 | 理想买点 | 可接受区 | 禁止追价 |",
-        "|---|---|---|---|---:|---|---:|---:|---:|",
+        "| 标的 | 收盘授权 | 方向信号 | 执行动作 | 当前价 | 价格源 | 5D可靠度 | 理想买点 | 可接受区 | 禁止追价 |",
+        "|---|---|---|---|---:|---|---|---:|---:|---:|",
     ]
     for item in decisions:
         lines.append(
             f"| {item.symbol} | **{_execution_label(item.execution_status)}** | "
             f"**{_direction_label(item.direction_signal)}** | **{item.label}** | "
-            f"{_money(item.current_price)} | {_reliability_text(item)} | "
-            f"{_money(item.ideal_entry_price)} | "
+            f"{_money(item.current_price)} | {item.price_source or 'N/A'} | "
+            f"{_reliability_text(item)} | {_money(item.ideal_entry_price)} | "
             f"{_money_range(item.acceptable_entry_low, item.acceptable_entry_high)} | "
             f"{_money(item.no_chase_above)} |"
         )
@@ -608,6 +616,12 @@ def render_markdown(
             f"- **当前判断**：{item.reason}",
             f"- **方向信号**：{_direction_label(item.direction_signal)}；5D可靠度：{_reliability_text(item)}",
             f"- **当前价**：{_money(item.current_price)}；较开盘 {_pct(item.return_from_open_pct)}",
+            (
+                f"- **行情校验**：来源 `{item.price_source or 'N/A'}`；"
+                f"1m close {_money(item.bar_close_price)}；quote {_money(item.quote_price)}；"
+                f"状态 `{item.price_validation or 'N/A'}`；"
+                f"最新 1m bar `{item.source_last_bar_time or 'N/A'}`"
+            ),
             f"- **研究倾向（不等于交易信号）**：1D {_pct(item.probability_up_1d, probability=True)} / 5D {_pct(item.probability_up_5d, probability=True)} / 20D {_pct(item.probability_up_20d, probability=True)}；5D 期望收益 {_pct(item.expected_return_5d_pct)}；5D 相对 SPY Alpha {_pct(item.expected_alpha_5d_pct)}",
             f"- **择时**：更好买点启发式评分（未校准） {_pct(item.better_entry_score, probability=True)}；预计可改善 {item.expected_improvement_pct:.2f}%；参考更优价 {_money(item.expected_better_price)}",
         ]
@@ -731,6 +745,8 @@ def _signature(decisions: Sequence[OpenTimingDecision]) -> str:
             "price_state": _semantic_price_state(
                 item.current_price, item.entry_low, item.entry_high, item.stop_loss
             ),
+            "price_source": item.price_source,
+            "price_validation": item.price_validation,
         }
         for item in decisions
     ]
@@ -879,7 +895,7 @@ def run(
         },
     }
     payload = {
-        "version": "us-open-timing-v7.6",
+        "version": "us-open-timing-v8.0",
         "policy_version": POLICY_VERSION,
         "better_entry_metric": {
             "field": "better_entry_score",
@@ -929,7 +945,7 @@ def run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="V7.6 U.S. open timing with direction-skill quarantine and three-state execution authorization"
+        description="V8.0 U.S. open timing with validated live prices, direction-skill quarantine and three-state execution authorization"
     )
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")
