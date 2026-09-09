@@ -73,3 +73,63 @@ def test_outcome_compares_optimized_entry_with_immediate():
     assert outcome["minutes_to_ideal_entry"] == pytest.approx(6.0)
     assert outcome["ideal_entry_policy_return_pct"] > outcome["close_return_pct"]
     assert outcome["ideal_entry_alpha_vs_immediate_pct"] > 0
+
+
+def test_v3_ledger_migrates_to_v4_before_regime_index(tmp_path):
+    db = tmp_path / "legacy.db"
+    import sqlite3
+
+    legacy = sqlite3.connect(db)
+    legacy.execute(
+        """
+        CREATE TABLE us_open_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schema_version TEXT NOT NULL,
+            signal_key TEXT NOT NULL UNIQUE,
+            session_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            source_run_id TEXT,
+            source_trade_date TEXT,
+            evaluated_at TEXT NOT NULL,
+            signal_bar_time TEXT NOT NULL,
+            signal_price REAL NOT NULL,
+            decision_status TEXT NOT NULL,
+            packet_json TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            decision_json TEXT NOT NULL,
+            settled_at TEXT,
+            close_return_pct REAL,
+            return_60m_pct REAL,
+            mfe_pct REAL,
+            mae_pct REAL,
+            stop_hit INTEGER,
+            target1_hit INTEGER,
+            first_touch TEXT,
+            modeled_exit_return_pct REAL,
+            better_entry_hit INTEGER,
+            best_future_improvement_pct REAL,
+            minutes_to_reference_better_price REAL,
+            close_plan_json TEXT,
+            execution_transition TEXT,
+            outcome_json TEXT
+        )
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    with connect(db) as conn:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(us_open_signals)")
+        }
+        indexes = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA index_list(us_open_signals)")
+        }
+
+    assert "market_regime" in columns
+    assert "ideal_entry_hit" in columns
+    assert "ideal_entry_alpha_vs_immediate_pct" in columns
+    assert "ix_us_open_signals_regime" in indexes
