@@ -32,8 +32,8 @@ def test_workflow_crons_stay_aligned_with_timing_contract() -> None:
     # deliberately covers both EDT and EST and lets the runtime NYSE session
     # gate decide whether a delayed runner should actually execute.
     for cron in (
-        "30-35,45 13 * * 1-5",
-        "0,30-35,45 14 * * 1-5",
+        "30,35,40,45 13 * * 1-5",
+        "0,30,35,40,45 14 * * 1-5",
         "0,30 15-20 * * 1-5",
     ):
         assert f"cron: '{cron}'" in text
