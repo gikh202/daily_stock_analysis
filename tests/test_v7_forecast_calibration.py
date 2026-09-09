@@ -438,7 +438,7 @@ def _promotion_gate_db(
     for idx in range(1, 241):
         if mode == "strong_challenger":
             positive = idx % 2 == 0
-            champion_p = 0.55
+            champion_p = 0.60
             challenger_p = 0.70 if positive else 0.30
         elif mode == "better_calibration_no_skill":
             positive = idx % 10 < 7
@@ -516,7 +516,10 @@ def test_challenger_promotes_only_after_all_oos_skill_gates_pass(tmp_path: Path)
     assert selection["challenger_metrics"]["directional_accuracy"] == 1.0
     assert selection["challenger_metrics"]["direction_skill"] == 0.5
     assert selection["inverse_challenger_directional_accuracy"] == 0.0
-    assert selection["challenger_metrics"]["directional_alpha_pct"] == 1.0
+    assert selection["challenger_metrics"]["signal_accuracy"] == 1.0
+    assert selection["challenger_metrics"]["signal_samples"] == 240
+    assert selection["challenger_metrics"]["signal_directional_alpha_pct"] == 1.0
+    assert selection["challenger_metrics"]["signal_alpha_samples"] == 240
     assert all(selection["promotion_gates"].values())
     assert selection["promotion_failures"] == []
 
