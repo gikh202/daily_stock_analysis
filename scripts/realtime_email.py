@@ -36,7 +36,7 @@ def _smtp_settings(sender: str) -> tuple[str, int, bool]:
 def _inline_markdown(value: str) -> str:
     escaped = html.escape(str(value or ""), quote=False)
     escaped = re.sub(
-        r"**(.+?)**",
+        r"\*\*(.+?)\*\*",
         r"<strong>\1</strong>",
         escaped,
     )
