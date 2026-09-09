@@ -5,6 +5,7 @@ import sys
 from zoneinfo import ZoneInfo
 
 import sitecustomize
+from scripts.realtime_email import _markdown_html
 from scripts.run_us_open_confirmation_safe import _near_open_retry_seconds
 from scripts.run_us_open_timing import _semantic_price_state, _should_notify
 
@@ -144,3 +145,35 @@ def test_realtime_email_falls_back_to_sender_when_receivers_empty() -> None:
     assert "if not receiver_list:" in text
     assert "receiver_list = [sender]" in text
     assert 'raise RuntimeError("EMAIL_SENDER/EMAIL_PASSWORD are required")' in text
+
+
+def test_realtime_email_renders_structured_html_not_raw_markdown() -> None:
+    source = """# 美股盘中择时
+
+> 风险提示
+
+- **现在可以买**：1 只
+- 来源 run `123`
+
+| 标的 | 动作 | 当前价 |
+|---|---|---:|
+| MSFT | **可以买** | $100.00 |
+"""
+    rendered = _markdown_html(source)
+    assert "<pre" not in rendered
+    assert "<h1>美股盘中择时</h1>" in rendered
+    assert 'class="callout"' in rendered
+    assert "<strong>现在可以买</strong>" in rendered
+    assert "<code>123</code>" in rendered
+    assert "<table>" in rendered
+    assert "<th>标的</th>" in rendered
+    assert "<td>MSFT</td>" in rendered
+    assert "**" not in rendered
+    assert "|---|" not in rendered
+
+
+def test_realtime_open_report_never_renders_na_to_na_range() -> None:
+    text = TIMING_RUNNER.read_text(encoding="utf-8")
+    assert "def _money_range" in text
+    assert 'return "N/A"' in text
+    assert "_money_range(item.acceptable_entry_low, item.acceptable_entry_high)" in text
