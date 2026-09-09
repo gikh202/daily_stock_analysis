@@ -8,6 +8,13 @@ on:
     - cron: '30,35,40,45 13 * * 1-5'
     - cron: '0,30,35,40,45 14 * * 1-5'
     - cron: '0,30 15-20 * * 1-5'
+  # Deploy smoke: changing this workflow on main immediately exercises the same
+  # live-session gate, so a scheduling hotfix can be verified without waiting
+  # for the next cron candidate.
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/01-us-open-confirmation.yml'
   workflow_dispatch:
     inputs:
       force_resend:
