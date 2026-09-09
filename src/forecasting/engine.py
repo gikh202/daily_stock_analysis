@@ -489,6 +489,19 @@ class V7ForecastEngine:
                     "historical_direction_hit_rate": (
                         active_calibration.historical_direction_hit_rate
                     ),
+                    "historical_positive_rate": (
+                        active_calibration.historical_positive_rate
+                    ),
+                    "historical_majority_baseline_accuracy": (
+                        active_calibration.historical_majority_baseline_accuracy
+                    ),
+                    "historical_direction_skill": (
+                        None
+                        if active_calibration.historical_direction_hit_rate is None
+                        or active_calibration.historical_majority_baseline_accuracy is None
+                        else active_calibration.historical_direction_hit_rate
+                        - active_calibration.historical_majority_baseline_accuracy
+                    ),
                     "probability_semantics": probability_semantics,
                     "decision_weight": round(decision_weight, 4),
                     "evidence_confidence_semantics": (
