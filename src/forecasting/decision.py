@@ -7,8 +7,8 @@ from .models import ForecastBundle, ForecastDecision, ForecastHorizon
 
 
 MIN_MATURE_SAMPLES = 50
-MIN_DIRECTION_HIT_RATE = 0.45
-FULL_DIRECTION_HIT_RATE = 0.52
+MIN_DIRECTION_HIT_RATE = 0.52
+MIN_DIRECTION_SKILL = 0.02
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -26,22 +26,24 @@ def _clamp(value: float, low: float, high: float) -> float:
 def forecast_reliability_weight(horizon: ForecastHorizon) -> float:
     """Return a conservative trading weight for one forecast horizon.
 
-    V7.4 separates research tendency from tradable direction:
+    V7.5 separates research tendency from tradable direction:
     - fewer than 50 mature samples: zero trading weight;
-    - direction hit rate <45%: zero trading weight;
-    - 45%-52%: observation-only low weight;
-    - >=52%: sample-scaled trading weight.
+    - corrected direction hit rate <52%: zero trading weight;
+    - when a majority-class baseline is available, direction accuracy must beat
+      that baseline by at least 2 percentage points;
+    - only validated skill receives sample-scaled trading weight.
     """
     samples = max(0, int(horizon.calibration_samples or 0))
     status = str(horizon.calibration_status or "prior_only").strip().lower()
     hit_rate = horizon.historical_direction_hit_rate
+    baseline = horizon.historical_majority_baseline_accuracy
     if status != "mature" or samples < MIN_MATURE_SAMPLES:
         return 0.0
     if hit_rate is None or hit_rate < MIN_DIRECTION_HIT_RATE:
         return 0.0
+    if baseline is not None and hit_rate < baseline + MIN_DIRECTION_SKILL:
+        return 0.0
     sample_weight = min(1.0, samples / 100.0)
-    if hit_rate < FULL_DIRECTION_HIT_RATE:
-        return round(0.10 * sample_weight, 4)
     return round(sample_weight, 4)
 
 
@@ -97,7 +99,7 @@ def _effective_probability(horizon: ForecastHorizon, weight: float) -> float:
 class ForecastDecisionPolicy:
     """Convert calibrated distributions into a risk-bounded trade setup."""
 
-    version = "v7.4-decision-reliability-continuation.1"
+    version = "v7.5-decision-direction-skill.1"
 
     def decide(
         self,
