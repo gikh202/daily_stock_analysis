@@ -1,0 +1,110 @@
+name: V9 Trading Safety CI
+
+on:
+  pull_request:
+    paths:
+      - 'src/forecasting/**'
+      - 'src/alpha_engine/**'
+      - 'src/v6_daily/**'
+      - 'scripts/run_us_open_confirmation.py'
+      - 'scripts/run_us_open_confirmation_v2.py'
+      - 'scripts/run_us_open_timing.py'
+      - 'scripts/backtest_entry_optimizer.py'
+      - 'scripts/audit_feature_redundancy.py'
+      - 'scripts/capture_us_open_research.py'
+      - 'scripts/us_open_research_recording.py'
+      - 'scripts/run_v6_daily_stage11.py'
+      - 'tests/test_v9_*.py'
+      - '.github/CODEOWNERS'
+      - '.github/workflows/ci-v9-trading-safety.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/forecasting/**'
+      - 'src/alpha_engine/**'
+      - 'src/v6_daily/**'
+      - 'scripts/run_us_open_confirmation.py'
+      - 'scripts/run_us_open_confirmation_v2.py'
+      - 'scripts/run_us_open_timing.py'
+      - 'scripts/backtest_entry_optimizer.py'
+      - 'scripts/audit_feature_redundancy.py'
+      - 'scripts/capture_us_open_research.py'
+      - 'scripts/us_open_research_recording.py'
+      - 'scripts/run_v6_daily_stage11.py'
+      - 'tests/test_v9_*.py'
+      - '.github/CODEOWNERS'
+      - '.github/workflows/ci-v9-trading-safety.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v9-trading-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safety-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install focused test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pandas
+
+      - name: Compile safety-critical modules
+        run: |
+          python -m py_compile \
+            src/forecasting/strong_signal.py \
+            src/forecasting/production_engine.py \
+            src/alpha_engine/portfolio.py \
+            src/v6_daily/portfolio_context.py \
+            src/v6_daily/free_sources_v9.py \
+            src/v6_daily/production_runner_v9.py \
+            src/v6_daily/final_decision_service.py \
+            scripts/run_us_open_confirmation.py \
+            scripts/run_us_open_confirmation_v2.py \
+            scripts/run_us_open_timing.py \
+            scripts/backtest_entry_optimizer.py \
+            scripts/audit_feature_redundancy.py \
+            scripts/capture_us_open_research.py \
+            scripts/us_open_research_recording.py
+
+      - name: Run V9 safety regression suite
+        run: |
+          pytest -q \
+            tests/test_v9_execution_contract_and_open_volume.py \
+            tests/test_v9_entry_optimizer_execution.py \
+            tests/test_v9_feature_redundancy.py \
+            tests/test_v9_portfolio_context.py \
+            tests/test_v9_forecast_semantics.py
+
+      - name: Enforce production wiring invariants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          final_contract = Path('src/v6_daily/final_decision_service.py').read_text(encoding='utf-8')
+          open_v2 = Path('scripts/run_us_open_confirmation_v2.py').read_text(encoding='utf-8')
+          stage11 = Path('scripts/run_v6_daily_stage11.py').read_text(encoding='utf-8')
+          timing = Path('scripts/run_us_open_timing.py').read_text(encoding='utf-8')
+
+          required = {
+              'close contract HARD_REJECTED': 'HARD_REJECTED' in final_contract,
+              'close contract UNRESOLVED': 'UNRESOLVED' in final_contract,
+              'open hard-block enforcement': 'hard_block' in open_v2 and 'HARD_REJECTED' in open_v2,
+              'timing hard-block enforcement': 'HARD_REJECTED' in timing and 'NO_BUY' in timing,
+              'Stage11 portfolio wrapper': 'production_runner_v9' in stage11,
+          }
+          missing = [name for name, ok in required.items() if not ok]
+          if missing:
+              raise SystemExit('V9 production wiring invariant failed: ' + ', '.join(missing))
+          print('V9 trading safety wiring: PASS')
+          PY
