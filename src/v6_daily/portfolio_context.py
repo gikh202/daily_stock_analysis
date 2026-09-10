@@ -40,6 +40,13 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
 def _parse_object(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
@@ -93,6 +100,46 @@ def sector_map_from_analysis_records(
     return {code: value[1] for code, value in result.items()}
 
 
+def _sectors_from_db(
+    conn: sqlite3.Connection,
+    *,
+    symbols: Sequence[str],
+) -> dict[str, str]:
+    """Best-effort sector lookup from structured context snapshots already in production DB."""
+    if not symbols or "analysis_history" not in _tables(conn):
+        return {}
+    columns = _columns(conn, "analysis_history")
+    required = {"code", "context_snapshot"}
+    if not required.issubset(columns):
+        return {}
+    rank_expr = "created_at" if "created_at" in columns else "id" if "id" in columns else "rowid"
+    placeholders = ",".join("?" for _ in symbols)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT code,context_snapshot,{rank_expr} AS rank_value
+            FROM analysis_history
+            WHERE upper(code) IN ({placeholders})
+            ORDER BY rank_value DESC
+            """,
+            tuple(str(symbol).upper() for symbol in symbols),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    result: dict[str, str] = {}
+    for row in rows:
+        code = str(row["code"] or "").strip().upper()
+        if not code or code in result:
+            continue
+        context = _parse_object(row["context_snapshot"])
+        sector = str(
+            _find_value(context, ("sector", "sector_name", "industry_sector")) or ""
+        ).strip()
+        if sector:
+            result[code] = sector
+    return result
+
+
 def _account_equity_and_highwater(
     conn: sqlite3.Connection,
     account_ids: Sequence[int],
@@ -135,10 +182,8 @@ def load_portfolio_risk_context(
 ) -> PortfolioRiskContext:
     """Read active U.S. holdings into the deterministic V6 sizing overlay.
 
-    The function is read-only and fail-safe. Missing portfolio tables or an empty
-    portfolio never invent exposure; callers can record the unavailable state and
-    continue single-name research while the execution layer remains explicit about
-    the lack of portfolio-aware sizing.
+    Read-only and fail-safe. Existing exposure, aggregate gross exposure, sector
+    concentration and portfolio drawdown can only reduce the proposed new risk.
     """
     path = Path(db_path)
     method = str(cost_method or "fifo").strip().lower() or "fifo"
@@ -208,8 +253,14 @@ def load_portfolio_risk_context(
 
         gross_value = sum(by_symbol.values())
         denominator = equity if equity is not None and equity > 0 else gross_value
+        supplied_sectors = {
+            str(k).upper(): str(v)
+            for k, v in (sector_by_symbol or {}).items()
+            if str(v or "").strip()
+        }
+        inferred_sectors = _sectors_from_db(conn, symbols=tuple(by_symbol))
+        sectors = {**inferred_sectors, **supplied_sectors}
         positions: list[dict[str, Any]] = []
-        sectors = {str(k).upper(): str(v) for k, v in (sector_by_symbol or {}).items()}
         if denominator > 0:
             for symbol, value in sorted(by_symbol.items()):
                 positions.append(
@@ -230,9 +281,7 @@ def load_portfolio_risk_context(
         ):
             drawdown = max(0.0, (highwater - equity) / highwater * 100.0)
 
-        gross_pct = (
-            gross_value / denominator * 100.0 if denominator > 0 else None
-        )
+        gross_pct = gross_value / denominator * 100.0 if denominator > 0 else None
         return PortfolioRiskContext(
             status="available" if positions or equity is not None else "empty_portfolio",
             positions=tuple(positions),
@@ -251,6 +300,10 @@ def load_portfolio_risk_context(
                 ),
                 "snapshot_accounts": snapshot_accounts,
                 "drawdown_method": "sum_account_highwaters_vs_sum_current_equity",
+                "sector_labels_resolved": sum(
+                    bool(item.get("sector")) for item in positions
+                ),
+                "sector_source": "structured_analysis_history_with_optional_override",
             },
         )
     except sqlite3.Error as exc:
