@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from scripts.run_us_open_confirmation import LiveSnapshot
-from scripts.run_us_open_confirmation_v2 import classify_confirmation_v2
+from scripts.run_us_open_confirmation_v2 import _execution_contract, classify_confirmation_v2
 
 
 NY = ZoneInfo("America/New_York")
@@ -114,16 +114,19 @@ def test_conditional_approval_waits_above_declared_entry_price_instead_of_reject
     assert "$103.50" in decision.reason
 
 
-def test_explicit_rejected_is_context_when_live_plan_is_executable():
+def test_legacy_rejected_is_unresolved_context_when_live_plan_is_executable():
     packet = _packet(
         verdict="buy_by_plan",
         worth_buying=True,
         execution_authorized=True,
         execution_status="REJECTED",
     )
+    contract = _execution_contract(packet)
+    assert contract["status"] == "UNRESOLVED"
+    assert contract["hard_block"] is False
     decision = classify_confirmation_v2(packet, _snapshot(104.0), evaluated_at=_at())
     assert decision.status == "BUY_NOW"
-    assert "REJECTED" in decision.reason
+    assert "未决状态" in decision.reason
     assert "实时行情重新确认" in decision.reason
 
 
@@ -195,7 +198,7 @@ def test_late_runtime_uses_current_quote_instead_of_fixed_cutoff():
     assert decision.label != "确认已过时，暂不下单"
 
 
-def test_pre_0945_partial_volume_ratio_cannot_create_false_weak_volume_block():
+def test_pre_0945_matched_elapsed_volume_can_block_when_genuinely_weak():
     decision = classify_confirmation_v2(
         _packet(),
         _snapshot(
@@ -209,7 +212,9 @@ def test_pre_0945_partial_volume_ratio_cannot_create_false_weak_volume_block():
         ),
         evaluated_at=_at(9, 37),
     )
-    assert decision.status == "BUY_NOW"
+    # V9 no longer compares a partial current window with a full historical
+    # 15-minute window. A genuinely weak same-progress RVOL is valid evidence.
+    assert decision.status == "WAIT_STABILIZE"
 
 
 def test_same_day_plan_is_rejected_as_not_prior_close_plan():
