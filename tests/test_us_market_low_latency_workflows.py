@@ -32,6 +32,9 @@ def test_close_flash_is_separate_lightweight_and_delay_tolerant() -> None:
     assert "actions/cache/save@v5" in text
     assert "steps.dedupe.outputs.cache-hit != 'true'" in text
     assert "session_date" in text
+    assert "push:" in text
+    assert "branches: [main]" in text
+    assert "scripts/run_us_close_flash.py" in text
     assert "1645" not in text
 
 
