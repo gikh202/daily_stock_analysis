@@ -24,8 +24,14 @@ from scripts.run_us_open_confirmation import classify_confirmation as classify_v
 
 logger = logging.getLogger("us_open_confirmation_v2")
 NY = ZoneInfo("America/New_York")
-POLICY_VERSION = "us-open-confirmation-v2-runtime"
-_EXECUTION_STATUSES = {"FULL_APPROVED", "CONDITIONAL_APPROVED", "REJECTED"}
+POLICY_VERSION = "us-open-confirmation-v9-contract"
+_EXECUTION_STATUSES = {
+    "FULL_APPROVED",
+    "CONDITIONAL_APPROVED",
+    "UNRESOLVED",
+    "HARD_REJECTED",
+    "REJECTED",  # legacy: normalized to UNRESOLVED below
+}
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -41,36 +47,43 @@ def _finite(value: Any) -> float | None:
 
 
 def _execution_contract(packet: Mapping[str, Any]) -> dict[str, Any]:
-    """Resolve the V7.2 execution contract while preserving V7 compatibility.
+    """Resolve the execution contract with explicit hard-veto semantics.
 
-    New producers may place the contract in assessment, execution, or the
-    metadata.execution namespace. Older packets are mapped from the legacy
-    worth_buying/execution_authorized fields so the runtime remains backward
-    compatible during the rollout.
+    V9 separates an unresolved close decision from a hard rejection. Legacy
+    REJECTED packets predate that distinction and therefore map to UNRESOLVED;
+    only an explicit HARD_REJECTED produced by the V9 close layer survives as a
+    non-overridable open-layer blocker.
     """
     assessment = _mapping(packet.get("assessment"))
     execution = _mapping(packet.get("execution"))
+    root_contract = _mapping(packet.get("execution_contract"))
     metadata_execution = _mapping(_mapping(packet.get("metadata")).get("execution"))
 
     raw_status = (
         assessment.get("execution_status")
         or execution.get("execution_status")
+        or root_contract.get("status")
         or metadata_execution.get("status")
     )
-    status = str(raw_status or "").strip().upper()
-    explicit = status in _EXECUTION_STATUSES
+    raw_status_text = str(raw_status or "").strip().upper()
+    explicit = raw_status_text in _EXECUTION_STATUSES
+    legacy_status = raw_status_text == "REJECTED"
+    status = "UNRESOLVED" if legacy_status else raw_status_text
 
     if not explicit:
         worth_buying = assessment.get("worth_buying")
         authorized = bool(assessment.get("execution_authorized"))
-        if worth_buying is False:
-            status = "REJECTED"
-        elif worth_buying is True and authorized:
+        verdict = str(assessment.get("verdict") or "").strip().lower()
+        if authorized and worth_buying is True:
             status = "FULL_APPROVED"
         elif worth_buying is True:
             status = "CONDITIONAL_APPROVED"
+        elif verdict == "avoid":
+            # Old packets can still express an unambiguous hard veto through the
+            # final verdict even if they do not yet have the V9 status field.
+            status = "HARD_REJECTED"
         else:
-            status = "REJECTED"
+            status = "UNRESOLVED"
 
     conditional_price = _finite(
         assessment.get("conditional_entry_price")
@@ -85,10 +98,19 @@ def _execution_contract(packet: Mapping[str, Any]) -> dict[str, Any]:
         or metadata_execution.get("reason")
         or ""
     ).strip() or None
+    reject_reason_code = str(
+        assessment.get("reject_reason_code")
+        or root_contract.get("reject_reason_code")
+        or metadata_execution.get("reject_reason_code")
+        or ""
+    ).strip() or None
 
     return {
-        "status": status,
+        "status": status or "UNRESOLVED",
         "explicit": explicit,
+        "legacy_status": legacy_status,
+        "hard_block": status == "HARD_REJECTED",
+        "reject_reason_code": reject_reason_code,
         "conditional_entry_price": conditional_price,
         "conditional_entry_reason": conditional_reason,
     }
@@ -98,20 +120,18 @@ def _adapt_packet_for_execution_status(
     packet: Mapping[str, Any],
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Translate the V7.2 contract into the legacy fields consumed by V1.
+    """Translate the contract into the legacy fields consumed by V1.
 
-    This is deliberately one-way compatibility glue. It does not invent an
-    entry zone, stop, target, or position size. A conditional/full approval
-    without a complete legacy execution plan therefore remains non-actionable.
+    This is deliberately one-way compatibility glue. It never invents an entry
+    zone, stop, target, or position size. HARD_REJECTED is enforced separately
+    before the V1 result can be promoted by live price action.
     """
     adapted = dict(packet)
     assessment = dict(_mapping(packet.get("assessment")))
-    status = str(contract.get("status") or "REJECTED")
-
-    # V8.1: preserve the close packet's original verdict/worth_buying fields as
-    # historical context only. Do not rewrite them from execution_status, because
-    # that would make REJECTED indirectly re-create the old hard open veto.
+    status = str(contract.get("status") or "UNRESOLVED")
     assessment["execution_status"] = status
+    if contract.get("reject_reason_code"):
+        assessment["reject_reason_code"] = contract["reject_reason_code"]
     if contract.get("conditional_entry_price") is not None:
         assessment["conditional_entry_price"] = contract["conditional_entry_price"]
     if contract.get("conditional_entry_reason"):
@@ -134,17 +154,8 @@ def _parse_bar_time(value: str | None) -> datetime | None:
 
 
 def _runtime_snapshot(snapshot: LiveSnapshot) -> LiveSnapshot:
-    """Use only evidence that is comparable at the actual workflow runtime.
-
-    Before the first 15 regular-session bars are complete, the stored volume
-    ratio compares a partial current opening window with complete historical
-    15-minute windows. Treat that ratio as unavailable instead of letting the
-    scheduler's exact start minute create a false weak-volume signal. Price,
-    opening range, stops and quote freshness still use the latest available bar.
-    """
-    if snapshot.bar_count >= 15 or snapshot.volume_ratio is None:
-        return snapshot
-    return replace(snapshot, volume_ratio=None)
+    """The V9 snapshot already carries elapsed-window-matched opening RVOL."""
+    return snapshot
 
 
 def _opening_range_position(snapshot: LiveSnapshot) -> float:
@@ -200,12 +211,11 @@ def classify_confirmation_v2(
     starter_position_pct: float = 10.0,
     data_error: str | None = None,
 ) -> ConfirmationDecision:
-    """V2 intraday policy evaluated at the workflow's actual runtime.
+    """Intraday execution policy evaluated at the workflow's actual runtime.
 
-    The prior close packet supplies the existing plan and historical risk context,
-    but the open layer independently decides whether the plan is executable using
-    fresh market data. REJECTED is no longer an automatic intraday veto. The
-    intraday layer still never invents a new entry zone, stop, target, or position.
+    UNRESOLVED/legacy REJECTED close states are historical context that may be
+    upgraded by fresh data. HARD_REJECTED is different: it represents a durable
+    risk veto and cannot be cleared by price/VWAP/volume evidence alone.
     """
     evaluated = evaluated_at.astimezone(NY)
     runtime_snapshot = _runtime_snapshot(snapshot) if snapshot is not None else None
@@ -220,6 +230,19 @@ def classify_confirmation_v2(
         starter_position_pct=starter_position_pct,
         data_error=data_error,
     )
+
+    if contract["hard_block"]:
+        reason_code = contract.get("reject_reason_code") or "UNSPECIFIED_HARD_RISK"
+        return _with_status(
+            base,
+            status="NO_BUY",
+            label=STATUS_LABELS["NO_BUY"],
+            reason=(
+                f"上一收盘为 HARD_REJECTED（{reason_code}）；该风险否决只能由完整收盘/风险模型重新评估解除，"
+                "盘中价格、VWAP、量能或短线动量不得直接升级为买入。"
+            ),
+        )
+
     if runtime_snapshot is None:
         return base
 
@@ -286,9 +309,6 @@ def classify_confirmation_v2(
             ),
         )
 
-    # Incomplete plans remain hard blockers. Conditional approval only changes
-    # the meaning of the close-layer gate; it does not authorize inventing stops,
-    # targets, or position sizing intraday.
     if base.status not in {"BUY_NOW", "WAIT_PULLBACK"}:
         return base
 
@@ -308,8 +328,8 @@ def classify_confirmation_v2(
     if base.status == "BUY_NOW":
         if contract["status"] == "CONDITIONAL_APPROVED":
             prefix = "昨夜条件状态仅作背景且当前条件已满足；"
-        elif contract["status"] == "REJECTED":
-            prefix = "昨夜 REJECTED 仅作风险背景，本轮已按实时行情重新确认；"
+        elif contract["status"] == "UNRESOLVED":
+            prefix = "昨夜未决状态仅作历史背景，本轮已按实时行情重新确认；"
         else:
             prefix = ""
         candidate = _with_status(
@@ -350,7 +370,7 @@ def classify_confirmation_v2(
             reason=(
                 f"现价高于常规追价上限，但仍在 {momentum_chase_tolerance_pct:.2f}% 动量扩展内；"
                 f"较开盘 {runtime_snapshot.return_from_open_pct:+.2f}%、位于开盘确认区间 "
-                f"{range_position * 100:.0f}% 位置、量比 {runtime_snapshot.volume_ratio:.2f}x，"
+                f"{range_position * 100:.0f}% 位置、同进度开盘量比 {runtime_snapshot.volume_ratio:.2f}x，"
                 "满足严格动量例外，允许小仓首笔。"
             ),
         )
@@ -432,7 +452,6 @@ def run(
         generated_at=generated_at,
         source_run_id=source_run_id,
     )
-    # Add policy metadata without changing the stable v1 decision payload shape.
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     payload["policy_version"] = POLICY_VERSION
     payload["policy"] = {
@@ -445,8 +464,8 @@ def run(
         "momentum_min_volume_ratio": momentum_min_volume_ratio,
         "max_quote_age_minutes": max_quote_age_minutes,
         "evaluation_clock": "actual_runtime_et",
-        "early_partial_volume_ratio": "disabled_until_15_regular_session_bars",
-        "execution_contract": "v8.1_close_status_context_open_recheck",
+        "opening_volume_ratio": "elapsed_window_matched",
+        "execution_contract": "v9_unresolved_vs_hard_rejected",
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -468,7 +487,7 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Guarded U.S. open runtime execution confirmation v2")
+    parser = argparse.ArgumentParser(description="Guarded U.S. open runtime execution confirmation v9")
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")
     parser.add_argument("--source-run-id", default=os.getenv("OPEN_CONFIRMATION_SOURCE_RUN_ID"))
