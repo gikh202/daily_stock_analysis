@@ -8,6 +8,15 @@ on:
     - cron: '3,8,13,18,28 20 * * 1-5'
     - cron: '3,8,13,18,28 21 * * 1-5'
   workflow_dispatch:
+  # Deployment smoke/recovery: after a close-delivery fix lands on main, run the
+  # same gate immediately instead of waiting for the next scheduled candidate.
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/00a-us-close-flash.yml'
+      - 'scripts/run_us_close_flash.py'
+      - 'scripts/realtime_email.py'
+      - 'requirements-realtime.txt'
 
 permissions:
   contents: read
