@@ -43,6 +43,8 @@ def test_close_flash_script_accepts_completed_session_date() -> None:
     assert "--session-date" in text
     assert "yfinance_1m_completed_session" in text
     assert "target_date = session_date or now.date()" in text
+    assert "ROOT = Path(__file__).resolve().parents[1]" in text
+    assert "sys.path.insert(0, str(ROOT))" in text
 
 
 def test_open_path_is_lightweight_and_dense_at_open() -> None:
