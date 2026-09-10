@@ -14,9 +14,9 @@ from scripts.us_open_research_ledger import (
     _parse_dt,
     export_summary,
     record_intraday_bars,
-    record_signal,
     settle_pending,
 )
+from scripts.us_open_research_recording import record_signal
 
 NY = ZoneInfo("America/New_York")
 
@@ -26,15 +26,10 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _has_observable_wait_window(decision: Mapping[str, Any]) -> bool:
-    """Whether a WAIT decision has a real future automation window to settle.
-
-    At the final 12:00 ET production candidate the timing model may still prefer
-    waiting, but there is no later automated recheck.  Such a terminal WAIT must
-    stay visible in the user report while being excluded from realized WAIT-window
-    research; otherwise the ledger would silently fabricate a fallback horizon.
-    """
-
-    action = str(decision.get("action") or decision.get("status") or "").strip().upper()
+    """Whether a WAIT decision has a real future automation window to settle."""
+    action = str(
+        decision.get("action") or decision.get("status") or ""
+    ).strip().upper()
     if action not in {"WAIT_BETTER_ENTRY", "WAIT_CONFIRMATION"}:
         return True
     recheck = _finite(decision.get("expected_wait_minutes"))
@@ -74,24 +69,34 @@ def reconstruct_snapshot_from_frame(
     session = session.between_time("09:30", "16:00")
     if session.empty:
         raise ValueError(f"{symbol}: no session bars through {bar_time.isoformat()}")
+
     opening = session.between_time("09:30", "09:44")
-    if len(opening) < 5:
+    if len(opening) < 1:
         raise ValueError(f"{symbol}: opening window incomplete ({len(opening)} bars)")
+    elapsed_bars = min(15, len(opening))
+    current_elapsed = opening.head(elapsed_bars)
 
     session_open = _finite(session.iloc[0].get("Open"))
     if session_open is None or session_open <= 0:
         raise ValueError(f"{symbol}: invalid session open")
-    current_opening_volume = float(opening["Volume"].fillna(0).sum())
+
+    current_opening_volume = float(current_elapsed["Volume"].fillna(0).sum())
     prior_volumes: list[float] = []
-    prior_dates = sorted({item for item in frame.index.date if item < bar_time.date()}, reverse=True)
+    prior_dates = sorted(
+        {item for item in frame.index.date if item < bar_time.date()}, reverse=True
+    )
     for prior_date in prior_dates[:4]:
         prior = frame[frame.index.date == prior_date].between_time("09:30", "09:44")
-        if len(prior) < 10:
+        prior = prior.head(elapsed_bars)
+        if len(prior) < elapsed_bars:
             continue
         volume = _finite(prior["Volume"].fillna(0).sum())
         if volume is not None and volume > 0:
             prior_volumes.append(volume)
-    recent_median = median(prior_volumes) if prior_volumes else None
+
+    # Require at least two comparable prior sessions. Missing evidence remains
+    # unavailable instead of becoming a fabricated neutral volume signal.
+    recent_median = median(prior_volumes) if len(prior_volumes) >= 2 else None
     ratio = _finite(decision.get("volume_ratio"))
     if ratio is None and recent_median is not None and recent_median > 0:
         ratio = current_opening_volume / recent_median
@@ -102,14 +107,15 @@ def reconstruct_snapshot_from_frame(
         "session_open": session_open,
         "session_high": float(session["High"].max()),
         "session_low": float(session["Low"].min()),
-        "opening_15m_high": float(opening["High"].max()),
-        "opening_15m_low": float(opening["Low"].min()),
+        "opening_15m_high": float(current_elapsed["High"].max()),
+        "opening_15m_low": float(current_elapsed["Low"].min()),
         "return_from_open_pct": (
             _finite(decision.get("return_from_open_pct"))
             if _finite(decision.get("return_from_open_pct")) is not None
             else (current_price / session_open - 1.0) * 100.0
         ),
         "opening_15m_volume": current_opening_volume,
+        "opening_volume_elapsed_bars": elapsed_bars,
         "recent_opening_volume_median": recent_median,
         "volume_ratio": ratio,
         "bar_count": int(len(session)),
@@ -127,7 +133,9 @@ def capture(
     confirmation = json.loads(Path(confirmation_json).read_text(encoding="utf-8"))
     v6 = json.loads(Path(v6_payload).read_text(encoding="utf-8"))
     generated_at = _parse_dt(confirmation.get("generated_at")) or datetime.now(NY)
-    policy_version = str(confirmation.get("policy_version") or confirmation.get("version") or "unknown")
+    policy_version = str(
+        confirmation.get("policy_version") or confirmation.get("version") or "unknown"
+    )
     source_run_id = str(confirmation.get("source_run_id") or "") or None
 
     packets = {}
@@ -160,13 +168,13 @@ def capture(
             skipped_unobservable_wait += 1
             continue
         if decision.get("current_price") is None or not decision.get("source_last_bar_time"):
-            # DATA_UNAVAILABLE has no executable snapshot. Keep it in the email,
-            # but it cannot become a market-outcome research observation.
             continue
         try:
             frame = fetch_recent_history(symbol)
             record_intraday_bars(db, symbol=symbol, frame=frame)
-            snapshot = reconstruct_snapshot_from_frame(symbol=symbol, decision=decision, frame=frame)
+            snapshot = reconstruct_snapshot_from_frame(
+                symbol=symbol, decision=decision, frame=frame
+            )
             inserted = record_signal(
                 db,
                 packet=packet,
@@ -197,11 +205,16 @@ def capture(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Capture live US-open confirmation into persistent research ledger")
+    parser = argparse.ArgumentParser(
+        description="Capture live US-open confirmation into persistent research ledger"
+    )
     parser.add_argument("--confirmation-json", required=True)
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--db", required=True)
-    parser.add_argument("--summary-output", default="open_confirmation_reports/us_open_research_summary.json")
+    parser.add_argument(
+        "--summary-output",
+        default="open_confirmation_reports/us_open_research_summary.json",
+    )
     args = parser.parse_args()
     result = capture(
         confirmation_json=args.confirmation_json,
@@ -210,9 +223,6 @@ def main() -> int:
         summary_output=args.summary_output,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    # Research capture must never trigger a second user email via schedule retry.
-    # Partial failures remain visible in the uploaded summary/artifact and retry
-    # naturally on the next trading day.
     return 0
 
 
