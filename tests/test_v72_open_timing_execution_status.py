@@ -1,7 +1,19 @@
 from __future__ import annotations
 
-from scripts.run_us_open_confirmation import ConfirmationDecision
-from scripts.run_us_open_timing import _effective_timing_base, _execution_contract
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from scripts.run_us_open_confirmation import (
+    ConfirmationDecision,
+    LiveSnapshot,
+    classify_confirmation,
+)
+from scripts.run_us_open_confirmation_v2 import classify_confirmation_v2
+from scripts.run_us_open_timing import (
+    _effective_timing_base,
+    _enforce_execution_contract,
+    _execution_contract,
+)
 
 
 def _base(*, reason: str, status: str = "NO_BUY") -> ConfirmationDecision:
@@ -63,9 +75,74 @@ def test_conditional_approval_does_not_override_stale_plan_hard_blocker():
     assert "时效" in reason
 
 
-def test_rejected_contract_remains_hard_no_buy():
-    packet = {"assessment": {"execution_status": "REJECTED"}}
-    base = _base(reason="上一收盘执行状态为 REJECTED；风险层明确禁止建立新仓。")
-    status, reason = _effective_timing_base(packet, base)
-    assert status == "NO_BUY"
-    assert "REJECTED" in reason
+def _live_snapshot() -> LiveSnapshot:
+    return LiveSnapshot(
+        symbol="TEST",
+        current_price=100.0,
+        session_open=100.0,
+        session_high=101.0,
+        session_low=99.0,
+        opening_15m_high=101.0,
+        opening_15m_low=99.0,
+        return_from_open_pct=0.0,
+        opening_15m_volume=1000.0,
+        recent_opening_volume_median=1000.0,
+        volume_ratio=1.0,
+        bar_count=15,
+        last_bar_time="2026-09-09T09:44:00-04:00",
+    )
+
+
+def _rejected_but_complete_packet() -> dict:
+    return {
+        "identity": {
+            "symbol": "TEST",
+            "effective_trade_date": "2026-09-08",
+        },
+        "assessment": {
+            "execution_status": "REJECTED",
+            "execution_authorized": False,
+            "worth_buying": False,
+            "verdict": "avoid",
+        },
+        "execution": {
+            "entry_zone": [99.0, 101.0],
+            "stop_loss": 95.0,
+            "targets": [110.0],
+            "max_position_pct": 0.20,
+            "has_active_plan": True,
+            "confirmations": [],
+        },
+    }
+
+
+def test_rejected_close_status_is_context_not_v1_open_veto():
+    decision = classify_confirmation(
+        _rejected_but_complete_packet(),
+        _live_snapshot(),
+    )
+    assert decision.status == "BUY_NOW"
+    assert "仅作为历史风险背景" in decision.reason
+
+
+def test_rejected_close_status_is_context_not_v2_open_veto():
+    decision = classify_confirmation_v2(
+        _rejected_but_complete_packet(),
+        _live_snapshot(),
+        evaluated_at=datetime(
+            2026,
+            9,
+            9,
+            9,
+            45,
+            tzinfo=ZoneInfo("America/New_York"),
+        ),
+    )
+    assert decision.status == "BUY_NOW"
+    assert "REJECTED" in decision.reason
+    assert "实时行情重新确认" in decision.reason
+
+
+def test_final_execution_contract_does_not_override_live_action():
+    marker = object()
+    assert _enforce_execution_contract(marker) is marker
