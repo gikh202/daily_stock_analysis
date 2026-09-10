@@ -170,8 +170,15 @@ def _state(price: float, plan: Mapping[str, Any]) -> str:
     return "原计划无完整买入区，保持等待"
 
 
-def run(v6_payload: str | Path, *, notify: bool = True, now: datetime | None = None) -> dict[str, Any]:
+def run(
+    v6_payload: str | Path,
+    *,
+    notify: bool = True,
+    now: datetime | None = None,
+    session_date: date | None = None,
+) -> dict[str, Any]:
     now = (now or datetime.now(NY)).astimezone(NY)
+    target_date = session_date or now.date()
     packets, board = _load(v6_payload)
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -180,7 +187,7 @@ def run(v6_payload: str | Path, *, notify: bool = True, now: datetime | None = N
         if not symbol:
             continue
         try:
-            snap = _session(symbol, now)
+            snap = _session(symbol, now, session_date=target_date)
             plan = _plan(packet)
             fc = _forecast(board.get(symbol, {}))
             rows.append({"symbol": symbol, "snap": snap, "plan": plan, "forecast": fc})
@@ -191,7 +198,9 @@ def run(v6_payload: str | Path, *, notify: bool = True, now: datetime | None = N
         raise RuntimeError("close flash has no usable session data")
 
     lines = [
-        f"# 美股收盘快讯 · {now.strftime('%Y-%m-%d %H:%M ET')}",
+        f"# 美股收盘快讯 · {target_date.isoformat()} 收盘",
+        "",
+        f"- **生成时间**：{now.strftime('%Y-%m-%d %H:%M ET')}",
         "",
         "> 这是低延迟收盘快讯：先报告实际收盘位置与上一交易计划状态。完整 V4+V6/V7 深度日报随后发送。",
         "",
@@ -229,11 +238,17 @@ def run(v6_payload: str | Path, *, notify: bool = True, now: datetime | None = N
     report = "\n".join(lines) + "\n"
     if notify:
         send_realtime_email(
-            f"美股收盘快讯 {now.strftime('%Y-%m-%d')}",
+            f"美股收盘快讯 {target_date.isoformat()}",
             report,
             sender_name="AI 美股收盘快讯",
         )
-    return {"symbols": len(rows), "errors": errors, "report": report}
+    return {
+        "symbols": len(rows),
+        "errors": errors,
+        "session_date": target_date.isoformat(),
+        "generated_at": now.isoformat(),
+        "report": report,
+    }
 
 
 def main() -> int:
