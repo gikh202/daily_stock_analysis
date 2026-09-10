@@ -6,6 +6,7 @@ from dataclasses import asdict
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from src.alpha_engine import AlphaDecisionEngine, AlphaFeatureAdapter
+from src.alpha_engine.portfolio import PortfolioRiskOverlay
 from src.forecasting import ForecastDecisionPolicy, V7ForecastEngine
 from src.forecasting.decision import (
     forecast_reliability_weight,
@@ -17,7 +18,7 @@ from .accuracy import classify_instrument, enrich_features
 from .models import V6Signal
 
 
-V6_ENGINE_VERSION = "v7.4-forecast-execution-correction.1"
+V6_ENGINE_VERSION = "v9.0-portfolio-risk-contract.1"
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -158,15 +159,13 @@ def _reliability_aware_horizon_payload(horizon: Any) -> Dict[str, Any]:
     trading_direction = reliability_aware_direction(horizon)
     diagnostics["research_direction"] = raw_direction
     diagnostics["trading_direction"] = trading_direction
-    diagnostics["v74_reliability_weight"] = weight
+    diagnostics["v9_reliability_weight"] = weight
     diagnostics["direction_semantics"] = (
         "validated_trading_direction"
         if trading_direction == raw_direction and weight > 0.0
         else "research_tendency_not_trading_direction"
     )
     payload["diagnostics"] = diagnostics
-    # Preserve the raw research direction for forward outcome learning. Consumers
-    # that make execution decisions must use trading_direction / decision_weight.
     payload["direction"] = raw_direction
     payload["research_direction"] = raw_direction
     payload["trading_direction"] = trading_direction
@@ -175,12 +174,13 @@ def _reliability_aware_horizon_payload(horizon: Any) -> Dict[str, Any]:
 
 
 class V6DailyEngine:
-    """Compatibility daily orchestrator backed by the V7 forecast architecture."""
+    """Compatibility daily orchestrator backed by the V7/V9 forecast architecture."""
 
     version = V6_ENGINE_VERSION
 
     def __init__(self, *, history_db_path: str | None = None) -> None:
         self.alpha = AlphaDecisionEngine()
+        self.portfolio = PortfolioRiskOverlay()
         self.forecast = V7ForecastEngine(history_db_path=history_db_path)
         self.policy = ForecastDecisionPolicy()
 
@@ -190,6 +190,7 @@ class V6DailyEngine:
         *,
         primary_model: Optional[str] = None,
         external_context: Optional[Mapping[str, Any]] = None,
+        portfolio_context: Optional[Mapping[str, Any]] = None,
     ) -> Optional[V6Signal]:
         history_id = int(record.get("id") or 0)
         code = str(record.get("code") or "").strip().upper()
@@ -248,6 +249,43 @@ class V6DailyEngine:
             resistance=adapted.resistance,
             atr=adapted.atr,
         )
+
+        # Portfolio risk is applied *after* the forecast policy creates the final
+        # single-name plan. This prevents a later model layer from accidentally
+        # restoring position size that an earlier Alpha overlay had reduced.
+        portfolio = portfolio_context if isinstance(portfolio_context, Mapping) else {}
+        portfolio_status = str(portfolio.get("status") or "unavailable").strip().lower()
+        positions = portfolio.get("positions")
+        if not isinstance(positions, (list, tuple)):
+            positions = ()
+        drawdown = _finite(
+            portfolio.get("portfolio_drawdown_pct")
+            if "portfolio_drawdown_pct" in portfolio
+            else portfolio.get("drawdown_pct")
+        )
+        target_sector = str(
+            _find_value(context, ("sector", "sector_name", "industry_sector")) or ""
+        ).strip() or None
+        proposed_cap = max(0.0, _finite(trade_plan.get("max_position_pct")) or 0.0)
+        portfolio_cap, portfolio_reasons = self.portfolio.position_cap(
+            symbol=code,
+            proposed_max_position_pct=proposed_cap,
+            positions=positions,
+            target_sector=target_sector,
+            portfolio_drawdown_pct=drawdown,
+        )
+        if proposed_cap > 0.0:
+            trade_plan = dict(trade_plan)
+            trade_plan["pre_portfolio_max_position_pct"] = proposed_cap
+            trade_plan["max_position_pct"] = portfolio_cap
+            trade_plan["portfolio_risk_status"] = portfolio_status
+            trade_plan["portfolio_risk_reasons"] = list(portfolio_reasons)
+            if portfolio_cap <= 0.0:
+                trade_plan["action"] = "WAIT"
+                existing = list(trade_plan.get("invalidation") or [])
+                existing.extend(portfolio_reasons or ("portfolio risk capacity exhausted",))
+                trade_plan["invalidation"] = list(dict.fromkeys(existing))
+
         final_decision = str(
             trade_plan.get("action") or forecast_decision.decision
         ).upper()
@@ -262,6 +300,11 @@ class V6DailyEngine:
             for item in alpha.limitations
             if not str(item).startswith("trade-plan gate downgraded")
         ]
+        limitations.extend(portfolio_reasons)
+        if portfolio_status not in {"available", "empty_portfolio", "no_active_us_accounts"}:
+            limitations.append(
+                f"portfolio-aware exposure context unavailable ({portfolio_status}); only static single-name cap is enforceable"
+            )
         if primary.calibration_status == "prior_only":
             limitations.append(
                 "5d forecast is prior-only model tendency "
@@ -293,7 +336,7 @@ class V6DailyEngine:
             limitations.append("macro risk snapshot unavailable")
         if final_decision != forecast_decision.decision:
             limitations.append(
-                "trade-plan gate downgraded forecast decision "
+                "trade-plan/portfolio gate downgraded forecast decision "
                 f"{forecast_decision.decision}->{final_decision}"
             )
 
@@ -301,12 +344,24 @@ class V6DailyEngine:
             key: _reliability_aware_horizon_payload(value)
             for key, value in bundle.horizons.items()
         }
+        portfolio_diag = {
+            "status": portfolio_status,
+            "positions": len(positions),
+            "portfolio_drawdown_pct": drawdown,
+            "target_sector": target_sector,
+            "proposed_max_position_pct": proposed_cap,
+            "final_max_position_pct": portfolio_cap,
+            "reasons": list(portfolio_reasons),
+            "gross_exposure_pct": _finite(portfolio.get("gross_exposure_pct")),
+            "total_equity": _finite(portfolio.get("total_equity")),
+        }
         context_features = {
             "instrument_type": instrument_type,
             "effective_trade_date": effective_date,
             "market_regime": adapted.market_regime,
             "market_breadth": _market_breadth(context),
             "accuracy": accuracy_diag,
+            "portfolio_risk": portfolio_diag,
             "forecast_intelligence": {
                 "version": bundle.model_version,
                 "primary_horizon": bundle.primary_horizon,
@@ -317,10 +372,10 @@ class V6DailyEngine:
                 "horizons": horizon_payload,
                 "diagnostics": {
                     **bundle.diagnostics,
-                    "v74_primary_reliability_weight": primary_reliability_weight,
-                    "v74_research_direction": primary.direction,
-                    "v74_trading_direction": trading_direction,
-                    "v74_momentum_continuation_score": continuation_score,
+                    "v9_primary_reliability_weight": primary_reliability_weight,
+                    "v9_research_direction": primary.direction,
+                    "v9_trading_direction": trading_direction,
+                    "v9_momentum_continuation_score": continuation_score,
                 },
             },
         }
@@ -330,8 +385,6 @@ class V6DailyEngine:
             code=code,
             analysis_created_at=str(record.get("created_at") or ""),
             baseline_price=float(adapted.current_price),
-            # Persist raw direction so future outcomes can honestly measure whether
-            # the research forecast was right. Execution uses trading_direction.
             direction=primary.direction,
             forecast_score=primary.score,
             decision=final_decision,
@@ -367,6 +420,7 @@ class V6DailyEngine:
                 "research_direction": primary.direction,
                 "trading_direction": trading_direction,
                 "momentum_continuation_score": continuation_score,
+                "portfolio_risk": portfolio_diag,
                 "adapter": adapted.diagnostics,
                 "accuracy": accuracy_diag,
                 "alpha": alpha.diagnostics,
