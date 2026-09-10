@@ -2,9 +2,11 @@ name: 美股收盘极速快讯
 
 on:
   schedule:
-    # 16:00 ET candidates for both EDT and EST. Gate keeps only the true 16:00 window.
-    - cron: '0 20 * * 1-5'
-    - cron: '0 21 * * 1-5'
+    # Avoid the top-of-hour GitHub Actions congestion window. These candidates
+    # cover both EDT (20 UTC) and EST (21 UTC). The first completed run sends;
+    # later candidates are deduplicated by XNYS session date.
+    - cron: '3,8,13,18,28 20 * * 1-5'
+    - cron: '3,8,13,18,28 21 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -18,22 +20,32 @@ concurrency:
 jobs:
   close-flash:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
-      - name: Gate true 16:00 ET window
+      - name: Gate completed-close candidate
         id: gate
         shell: bash
         run: |
           NY_HM="$(TZ='America/New_York' date '+%H%M')"
           NY_WD="$(TZ='America/New_York' date '+%u')"
           RUN=false
+          REASON=outside_close_delivery_window
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             RUN=true
-          elif [ "$NY_WD" -le 5 ] && [ $((10#$NY_HM)) -ge 1600 ] && [ $((10#$NY_HM)) -le 1645 ]; then
+            REASON=manual_dispatch
+          elif [ "$NY_WD" -le 5 ] && [ $((10#$NY_HM)) -ge 1600 ]; then
             RUN=true
+            REASON=same_day_after_close
+          elif [ "$NY_WD" -ge 2 ] && [ "$NY_WD" -le 6 ] && [ $((10#$NY_HM)) -le 0600 ]; then
+            # GitHub scheduled workflows can be delayed by hours. If a close
+            # candidate starts after midnight ET, still deliver the latest
+            # completed XNYS session instead of silently skipping the email.
+            RUN=true
+            REASON=delayed_after_midnight_recovery
           fi
           echo "run=$RUN" >> "$GITHUB_OUTPUT"
-          echo "NY_HM=$NY_HM run=$RUN"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          echo "NY_HM=$NY_HM NY_WD=$NY_WD run=$RUN reason=$REASON"
 
       - name: Checkout
         if: ${{ steps.gate.outputs.run == 'true' }}
@@ -51,27 +63,49 @@ jobs:
         if: ${{ steps.gate.outputs.run == 'true' }}
         run: pip install -r requirements-realtime.txt
 
-      - name: Confirm XNYS trading session
+      - name: Resolve latest completed XNYS session
         id: session
         if: ${{ steps.gate.outputs.run == 'true' }}
         shell: bash
         run: |
           python - <<'PY'
           import os
-          from datetime import datetime
+          from datetime import datetime, timedelta
           from zoneinfo import ZoneInfo
-          import exchange_calendars as xcals
 
-          today = datetime.now(ZoneInfo('America/New_York')).date()
-          is_session = bool(xcals.get_calendar('XNYS').is_session(today))
+          import exchange_calendars as xcals
+          import pandas as pd
+
+          now = datetime.now(ZoneInfo('America/New_York'))
+          calendar = xcals.get_calendar('XNYS')
+          start = pd.Timestamp(now.date() - timedelta(days=10))
+          end = pd.Timestamp(now.date())
+          sessions = calendar.sessions_in_range(start, end)
+          target = None
+          now_ts = pd.Timestamp(now)
+          for session in sessions:
+              close_ts = calendar.session_close(session).tz_convert('America/New_York')
+              if close_ts <= now_ts:
+                  target = session
+          completed = target is not None
+          session_date = target.date().isoformat() if completed else ''
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
-              f.write(f"is_session={'true' if is_session else 'false'}\n")
-          print('XNYS', today, 'session=', is_session)
+              f.write(f"completed={'true' if completed else 'false'}\n")
+              f.write(f"session_date={session_date}\n")
+          print('XNYS completed session=', session_date or 'none', 'now=', now.isoformat())
           PY
+
+      - name: Restore close-delivery marker
+        id: dedupe
+        if: ${{ steps.session.outputs.completed == 'true' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: .close_flash_sent
+          key: us-close-flash-${{ runner.os }}-${{ steps.session.outputs.session_date }}
 
       - name: Find latest successful prior V6/V7 plan
         id: prior
-        if: ${{ steps.session.outputs.is_session == 'true' }}
+        if: ${{ steps.session.outputs.completed == 'true' && steps.dedupe.outputs.cache-hit != 'true' }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -95,7 +129,7 @@ jobs:
             core.info('Using V6/V7 run ' + run.id + ' created_at=' + run.created_at);
 
       - name: Download prior V6/V7 artifact
-        if: ${{ steps.session.outputs.is_session == 'true' && steps.prior.outputs.run_id != '' }}
+        if: ${{ steps.session.outputs.completed == 'true' && steps.dedupe.outputs.cache-hit != 'true' && steps.prior.outputs.run_id != '' }}
         uses: actions/download-artifact@v5
         with:
           pattern: v6-daily-*
@@ -106,7 +140,7 @@ jobs:
 
       - name: Locate prior payload
         id: payload
-        if: ${{ steps.session.outputs.is_session == 'true' }}
+        if: ${{ steps.session.outputs.completed == 'true' && steps.dedupe.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           PAYLOAD="$(find prior_v6 -type f -name 'v6_daily_latest.json' -print | sort | tail -n 1 || true)"
@@ -116,8 +150,9 @@ jobs:
           fi
           echo "path=$PAYLOAD" >> "$GITHUB_OUTPUT"
 
-      - name: Send immediate close flash
-        if: ${{ steps.session.outputs.is_session == 'true' }}
+      - name: Send close flash
+        id: send
+        if: ${{ steps.session.outputs.completed == 'true' && steps.dedupe.outputs.cache-hit != 'true' }}
         env:
           EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
@@ -125,13 +160,33 @@ jobs:
           SMTP_HOST: ${{ vars.SMTP_HOST || secrets.SMTP_HOST }}
           SMTP_PORT: ${{ vars.SMTP_PORT || secrets.SMTP_PORT }}
         run: |
-          python scripts/run_us_close_flash.py --v6-payload '${{ steps.payload.outputs.path }}'
+          python scripts/run_us_close_flash.py             --v6-payload '${{ steps.payload.outputs.path }}'             --session-date '${{ steps.session.outputs.session_date }}'
+
+      - name: Mark close flash delivered
+        if: ${{ steps.send.conclusion == 'success' }}
+        shell: bash
+        run: |
+          mkdir -p .close_flash_sent
+          printf '%s\n' '${{ steps.session.outputs.session_date }}' > .close_flash_sent/session_date.txt
+          printf '%s\n' '${{ github.run_id }}' > .close_flash_sent/run_id.txt
+
+      - name: Save close-delivery marker
+        if: ${{ steps.send.conclusion == 'success' }}
+        uses: actions/cache/save@v5
+        with:
+          path: .close_flash_sent
+          key: us-close-flash-${{ runner.os }}-${{ steps.session.outputs.session_date }}
+
+      - name: Report duplicate suppression
+        if: ${{ steps.session.outputs.completed == 'true' && steps.dedupe.outputs.cache-hit == 'true' }}
+        run: |
+          echo "Close flash for ${{ steps.session.outputs.session_date }} already delivered; duplicate candidate suppressed."
 
       - name: Upload close flash
-        if: ${{ always() && steps.session.outputs.is_session == 'true' }}
+        if: ${{ always() && steps.send.conclusion == 'success' }}
         uses: actions/upload-artifact@v6
         with:
-          name: us-close-flash-${{ github.run_id }}-${{ github.run_attempt }}
+          name: us-close-flash-${{ steps.session.outputs.session_date }}-${{ github.run_id }}
           path: close_flash_reports/
           if-no-files-found: warn
           retention-days: 30
