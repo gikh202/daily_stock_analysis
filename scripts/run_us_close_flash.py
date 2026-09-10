@@ -84,15 +84,26 @@ def _session(
     op = _finite(first.get("Open"))
     if op is None or op <= 0:
         raise RuntimeError("invalid session open")
-    (
-        close,
-        price_source,
-        bar_close,
-        quote_price,
-        validation,
-        quote_day_low,
-        quote_day_high,
-    ) = _validated_live_price(ticker, session, symbol)
+    if target_date == now.date():
+        (
+            close,
+            price_source,
+            bar_close,
+            quote_price,
+            validation,
+            quote_day_low,
+            quote_day_high,
+        ) = _validated_live_price(ticker, session, symbol)
+    else:
+        close = _finite(session.iloc[-1].get("Close"))
+        if close is None or close <= 0:
+            raise RuntimeError("invalid completed-session close")
+        price_source = "yfinance_1m_completed_session"
+        bar_close = close
+        quote_price = None
+        validation = "completed_session_bar"
+        quote_day_low = None
+        quote_day_high = None
     return {
         "price": close,
         "open": op,
