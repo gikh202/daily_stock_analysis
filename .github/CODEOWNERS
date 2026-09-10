@@ -1,1 +1,16 @@
 * @ZhuLinsen
+
+# Trading/forecast/risk paths require explicit review from the repository owner.
+/src/forecasting/** @gikh202 @ZhuLinsen
+/src/alpha_engine/** @gikh202 @ZhuLinsen
+/src/v6_daily/engine.py @gikh202 @ZhuLinsen
+/src/v6_daily/final_decision_service.py @gikh202 @ZhuLinsen
+/src/v6_daily/portfolio_context.py @gikh202 @ZhuLinsen
+/src/v6_daily/production_runner_v9.py @gikh202 @ZhuLinsen
+/scripts/run_us_open_confirmation.py @gikh202 @ZhuLinsen
+/scripts/run_us_open_confirmation_v2.py @gikh202 @ZhuLinsen
+/scripts/run_us_open_timing.py @gikh202 @ZhuLinsen
+/scripts/backtest_entry_optimizer.py @gikh202 @ZhuLinsen
+/scripts/us_open_research_recording.py @gikh202 @ZhuLinsen
+/.github/workflows/*us-open* @gikh202 @ZhuLinsen
+/.github/workflows/ci-v9-trading-safety.yml @gikh202 @ZhuLinsen
