@@ -254,10 +254,24 @@ def run(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Low-latency US close flash")
     parser.add_argument("--v6-payload", required=True)
+    parser.add_argument(
+        "--session-date",
+        default="",
+        help="Completed XNYS session date YYYY-MM-DD; defaults to current NY date.",
+    )
     parser.add_argument("--output", default="close_flash_reports/us_close_flash_latest.md")
     parser.add_argument("--no-notify", action="store_true")
     args = parser.parse_args()
-    result = run(args.v6_payload, notify=not args.no_notify)
+    parsed_session_date = (
+        date.fromisoformat(args.session_date)
+        if str(args.session_date or "").strip()
+        else None
+    )
+    result = run(
+        args.v6_payload,
+        notify=not args.no_notify,
+        session_date=parsed_session_date,
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(result["report"], encoding="utf-8")
