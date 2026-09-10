@@ -7,7 +7,7 @@ import logging
 import math
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from statistics import pstdev
@@ -26,7 +26,7 @@ from src.forecasting.regime_policy import load_regime_timing_policy
 
 logger = logging.getLogger("us_open_timing")
 NY = ZoneInfo("America/New_York")
-POLICY_VERSION = "us-open-timing-v8.0"
+POLICY_VERSION = "us-open-timing-v9.0"
 ACTION_LABELS = {
     "BUY_NOW": "现在可以买（首仓）",
     "WAIT_BETTER_ENTRY": "等更好买点",
@@ -38,7 +38,9 @@ ACTION_LABELS = {
 EXECUTION_STATUS_LABELS = {
     "FULL_APPROVED": "完全批准",
     "CONDITIONAL_APPROVED": "条件批准",
-    "REJECTED": "风险拒绝",
+    "UNRESOLVED": "未决，可重新确认",
+    "HARD_REJECTED": "硬风险拒绝",
+    "REJECTED": "旧版未决",
 }
 DIRECTION_SIGNAL_LABELS = {
     "BULLISH": "看涨",
@@ -77,7 +79,7 @@ class OpenTimingDecision:
     terminal: bool
     source_trade_date: str | None
     source_last_bar_time: str | None
-    execution_status: str = "REJECTED"
+    execution_status: str = "UNRESOLVED"
     conditional_entry_price: float | None = None
     conditional_entry_reason: str | None = None
     ideal_entry_price: float | None = None
@@ -120,16 +122,31 @@ def _sequence(value: Any) -> Sequence[Any]:
 
 def _execution_contract(packet: Mapping[str, Any]) -> dict[str, Any]:
     assessment = _mapping(packet.get("assessment"))
-    raw_status = str(assessment.get("execution_status") or "").strip().upper()
-    if raw_status not in EXECUTION_STATUS_LABELS:
+    root_contract = _mapping(packet.get("execution_contract"))
+    raw_status = str(
+        assessment.get("execution_status") or root_contract.get("status") or ""
+    ).strip().upper()
+    if raw_status == "REJECTED":
+        raw_status = "UNRESOLVED"
+    if raw_status not in {"FULL_APPROVED", "CONDITIONAL_APPROVED", "UNRESOLVED", "HARD_REJECTED"}:
+        verdict = str(assessment.get("verdict") or "").strip().lower()
         if bool(assessment.get("execution_authorized")):
             raw_status = "FULL_APPROVED"
         elif assessment.get("worth_buying") is True:
             raw_status = "CONDITIONAL_APPROVED"
+        elif verdict == "avoid":
+            raw_status = "HARD_REJECTED"
         else:
-            raw_status = "REJECTED"
+            raw_status = "UNRESOLVED"
     return {
         "status": raw_status,
+        "hard_block": raw_status == "HARD_REJECTED",
+        "reject_reason_code": str(
+            assessment.get("reject_reason_code")
+            or root_contract.get("reject_reason_code")
+            or ""
+        ).strip()
+        or None,
         "conditional_entry_price": _finite(assessment.get("conditional_entry_price")),
         "conditional_entry_reason": str(
             assessment.get("conditional_entry_reason") or ""
@@ -141,8 +158,14 @@ def _execution_contract(packet: Mapping[str, Any]) -> dict[str, Any]:
 def _effective_timing_base(
     packet: Mapping[str, Any], base: ConfirmationDecision
 ) -> tuple[str, str]:
-    """Preserve hard blockers while keeping conditionally approved WAIT non-terminal."""
+    """Keep hard risk vetoes monotonic while allowing unresolved states to re-evaluate."""
     contract = _execution_contract(packet)
+    if contract["hard_block"]:
+        reason_code = contract.get("reject_reason_code") or "UNSPECIFIED_HARD_RISK"
+        return (
+            "NO_BUY",
+            f"上一收盘为 HARD_REJECTED（{reason_code}）；盘中择时模型无权解除硬风险否决。",
+        )
     if (
         contract["status"] == "CONDITIONAL_APPROVED"
         and base.status == "NO_BUY"
@@ -389,17 +412,18 @@ def _to_open_decision(
         price_validation=(snapshot.price_validation if snapshot is not None else None),
     )
     if snapshot is None:
+        action = "NO_BUY" if contract["hard_block"] else "DATA_UNAVAILABLE"
         return OpenTimingDecision(
-            action="DATA_UNAVAILABLE",
-            label=ACTION_LABELS["DATA_UNAVAILABLE"],
+            action=action,
+            label=ACTION_LABELS[action],
             reason=base.reason,
             starter_position_pct=0.0,
             better_entry_score=0.0,
             better_entry_probability=0.0,
             expected_better_price=None,
             expected_improvement_pct=0.0,
-            recheck_minutes=15,
-            terminal=False,
+            recheck_minutes=0 if contract["hard_block"] else 15,
+            terminal=bool(contract["hard_block"]),
             **common,
         )
 
@@ -433,7 +457,10 @@ def _to_open_decision(
         if timing.action in {"NO_BUY", "INVALIDATED", "DATA_UNAVAILABLE"}
         else f"{effective_reason}；择时判断：{timing.rationale}"
     )
-    if action in {"BUY_NOW", "WAIT_BETTER_ENTRY"} and not forecast["meta5"]["tradeable"]:
+    if contract["hard_block"]:
+        action = "NO_BUY"
+        reason = effective_reason
+    elif action in {"BUY_NOW", "WAIT_BETTER_ENTRY"} and not forecast["meta5"]["tradeable"]:
         action = "WAIT_CONFIRMATION"
         reason += (
             "；5D方向模型未通过生产可靠度门（至少50个成熟样本、"
@@ -442,7 +469,8 @@ def _to_open_decision(
         )
     optimization = EntryOptimization(None, None, None, None, None, None, None, ())
     if (
-        forecast["meta5"]["tradeable"]
+        not contract["hard_block"]
+        and forecast["meta5"]["tradeable"]
         and action in {"BUY_NOW", "WAIT_BETTER_ENTRY", "WAIT_CONFIRMATION"}
     ):
         optimization = EntryOptimizer().optimize(
@@ -467,11 +495,13 @@ def _to_open_decision(
         )
     optimized_price = (
         optimization.ideal_entry_price or timing.expected_better_price
-        if forecast["meta5"]["tradeable"]
+        if forecast["meta5"]["tradeable"] and not contract["hard_block"]
         else None
     )
     optimized_improvement = (
-        timing.expected_improvement_pct if forecast["meta5"]["tradeable"] else 0.0
+        timing.expected_improvement_pct
+        if forecast["meta5"]["tradeable"] and not contract["hard_block"]
+        else 0.0
     )
     if optimized_price is not None and optimized_price < snapshot.current_price:
         optimized_improvement = max(
@@ -485,12 +515,12 @@ def _to_open_decision(
         starter_position_pct=(
             base.starter_position_pct if action == "BUY_NOW" else 0.0
         ),
-        better_entry_score=timing.better_entry_probability,
-        better_entry_probability=timing.better_entry_probability,
+        better_entry_score=(0.0 if contract["hard_block"] else timing.better_entry_probability),
+        better_entry_probability=(0.0 if contract["hard_block"] else timing.better_entry_probability),
         expected_better_price=optimized_price,
         expected_improvement_pct=optimized_improvement,
-        recheck_minutes=timing.recheck_minutes,
-        terminal=timing.terminal,
+        recheck_minutes=(0 if contract["hard_block"] else timing.recheck_minutes),
+        terminal=(True if contract["hard_block"] else timing.terminal),
         ideal_entry_price=optimization.ideal_entry_price,
         acceptable_entry_low=optimization.acceptable_entry_low,
         acceptable_entry_high=optimization.acceptable_entry_high,
@@ -504,14 +534,33 @@ def _to_open_decision(
     )
 
 
-
 def _enforce_execution_contract(decision: OpenTimingDecision) -> OpenTimingDecision:
-    """Keep the close execution status as context without overriding live action.
-
-    V8.1 removes the old REJECTED => NO_BUY shortcut. Hard blockers are already
-    evaluated from current data and plan integrity before this final step.
-    """
-    return decision
+    """Final monotonicity guard: a hard risk veto can only stay hard or be re-run upstream."""
+    if decision.execution_status != "HARD_REJECTED":
+        return decision
+    if decision.action == "NO_BUY" and decision.terminal:
+        return decision
+    return replace(
+        decision,
+        action="NO_BUY",
+        label=ACTION_LABELS["NO_BUY"],
+        starter_position_pct=0.0,
+        better_entry_score=0.0,
+        better_entry_probability=0.0,
+        expected_better_price=None,
+        expected_improvement_pct=0.0,
+        recheck_minutes=0,
+        terminal=True,
+        ideal_entry_price=None,
+        acceptable_entry_low=None,
+        acceptable_entry_high=None,
+        no_chase_above=None,
+        entry_candidate_source=None,
+        entry_touch_score=None,
+        entry_ev_score=None,
+        entry_candidates=(),
+        reason=decision.reason + "；V9 最终执行契约再次确认：HARD_REJECTED 不允许盘中升级。",
+    )
 
 
 def _money(value: float | None) -> str:
@@ -571,7 +620,7 @@ def render_markdown(
     lines = [
         f"# 美股盘中择时决策 · {now.strftime('%Y-%m-%d %H:%M ET')}",
         "",
-        "> 昨夜收盘状态只作为风险背景；开盘层使用实时行情、计划边界与模型可靠度独立判断当前是否可执行。REJECTED 不再自动等于今天 NO_BUY。",
+        "> V9 将收盘状态拆成可重新确认的 UNRESOLVED 与不可被盘中行情直接解除的 HARD_REJECTED。",
         "",
         "## 一眼结论",
         "",
@@ -585,7 +634,7 @@ def render_markdown(
         lines.append(f"- **上一收盘决策来源**：run `{source_run_id}`")
     lines += [
         "",
-        "| 标的 | 昨夜风险背景 | 方向信号 | 实时执行动作 | 当前价 | 价格源 | 5D可靠度 | 理想买点 | 可接受区 | 禁止追价 |",
+        "| 标的 | 昨夜执行契约 | 方向信号 | 实时执行动作 | 当前价 | 价格源 | 5D可靠度 | 理想买点 | 可接受区 | 禁止追价 |",
         "|---|---|---|---|---:|---|---|---:|---:|---:|",
     ]
     for item in decisions:
@@ -602,10 +651,10 @@ def render_markdown(
             "",
             f"## {index}. {item.symbol} · {item.label}",
             "",
-            f"- **昨夜风险背景**：{_execution_label(item.execution_status)} (`{item.execution_status}`)；仅作背景，不直接决定本轮是否可买",
+            f"- **昨夜执行契约**：{_execution_label(item.execution_status)} (`{item.execution_status}`)",
             f"- **当前判断**：{item.reason}",
             f"- **方向信号**：{_direction_label(item.direction_signal)}；5D可靠度：{_reliability_text(item)}",
-            f"- **当前价**：{_money(item.current_price)}；较开盘 {_pct(item.return_from_open_pct)}",
+            f"- **当前价**：{_money(item.current_price)}；较开盘 {_pct(item.return_from_open_pct)}；同进度开盘量比 {('N/A' if item.volume_ratio is None else f'{item.volume_ratio:.2f}x')}",
             (
                 f"- **行情校验**：来源 `{item.price_source or 'N/A'}`；"
                 f"1m close {_money(item.bar_close_price)}；quote {_money(item.quote_price)}；"
@@ -657,15 +706,13 @@ def render_markdown(
         "",
         "## 决策纪律",
         "",
-        "- `FULL_APPROVED / CONDITIONAL_APPROVED / REJECTED` 都是昨夜风险背景，不再直接覆盖本轮实时动作。",
-        "- 开盘是否可买由当前行情质量、计划完整性、止损、入场/追价边界、盘中强弱和模型可靠度共同决定。",
+        "- `FULL_APPROVED / CONDITIONAL_APPROVED / UNRESOLVED` 可以在实时层继续确认；`HARD_REJECTED` 不可以。",
+        "- `HARD_REJECTED` 只能由完整收盘/风险模型重新运行后解除，单纯价格、VWAP、量能或短线动量不能覆盖。",
+        "- 开盘是否可买仍受行情质量、计划完整性、止损、入场/追价边界、盘中强弱和模型可靠度约束。",
         "- `等更好买点` 不是看空，而是当前价格的等待期望值高于立即追入。",
         "- `等待确认` 表示当前仍缺执行条件，首仓保持 0%。",
-        "- 止损、计划失效、行情质量和缺失风险计划仍是硬边界；昨夜 REJECTED 本身不是硬边界。",
-        "- “方向信号”和“执行动作”是两件事：方向模型无效时显示“无有效信号”，风控许可仍可独立为 REJECTED/CONDITIONAL_APPROVED。",
         "- 少于 50 个成熟样本、方向命中率低于 52%，或未超过多数类基线至少 2 个百分点时，方向模型生产权重固定为 0。",
-        "- 收盘层上涨概率和期望收益仅作为研究倾向，不是收益保证；未通过可靠度门时不得驱动买入动作。",
-        "- `更好买点评分` 当前是盘中启发式 score，不是校准概率；Research Ledger 会按多时点 outcome 验证，样本不足前不得表述为胜率。",
+        "- `更好买点评分` 当前是盘中启发式 score，不是校准概率。",
         "",
     ]
     return "\n".join(lines)
@@ -770,8 +817,6 @@ def _should_notify(
 def _notify(
     report_path: Path, decisions: Sequence[OpenTimingDecision], session_date: str
 ) -> bool:
-    # Realtime path deliberately bypasses the heavyweight multi-channel
-    # NotificationService import graph. Deep reports still use the full service.
     from scripts.realtime_email import send_realtime_email
 
     buy = sum(item.action == "BUY_NOW" for item in decisions)
@@ -884,7 +929,7 @@ def run(
         },
     }
     payload = {
-        "version": "us-open-timing-v8.0",
+        "version": "us-open-timing-v9.0",
         "policy_version": POLICY_VERSION,
         "better_entry_metric": {
             "field": "better_entry_score",
@@ -934,7 +979,7 @@ def run(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="V8.0 U.S. open timing with validated live prices, direction-skill quarantine and three-state execution authorization"
+        description="V9 U.S. open timing with durable hard-risk veto, validated live prices and reliability quarantine"
     )
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")
