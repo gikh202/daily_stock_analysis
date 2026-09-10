@@ -114,7 +114,7 @@ def test_conditional_approval_waits_above_declared_entry_price_instead_of_reject
     assert "$103.50" in decision.reason
 
 
-def test_explicit_rejected_is_hard_block_even_if_legacy_fields_are_bullish():
+def test_explicit_rejected_is_context_when_live_plan_is_executable():
     packet = _packet(
         verdict="buy_by_plan",
         worth_buying=True,
@@ -122,8 +122,9 @@ def test_explicit_rejected_is_hard_block_even_if_legacy_fields_are_bullish():
         execution_status="REJECTED",
     )
     decision = classify_confirmation_v2(packet, _snapshot(104.0), evaluated_at=_at())
-    assert decision.status == "NO_BUY"
+    assert decision.status == "BUY_NOW"
     assert "REJECTED" in decision.reason
+    assert "实时行情重新确认" in decision.reason
 
 
 def test_legacy_worth_buying_true_without_authorization_maps_to_conditional_compatibly():

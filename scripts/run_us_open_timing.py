@@ -506,22 +506,12 @@ def _to_open_decision(
 
 
 def _enforce_execution_contract(decision: OpenTimingDecision) -> OpenTimingDecision:
-    """Final fail-safe: only explicit REJECTED may veto a confirmed BUY_NOW.
+    """Keep the close execution status as context without overriding live action.
 
-    CONDITIONAL_APPROVED can become executable after the confirmation layer proves
-    its declared price/confirmation condition has been satisfied intraday.
+    V8.1 removes the old REJECTED => NO_BUY shortcut. Hard blockers are already
+    evaluated from current data and plan integrity before this final step.
     """
-    if decision.action != "BUY_NOW" or decision.execution_status != "REJECTED":
-        return decision
-    payload = asdict(decision)
-    payload.update(
-        action="NO_BUY",
-        label=ACTION_LABELS["NO_BUY"],
-        reason=decision.reason + "；收盘风险层已明确 REJECTED，盘中不得绕过。",
-        starter_position_pct=0.0,
-        terminal=True,
-    )
-    return OpenTimingDecision(**payload)
+    return decision
 
 
 def _money(value: float | None) -> str:
@@ -581,7 +571,7 @@ def render_markdown(
     lines = [
         f"# 美股盘中择时决策 · {now.strftime('%Y-%m-%d %H:%M ET')}",
         "",
-        "> 收盘层先决定风险资格，盘中层再决定执行时点。条件批准不是风险否决：它表示逻辑仍可跟踪，但尚未满足完整执行条件。",
+        "> 昨夜收盘状态只作为风险背景；开盘层使用实时行情、计划边界与模型可靠度独立判断当前是否可执行。REJECTED 不再自动等于今天 NO_BUY。",
         "",
         "## 一眼结论",
         "",
@@ -595,7 +585,7 @@ def render_markdown(
         lines.append(f"- **上一收盘决策来源**：run `{source_run_id}`")
     lines += [
         "",
-        "| 标的 | 收盘授权 | 方向信号 | 执行动作 | 当前价 | 价格源 | 5D可靠度 | 理想买点 | 可接受区 | 禁止追价 |",
+        "| 标的 | 昨夜风险背景 | 方向信号 | 实时执行动作 | 当前价 | 价格源 | 5D可靠度 | 理想买点 | 可接受区 | 禁止追价 |",
         "|---|---|---|---|---:|---|---|---:|---:|---:|",
     ]
     for item in decisions:
@@ -612,7 +602,7 @@ def render_markdown(
             "",
             f"## {index}. {item.symbol} · {item.label}",
             "",
-            f"- **收盘执行状态**：{_execution_label(item.execution_status)} (`{item.execution_status}`)",
+            f"- **昨夜风险背景**：{_execution_label(item.execution_status)} (`{item.execution_status}`)；仅作背景，不直接决定本轮是否可买",
             f"- **当前判断**：{item.reason}",
             f"- **方向信号**：{_direction_label(item.direction_signal)}；5D可靠度：{_reliability_text(item)}",
             f"- **当前价**：{_money(item.current_price)}；较开盘 {_pct(item.return_from_open_pct)}",
@@ -667,12 +657,11 @@ def render_markdown(
         "",
         "## 决策纪律",
         "",
-        "- `FULL_APPROVED`：收盘风险层已批准新仓，盘中只优化执行时点。",
-        "- `CONDITIONAL_APPROVED`：投资逻辑仍可跟踪，但需价格/确认/完整风险计划满足后才能买，不等于今天永久不买。",
-        "- `REJECTED`：收盘风险层明确拒绝新仓，盘中模型不能绕过。",
+        "- `FULL_APPROVED / CONDITIONAL_APPROVED / REJECTED` 都是昨夜风险背景，不再直接覆盖本轮实时动作。",
+        "- 开盘是否可买由当前行情质量、计划完整性、止损、入场/追价边界、盘中强弱和模型可靠度共同决定。",
         "- `等更好买点` 不是看空，而是当前价格的等待期望值高于立即追入。",
         "- `等待确认` 表示当前仍缺执行条件，首仓保持 0%。",
-        "- 止损、计划失效和收盘风险否决是硬边界，盘中模型不能绕过。",
+        "- 止损、计划失效、行情质量和缺失风险计划仍是硬边界；昨夜 REJECTED 本身不是硬边界。",
         "- “方向信号”和“执行动作”是两件事：方向模型无效时显示“无有效信号”，风控许可仍可独立为 REJECTED/CONDITIONAL_APPROVED。",
         "- 少于 50 个成熟样本、方向命中率低于 52%，或未超过多数类基线至少 2 个百分点时，方向模型生产权重固定为 0。",
         "- 收盘层上涨概率和期望收益仅作为研究倾向，不是收益保证；未通过可靠度门时不得驱动买入动作。",

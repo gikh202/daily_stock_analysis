@@ -131,12 +131,13 @@ def test_weak_volume_blocks_buy_when_price_is_not_positive():
 
 
 @pytest.mark.parametrize("verdict", ["avoid", "wait", "data_incomplete"])
-def test_prior_blocked_verdict_never_becomes_intraday_buy(verdict):
+def test_prior_close_verdict_is_context_when_live_plan_is_executable(verdict):
     decision = classify_confirmation(
         _packet(verdict=verdict, worth_buying=False),
         _snapshot(103.0),
     )
-    assert decision.status == "NO_BUY"
+    assert decision.status == "BUY_NOW"
+    assert "仅作为历史风险背景" in decision.reason
 
 
 def test_buyable_watch_from_close_can_be_confirmed_intraday():

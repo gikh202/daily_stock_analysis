@@ -16,8 +16,6 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger("us_open_confirmation")
 NY = ZoneInfo("America/New_York")
 
-BUYABLE_PRIOR_VERDICTS = {"buy_by_plan", "conditional_buy", "watch"}
-BLOCKED_PRIOR_VERDICTS = {"avoid", "wait", "data_incomplete"}
 STATUS_LABELS = {
     "BUY_NOW": "可以买（首仓）",
     "WAIT_ENTRY": "等进入计划区间",
@@ -441,47 +439,31 @@ def classify_confirmation(
         source_last_bar_time=snapshot.last_bar_time,
     )
 
-    if prior_execution_status == "REJECTED":
-        return ConfirmationDecision(
-            status="NO_BUY",
-            label=STATUS_LABELS["NO_BUY"],
-            reason="昨晚执行状态为 REJECTED；盘中确认器不能绕过收盘风险拒绝。",
-            **live,
-            **base,
-        )
+    prior_context_parts: list[str] = []
+    if prior_execution_status:
+        prior_context_parts.append(f"昨夜执行状态 {prior_execution_status}")
+    if prior_verdict:
+        prior_context_parts.append(f"昨夜 verdict={prior_verdict}")
+    if prior_worth_buying is not None:
+        prior_context_parts.append(f"昨夜 worth_buying={prior_worth_buying}")
 
-    if prior_verdict == "avoid" or prior_worth_buying is False:
-        return ConfirmationDecision(
-            status="NO_BUY",
-            label=STATUS_LABELS["NO_BUY"],
-            reason="昨晚最终决策未授权新仓；盘中确认器不会绕过收盘风险结论。",
-            **live,
-            **base,
-        )
-
-    if prior_verdict in {"wait", "data_incomplete"}:
-        return ConfirmationDecision(
-            status="NO_BUY",
-            label=STATUS_LABELS["NO_BUY"],
-            reason="昨晚计划仍处于等待/数据不足状态，没有可执行的新仓计划。",
-            **live,
-            **base,
-        )
-
-    if prior_verdict not in BUYABLE_PRIOR_VERDICTS or prior_worth_buying is not True:
-        return ConfirmationDecision(
-            status="NO_BUY",
-            label=STATUS_LABELS["NO_BUY"],
-            reason="昨晚最终决策没有明确认定当前标的值得买入，今天不主动建立新仓。",
-            **live,
-            **base,
+    def with_prior_context(reason: str) -> str:
+        if not prior_context_parts:
+            return reason
+        return (
+            reason
+            + "；"
+            + "、".join(prior_context_parts)
+            + " 仅作为历史风险背景，本轮开盘是否可买由实时行情和当前计划边界重新判断。"
         )
 
     if not has_active_plan or entry is None or stop is None or not targets or plan_max_pct <= 0:
         return ConfirmationDecision(
             status="NO_BUY",
             label=STATUS_LABELS["NO_BUY"],
-            reason="虽然逻辑偏多，但缺少完整入场区间、止损、目标或仓位上限，禁止临盘补造计划。",
+            reason=with_prior_context(
+                "缺少完整入场区间、止损、目标或仓位上限，开盘层无法安全建立新仓。"
+            ),
             **live,
             **base,
         )
@@ -492,7 +474,9 @@ def classify_confirmation(
         return ConfirmationDecision(
             status="INVALIDATED",
             label=STATUS_LABELS["INVALIDATED"],
-            reason=f"现价已触及/跌破昨晚止损 ${stop:.2f}，原买入计划失效。",
+            reason=with_prior_context(
+                f"现价已触及/跌破计划止损 ${stop:.2f}，原买入计划失效。"
+            ),
             **live,
             **base,
         )
@@ -501,7 +485,7 @@ def classify_confirmation(
         return ConfirmationDecision(
             status="WAIT_ENTRY",
             label=STATUS_LABELS["WAIT_ENTRY"],
-            reason=(
+            reason=with_prior_context(
                 f"现价低于计划入场下沿 ${entry_low:.2f}；不在下跌过程中抢跑，"
                 "等待价格重新进入计划区间并企稳。"
             ),
@@ -514,7 +498,7 @@ def classify_confirmation(
         return ConfirmationDecision(
             status="WAIT_PULLBACK",
             label=STATUS_LABELS["WAIT_PULLBACK"],
-            reason=(
+            reason=with_prior_context(
                 f"现价已高于计划上沿 ${entry_high:.2f} 超过允许追价幅度 "
                 f"{chase_tolerance_pct:.2f}%，今天不追高。"
             ),
@@ -537,7 +521,9 @@ def classify_confirmation(
         return ConfirmationDecision(
             status="WAIT_STABILIZE",
             label=STATUS_LABELS["WAIT_STABILIZE"],
-            reason="；".join(weakness) + "，盘中确认偏弱，先等止跌/重新转强，不急着接。",
+            reason=with_prior_context(
+                "；".join(weakness) + "，盘中确认偏弱，先等止跌/重新转强，不急着接。"
+            ),
             **live,
             **base,
         )
@@ -546,8 +532,8 @@ def classify_confirmation(
     return ConfirmationDecision(
         status="BUY_NOW",
         label=STATUS_LABELS["BUY_NOW"],
-        reason=(
-            "现价位于昨晚计划允许范围内，止损未失效，开盘15分钟未出现明显走弱；"
+        reason=with_prior_context(
+            "现价位于计划允许范围内，止损未失效，开盘实时条件未出现明显走弱；"
             "允许执行第一笔仓位，但不得超过计划总仓位上限。"
         ),
         starter_position_pct=starter_pct,
