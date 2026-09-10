@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/02-us-open-backtest.yml'
+      - '.github/workflows/00a-us-close-flash.yml'
       - '.github/workflows/01-us-open-confirmation.yml'
       - '.github/workflows/02b-us-open-research-ledger.yml'
       - 'src/forecasting/**'
@@ -12,6 +13,7 @@ on:
       - 'scripts/backtest_us_open_confirmation.py'
       - 'scripts/probe_us_open_conservative.py'
       - 'scripts/probe_us_open_v2.py'
+      - 'scripts/run_us_close_flash.py'
       - 'scripts/run_us_open_confirmation.py'
       - 'scripts/run_us_open_confirmation_v2.py'
       - 'scripts/run_us_open_confirmation_safe.py'
@@ -21,6 +23,8 @@ on:
       - 'scripts/us_open_research_ledger.py'
       - 'scripts/capture_us_open_research.py'
       - 'tests/test_notification_streamlining.py'
+      - 'tests/test_us_market_low_latency_workflows.py'
+      - 'tests/test_v72_open_timing_execution_status.py'
       - 'tests/test_us_open_confirmation.py'
       - 'tests/test_us_open_confirmation_v2.py'
       - 'tests/test_us_open_email_delivery_contract.py'
@@ -60,6 +64,8 @@ jobs:
         run: |
           python -m pytest -q --noconftest \
             tests/test_notification_streamlining.py \
+            tests/test_us_market_low_latency_workflows.py \
+            tests/test_v72_open_timing_execution_status.py \
             tests/test_us_open_confirmation.py \
             tests/test_us_open_confirmation_v2.py \
             tests/test_us_open_email_delivery_contract.py \
