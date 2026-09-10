@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DAILY = ROOT / ".github" / "workflows" / "00-daily-analysis.yml"
 CLOSE_FLASH = ROOT / ".github" / "workflows" / "00a-us-close-flash.yml"
+CLOSE_SCRIPT = ROOT / "scripts" / "run_us_close_flash.py"
 OPEN = ROOT / ".github" / "workflows" / "01-us-open-confirmation.yml"
 V6 = ROOT / ".github" / "workflows" / "03-v6-daily.yml"
 
@@ -18,14 +19,27 @@ def test_deep_close_schedule_has_no_artificial_delay() -> None:
     assert "30 22 * * 1-5" not in text
 
 
-def test_close_flash_is_separate_and_lightweight() -> None:
+def test_close_flash_is_separate_lightweight_and_delay_tolerant() -> None:
     text = CLOSE_FLASH.read_text(encoding="utf-8")
-    assert "cron: '0 20 * * 1-5'" in text
-    assert "cron: '0 21 * * 1-5'" in text
+    assert "cron: '3,8,13,18,28 20 * * 1-5'" in text
+    assert "cron: '3,8,13,18,28 21 * * 1-5'" in text
     assert "requirements-realtime.txt" in text
     assert "requirements.txt" not in text
     assert "run_us_close_flash.py" in text
-    assert "is_session" in text
+    assert "Resolve latest completed XNYS session" in text
+    assert "delayed_after_midnight_recovery" in text
+    assert "actions/cache/restore@v5" in text
+    assert "actions/cache/save@v5" in text
+    assert "steps.dedupe.outputs.cache-hit != 'true'" in text
+    assert "session_date" in text
+    assert "1645" not in text
+
+
+def test_close_flash_script_accepts_completed_session_date() -> None:
+    text = CLOSE_SCRIPT.read_text(encoding="utf-8")
+    assert "--session-date" in text
+    assert "yfinance_1m_completed_session" in text
+    assert "target_date = session_date or now.date()" in text
 
 
 def test_open_path_is_lightweight_and_dense_at_open() -> None:
