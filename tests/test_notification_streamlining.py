@@ -107,8 +107,9 @@ def test_safe_runner_has_quote_outage_fallback_and_nonterminal_state() -> None:
     timing = TIMING_RUNNER.read_text(encoding="utf-8")
     assert "all live U.S. session quotes unavailable" in safe
     assert "allow_all_unavailable=True" in safe
-    assert 'action="DATA_UNAVAILABLE"' in timing
-    assert "terminal=False" in timing
+    assert '"DATA_UNAVAILABLE"' in timing
+    assert 'contract["hard_block"]' in timing
+    assert "terminal=" in timing
     assert "follow_up_needed" in timing
 
 
