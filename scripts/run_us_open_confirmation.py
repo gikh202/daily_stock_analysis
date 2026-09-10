@@ -46,6 +46,7 @@ class LiveSnapshot:
     bar_close_price: float | None = None
     quote_price: float | None = None
     price_validation: str = "bar_only"
+    opening_volume_elapsed_bars: int = 0
 
 
 @dataclass(frozen=True)
@@ -119,9 +120,53 @@ def _opening_window(frame: Any, session_date: Any) -> Any:
     session = frame[frame.index.date == session_date]
     if session.empty:
         return session
-    # 固定使用开盘前 15 分钟窗口；补偿重试即使晚于 09:45，也不会把后续行情
-    # 混进“开盘 15 分钟确认”指标。当前价仍使用最新可用 regular-session bar。
+    # Fixed first-15-minute regular-session window. On a live day the provider
+    # only contains bars observed so far, while prior sessions contain the full window.
     return session.between_time("09:30", "09:44")
+
+
+def _matched_opening_volume_stats(
+    frame: Any,
+    session_date: Any,
+    *,
+    max_prior_sessions: int = 4,
+) -> tuple[float, float | None, float | None, int]:
+    """Compare today's opening volume with the same elapsed opening window historically.
+
+    At 09:32 ET three observed bars are compared with the first three bars of each
+    prior session, never with a complete 15-minute denominator. This removes the
+    systematic weak-volume bias from low-latency 09:30-09:44 evaluations.
+    """
+    current = _opening_window(frame, session_date)
+    elapsed_bars = min(15, max(0, int(len(current))))
+    if elapsed_bars <= 0:
+        return 0.0, None, None, 0
+
+    current_matched = current.iloc[:elapsed_bars]
+    current_volume = float(current_matched["Volume"].fillna(0).sum())
+    prior_volumes: list[float] = []
+    prior_dates = sorted(
+        {item for item in frame.index.date if item < session_date},
+        reverse=True,
+    )
+    for prior_date in prior_dates[: max(1, int(max_prior_sessions))]:
+        prior_opening = _opening_window(frame, prior_date)
+        if len(prior_opening) < elapsed_bars:
+            continue
+        matched = prior_opening.iloc[:elapsed_bars]
+        volume = _finite(matched["Volume"].fillna(0).sum())
+        if volume is not None and volume > 0:
+            prior_volumes.append(volume)
+
+    # One anomalous prior session is not a defensible denominator. Require two
+    # comparable sessions; otherwise volume confirmation stays unavailable.
+    prior_median = median(prior_volumes) if len(prior_volumes) >= 2 else None
+    ratio = (
+        current_volume / prior_median
+        if prior_median is not None and prior_median > 0
+        else None
+    )
+    return current_volume, prior_median, ratio, elapsed_bars
 
 
 def _fast_info_number(info: Any, *names: str) -> float | None:
@@ -297,8 +342,6 @@ def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapsho
         raise RuntimeError(f"{symbol}: no regular-session bars for {today}")
 
     opening = _opening_window(frame, today)
-    # Low-latency first pass: one fresh 1m bar is enough to emit a conservative
-    # execution state. Later scheduled passes naturally gain the full opening window.
     if len(opening) < 1:
         raise RuntimeError(f"{symbol}: opening window incomplete ({len(opening)} bars)")
 
@@ -316,23 +359,12 @@ def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapsho
     if session_open is None or session_open <= 0:
         raise RuntimeError(f"{symbol}: invalid session open price")
 
-    prior_volumes: list[float] = []
-    prior_dates = sorted({item for item in frame.index.date if item < today}, reverse=True)
-    for prior_date in prior_dates[:4]:
-        prior_opening = _opening_window(frame, prior_date)
-        if len(prior_opening) < 10:
-            continue
-        volume = _finite(prior_opening["Volume"].fillna(0).sum())
-        if volume is not None and volume > 0:
-            prior_volumes.append(volume)
-
-    current_opening_volume = float(opening["Volume"].fillna(0).sum())
-    prior_median = median(prior_volumes) if prior_volumes else None
-    volume_ratio = (
-        current_opening_volume / prior_median
-        if prior_median is not None and prior_median > 0
-        else None
-    )
+    (
+        current_opening_volume,
+        prior_median,
+        volume_ratio,
+        elapsed_bars,
+    ) = _matched_opening_volume_stats(frame, today)
 
     return LiveSnapshot(
         symbol=symbol,
@@ -360,6 +392,7 @@ def fetch_live_snapshot(symbol: str, now: datetime | None = None) -> LiveSnapsho
         bar_close_price=bar_close_price,
         quote_price=quote_price,
         price_validation=price_validation,
+        opening_volume_elapsed_bars=elapsed_bars,
     )
 
 
@@ -517,7 +550,7 @@ def classify_confirmation(
         if weak_price:
             weakness.append(f"较开盘 {snapshot.return_from_open_pct:+.2f}%")
         if weak_volume:
-            weakness.append(f"开盘15分钟量比 {snapshot.volume_ratio:.2f}x")
+            weakness.append(f"同进度开盘量比 {snapshot.volume_ratio:.2f}x")
         return ConfirmationDecision(
             status="WAIT_STABILIZE",
             label=STATUS_LABELS["WAIT_STABILIZE"],
@@ -608,7 +641,7 @@ def render_markdown(
                 "",
                 f"- **结论**：{item.reason}",
                 f"- **当前价**：{_money(item.current_price)}；较开盘：{_pct(item.return_from_open_pct)}；"
-                f"开盘15分钟量比：{_ratio(item.volume_ratio)}",
+                f"同进度开盘量比：{_ratio(item.volume_ratio)}",
             ]
         )
         if item.entry_low is not None and item.entry_high is not None:
@@ -648,6 +681,7 @@ def render_markdown(
             "- `可以买（首仓）` 才代表本轮允许新开第一笔仓位。",
             "- `等进入计划区间 / 不追，等回踩 / 先不买，等盘中止跌` 都代表**现在不下单**。",
             "- 一旦触及止损/失效线，原计划作废，不因为“昨晚看多”继续硬买。",
+            "- 开盘量比按当前已过去的分钟数与历史相同分钟窗口比较，不用部分窗口除以完整15分钟。",
             "- 这是规则化交易确认，不保证收益；仓位上限和止损优先于方向判断。",
             "",
         ]
@@ -786,7 +820,7 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Actionable U.S. open +15m execution confirmation")
+    parser = argparse.ArgumentParser(description="Actionable U.S. open execution confirmation")
     parser.add_argument("--v6-payload", required=True)
     parser.add_argument("--output-dir", default="open_confirmation_reports")
     parser.add_argument("--source-run-id", default=os.getenv("OPEN_CONFIRMATION_SOURCE_RUN_ID"))

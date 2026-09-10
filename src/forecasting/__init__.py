@@ -8,7 +8,9 @@ from typing import Any
 # forecast engine/history/decision graph.
 _EXPORTS = {
     "ForecastDecisionPolicy": (".decision", "ForecastDecisionPolicy"),
-    "V7ForecastEngine": (".engine", "V7ForecastEngine"),
+    # Production callers use the V9 wrapper. The calibrated V7 core remains in
+    # .engine for research/backward compatibility and is composed by the wrapper.
+    "V7ForecastEngine": (".production_engine", "V7ForecastEngine"),
     "ForecastHistory": (".history", "ForecastHistory"),
     "ForecastBundle": (".models", "ForecastBundle"),
     "ForecastDecision": (".models", "ForecastDecision"),

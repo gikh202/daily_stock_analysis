@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from src.v6_daily.final_decision_service import (
     CONDITIONAL_APPROVED,
-    REJECTED,
+    HARD_REJECTED,
     _apply_reliability_guard,
     _execution_status,
     _reliability_filtered_v4,
@@ -74,7 +74,7 @@ def test_unreliable_10d_wait_remains_conditionally_observable() -> None:
     assert "uncertainty" in upgraded.assessment.rationale
 
 
-def test_unreliable_10d_hard_risk_stays_rejected() -> None:
+def test_unreliable_10d_hard_risk_stays_hard_rejected() -> None:
     v6 = _v6(
         samples=16,
         status="shrunk",
@@ -89,16 +89,16 @@ def test_unreliable_10d_hard_risk_stays_rejected() -> None:
 
     assert guarded.assessment.execution_authorized is False
     assert guarded.assessment.worth_buying is False
-    assert _execution_status(guarded) == REJECTED
+    assert _execution_status(guarded) == HARD_REJECTED
 
 
-def test_unreliable_10d_sell_operation_stays_rejected() -> None:
+def test_unreliable_10d_sell_operation_stays_hard_rejected() -> None:
     v6 = _v6(samples=16, status="shrunk", weight=0.0, direction="bullish")
     filtered = _reliability_filtered_v4(v6, _v4("bullish", operation="减仓"))
     raw = build_final_decision_packet(v6, filtered)
     guarded = _apply_reliability_guard(raw)
     assert guarded.assessment.worth_buying is False
-    assert _execution_status(guarded) == REJECTED
+    assert _execution_status(guarded) == HARD_REJECTED
 
 
 def test_unreliable_10d_cannot_create_direction_conflict() -> None:

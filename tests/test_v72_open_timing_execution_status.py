@@ -10,6 +10,7 @@ from scripts.run_us_open_confirmation import (
 )
 from scripts.run_us_open_confirmation_v2 import classify_confirmation_v2
 from scripts.run_us_open_timing import (
+    OpenTimingDecision,
     _effective_timing_base,
     _enforce_execution_contract,
     _execution_contract,
@@ -125,9 +126,14 @@ def test_rejected_close_status_is_context_not_v1_open_veto():
     assert "仅作为历史风险背景" in decision.reason
 
 
-def test_rejected_close_status_is_context_not_v2_open_veto():
+def test_legacy_rejected_close_status_maps_to_unresolved_not_v2_open_veto():
+    packet = _rejected_but_complete_packet()
+    contract = _execution_contract(packet)
+    assert contract["status"] == "UNRESOLVED"
+    assert contract["hard_block"] is False
+
     decision = classify_confirmation_v2(
-        _rejected_but_complete_packet(),
+        packet,
         _live_snapshot(),
         evaluated_at=datetime(
             2026,
@@ -139,10 +145,43 @@ def test_rejected_close_status_is_context_not_v2_open_veto():
         ),
     )
     assert decision.status == "BUY_NOW"
-    assert "REJECTED" in decision.reason
+    assert "未决状态" in decision.reason
     assert "实时行情重新确认" in decision.reason
 
 
-def test_final_execution_contract_does_not_override_live_action():
-    marker = object()
+def _timing_marker() -> OpenTimingDecision:
+    return OpenTimingDecision(
+        symbol="TEST",
+        action="WAIT_CONFIRMATION",
+        label="等确认再买",
+        reason="test",
+        current_price=100.0,
+        entry_low=99.0,
+        entry_high=101.0,
+        stop_loss=95.0,
+        targets=(110.0,),
+        starter_position_pct=0.0,
+        max_position_pct=10.0,
+        return_from_open_pct=0.0,
+        volume_ratio=1.0,
+        probability_up_1d=None,
+        probability_up_5d=None,
+        probability_up_20d=None,
+        expected_return_5d_pct=None,
+        expected_alpha_5d_pct=None,
+        forecast_confidence=None,
+        better_entry_score=0.0,
+        better_entry_probability=0.0,
+        expected_better_price=None,
+        expected_improvement_pct=0.0,
+        recheck_minutes=15,
+        terminal=False,
+        source_trade_date="2026-09-08",
+        source_last_bar_time="2026-09-09T09:44:00-04:00",
+        execution_status="UNRESOLVED",
+    )
+
+
+def test_final_execution_contract_leaves_non_hard_live_action_unchanged():
+    marker = _timing_marker()
     assert _enforce_execution_contract(marker) is marker
