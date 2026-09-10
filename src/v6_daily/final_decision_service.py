@@ -12,10 +12,13 @@ from .fusion_contracts import (
 from .v4_research_adapter import latest_v4_views
 
 
-FINAL_DECISION_PAYLOAD_VERSION = "final-decision-payload-v1"
-EXECUTION_CONTRACT_VERSION = "v7.4"
+FINAL_DECISION_PAYLOAD_VERSION = "final-decision-payload-v2"
+EXECUTION_CONTRACT_VERSION = "v9.0"
 FULL_APPROVED = "FULL_APPROVED"
 CONDITIONAL_APPROVED = "CONDITIONAL_APPROVED"
+UNRESOLVED = "UNRESOLVED"
+HARD_REJECTED = "HARD_REJECTED"
+# Legacy serialized status retained only for downstream compatibility readers.
 REJECTED = "REJECTED"
 V73_RELIABILITY_MIN_MATURE_SAMPLES = 50
 V73_RESEARCH_ONLY_MARKER = "研究观察"
@@ -100,8 +103,8 @@ def _reliability_filtered_v4(
     forecast["horizon"] = f"{horizon}（{V73_RESEARCH_ONLY_MARKER}）"
     forecast["reliability_quarantined"] = True
     forecast["reliability_reason"] = (
-        "V7.4 reliability gate requires >=50 mature forward samples and usable "
-        "directional accuracy before a research horizon may influence execution"
+        "V9 reliability gate requires mature forward evidence before a research "
+        "horizon may influence execution"
     )
     filtered = dict(v4)
     filtered["forecast"] = forecast
@@ -157,7 +160,7 @@ def _apply_reliability_guard(packet: FinalDecisionPacket) -> FinalDecisionPacket
             worth_buying=True,
             execution_authorized=False,
             rationale=(
-                "V7.4 reliability gate quarantined the upstream research horizon, "
+                "V9 reliability gate quarantined the upstream research horizon, "
                 "but low sample reliability is uncertainty rather than a hard risk veto. "
                 "The WAIT thesis remains conditionally observable intraday; execution "
                 "still requires a complete risk-bounded plan or declared confirmation."
@@ -176,7 +179,7 @@ def _apply_reliability_guard(packet: FinalDecisionPacket) -> FinalDecisionPacket
         worth_buying=False if packet.v6_decision in {"WAIT", "AVOID"} else None,
         execution_authorized=False,
         rationale=(
-            "V7.4 reliability gate quarantined the upstream research horizon. "
+            "V9 reliability gate quarantined the upstream research horizon. "
             "A separate hard risk/avoid condition remains authoritative, so the "
             "quarantined research cannot create conditional approval or execution authorization."
         ),
@@ -217,12 +220,27 @@ def _upgrade_execution_contract(packet: FinalDecisionPacket) -> FinalDecisionPac
     return replace(packet, assessment=assessment)
 
 
+def _hard_reject_reason(packet: FinalDecisionPacket) -> str | None:
+    """Return a stable machine reason only for conditions that must survive open rechecks."""
+    if packet.v6_decision == "AVOID":
+        return "V6_AVOID_RISK_GATE"
+    if _risk_heavy(packet):
+        return "RISK_SCORE_GATE"
+    if packet.v4_operation in {"卖出", "减仓"}:
+        return "V4_SELL_OR_REDUCE"
+    if packet.non_trading:
+        return "NON_TRADING_CONTEXT"
+    return None
+
+
 def _execution_status(packet: FinalDecisionPacket) -> str:
     if packet.assessment.execution_authorized:
         return FULL_APPROVED
     if packet.assessment.worth_buying is True:
         return CONDITIONAL_APPROVED
-    return REJECTED
+    if _hard_reject_reason(packet) is not None:
+        return HARD_REJECTED
+    return UNRESOLVED
 
 
 def _serialize_packet(packet: FinalDecisionPacket) -> Dict[str, Any]:
@@ -230,7 +248,9 @@ def _serialize_packet(packet: FinalDecisionPacket) -> Dict[str, Any]:
     assessment = data.setdefault("assessment", {})
     execution = data.get("execution") if isinstance(data.get("execution"), dict) else {}
     status = _execution_status(packet)
+    reject_reason = _hard_reject_reason(packet)
     assessment["execution_status"] = status
+    assessment["reject_reason_code"] = reject_reason
 
     if status == CONDITIONAL_APPROVED:
         entry_zone = execution.get("entry_zone")
@@ -256,6 +276,9 @@ def _serialize_packet(packet: FinalDecisionPacket) -> Dict[str, Any]:
         "version": EXECUTION_CONTRACT_VERSION,
         "status": status,
         "authorized": status == FULL_APPROVED,
+        "hard_block": status == HARD_REJECTED,
+        "reject_reason_code": reject_reason,
+        "legacy_status": REJECTED if status in {UNRESOLVED, HARD_REJECTED} else status,
     }
     return data
 
@@ -295,7 +318,10 @@ def build_final_decision_payload(
         CONDITIONAL_APPROVED: sum(
             _execution_status(packet) == CONDITIONAL_APPROVED for packet in packets
         ),
-        REJECTED: sum(_execution_status(packet) == REJECTED for packet in packets),
+        UNRESOLVED: sum(_execution_status(packet) == UNRESOLVED for packet in packets),
+        HARD_REJECTED: sum(
+            _execution_status(packet) == HARD_REJECTED for packet in packets
+        ),
     }
     return {
         "version": FINAL_DECISION_PAYLOAD_VERSION,
