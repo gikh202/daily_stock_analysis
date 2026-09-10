@@ -108,29 +108,9 @@ def _adapt_packet_for_execution_status(
     assessment = dict(_mapping(packet.get("assessment")))
     status = str(contract.get("status") or "REJECTED")
 
-    if status == "REJECTED":
-        assessment["worth_buying"] = False
-        assessment["execution_authorized"] = False
-        assessment["verdict"] = "avoid"
-    elif status == "CONDITIONAL_APPROVED":
-        assessment["worth_buying"] = True
-        assessment["execution_authorized"] = False
-        if str(assessment.get("verdict") or "").strip().lower() not in {
-            "buy_by_plan",
-            "conditional_buy",
-            "watch",
-        }:
-            assessment["verdict"] = "conditional_buy"
-    else:  # FULL_APPROVED
-        assessment["worth_buying"] = True
-        assessment["execution_authorized"] = True
-        if str(assessment.get("verdict") or "").strip().lower() not in {
-            "buy_by_plan",
-            "conditional_buy",
-            "watch",
-        }:
-            assessment["verdict"] = "buy_by_plan"
-
+    # V8.1: preserve the close packet's original verdict/worth_buying fields as
+    # historical context only. Do not rewrite them from execution_status, because
+    # that would make REJECTED indirectly re-create the old hard open veto.
     assessment["execution_status"] = status
     if contract.get("conditional_entry_price") is not None:
         assessment["conditional_entry_price"] = contract["conditional_entry_price"]
@@ -222,11 +202,10 @@ def classify_confirmation_v2(
 ) -> ConfirmationDecision:
     """V2 intraday policy evaluated at the workflow's actual runtime.
 
-    The prior close packet remains the authority for whether a symbol is buyable
-    and for its entry/stop/targets. V7.2 adds a three-state execution contract:
-    full approvals may execute, conditional approvals may become executable only
-    after their declared condition is satisfied, and rejected plans remain hard
-    blockers. The intraday layer still never invents a new trade plan.
+    The prior close packet supplies the existing plan and historical risk context,
+    but the open layer independently decides whether the plan is executable using
+    fresh market data. REJECTED is no longer an automatic intraday veto. The
+    intraday layer still never invents a new entry zone, stop, target, or position.
     """
     evaluated = evaluated_at.astimezone(NY)
     runtime_snapshot = _runtime_snapshot(snapshot) if snapshot is not None else None
@@ -290,14 +269,6 @@ def classify_confirmation_v2(
                 ),
             )
 
-    if contract["status"] == "REJECTED":
-        return _with_status(
-            base,
-            status="NO_BUY",
-            label=STATUS_LABELS["NO_BUY"],
-            reason="上一收盘执行状态为 REJECTED；风险层明确禁止建立新仓，盘中不能绕过。",
-        )
-
     conditional_price = contract.get("conditional_entry_price")
     if (
         contract["status"] == "CONDITIONAL_APPROVED"
@@ -335,7 +306,12 @@ def classify_confirmation_v2(
 
     candidate = base
     if base.status == "BUY_NOW":
-        prefix = "上一收盘条件已满足；" if contract["status"] == "CONDITIONAL_APPROVED" else ""
+        if contract["status"] == "CONDITIONAL_APPROVED":
+            prefix = "昨夜条件状态仅作背景且当前条件已满足；"
+        elif contract["status"] == "REJECTED":
+            prefix = "昨夜 REJECTED 仅作风险背景，本轮已按实时行情重新确认；"
+        else:
+            prefix = ""
         candidate = _with_status(
             base,
             status="BUY_NOW",
@@ -470,7 +446,7 @@ def run(
         "max_quote_age_minutes": max_quote_age_minutes,
         "evaluation_clock": "actual_runtime_et",
         "early_partial_volume_ratio": "disabled_until_15_regular_session_bars",
-        "execution_contract": "v7.2_three_state_compatible",
+        "execution_contract": "v8.1_close_status_context_open_recheck",
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
