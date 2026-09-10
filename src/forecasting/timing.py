@@ -44,12 +44,10 @@ def production_recheck_delay(minutes_since_open: int) -> int:
 class IntradayTimingModel:
     """Estimate whether waiting is likely to improve the near-term entry.
 
-    V8.1 treats the prior close execution status as historical context, not an
-    automatic intraday veto. Current hard blockers remain authoritative: invalid
-    or stale plans, missing risk boundaries, stop-loss invalidation, bad data and
-    current price/confirmation failures. Scheduled intraday checks keep collecting
-    fresh evidence and may authorize execution only when those current conditions
-    are satisfied.
+    V7.3 keeps hard risk blockers authoritative for execution, but a NO_BUY risk
+    veto is no longer an observation terminal while scheduled intraday checks
+    remain. This lets the system keep collecting live evidence without ever
+    converting a rejected close plan into a buy authorization.
     """
 
     version = "v7.3-intraday-timing.1"
@@ -104,7 +102,7 @@ class IntradayTimingModel:
                 True,
             )
         if status == "NO_BUY":
-            rationale = "current hard blocker remains authoritative for execution"
+            rationale = "hard blocker from prior plan/risk remains authoritative for execution"
             if has_scheduled_follow_up:
                 rationale += (
                     f"; observation remains active and the next automated recheck is in "
