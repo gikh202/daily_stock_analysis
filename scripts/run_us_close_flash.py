@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -51,7 +51,12 @@ def _load(path: str | Path) -> tuple[list[dict[str, Any]], dict[str, Mapping[str
     return packets, board
 
 
-def _session(symbol: str, now: datetime) -> dict[str, Any]:
+def _session(
+    symbol: str,
+    now: datetime,
+    *,
+    session_date: date | None = None,
+) -> dict[str, Any]:
     import yfinance as yf
 
     ticker = yf.Ticker(symbol)
@@ -68,12 +73,13 @@ def _session(symbol: str, now: datetime) -> dict[str, Any]:
         frame.index = frame.index.tz_localize("UTC").tz_convert(NY)
     else:
         frame.index = frame.index.tz_convert(NY)
+    target_date = session_date or now.date()
     session = frame[
-        (frame.index.date == now.date())
+        (frame.index.date == target_date)
         & (frame.index <= now)
     ].between_time("09:30", "16:00")
     if session.empty:
-        raise RuntimeError(f"no US regular-session bars for {now.date()}")
+        raise RuntimeError(f"no US regular-session bars for {target_date}")
     first = session.iloc[0]
     op = _finite(first.get("Open"))
     if op is None or op <= 0:
