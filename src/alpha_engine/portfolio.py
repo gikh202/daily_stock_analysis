@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Iterable, Mapping, Optional
 
-from .models import AlphaDecision, TradePlan
+from .models import AlphaDecision
 
 
 class PortfolioRiskOverlay:
-    """Portfolio-aware sizing gate applied after single-name Alpha Engine.
+    """Portfolio-aware sizing gate that is monotonic in risk.
 
-    It can only reduce risk.  It never upgrades WAIT/AVOID to an actionable
-    signal and never increases the Alpha Engine position cap.
+    The same cap function is reusable by the V6/V9 forecast execution layer so
+    portfolio limits cannot be lost when a later model rebuilds the single-name
+    trade plan. It can only reduce a proposed position cap; it never upgrades a
+    WAIT/AVOID signal or increases risk.
     """
 
     def __init__(
@@ -39,22 +41,24 @@ class PortfolioRiskOverlay:
             return 0.0
         return max(0.0, number)
 
-    def apply(
+    def position_cap(
         self,
-        decision: AlphaDecision,
         *,
+        symbol: str,
+        proposed_max_position_pct: float,
         positions: Optional[Iterable[Mapping[str, object]]] = None,
         target_sector: Optional[str] = None,
         portfolio_drawdown_pct: Optional[float] = None,
-    ) -> AlphaDecision:
-        plan = decision.trade_plan
-        if decision.decision not in {"BUY_SETUP", "WATCH"} or plan.max_position_pct <= 0:
-            return decision
+    ) -> tuple[float, tuple[str, ...]]:
+        """Return the maximum allowed *new total* position fraction and reasons."""
+        proposed = max(0.0, self._safe_fraction(proposed_max_position_pct))
+        if proposed <= 0.0:
+            return 0.0, ()
 
         gross = 0.0
         sector_exposure = 0.0
         symbol_exposure = 0.0
-        target_symbol = decision.symbol.upper()
+        target_symbol = str(symbol or "").strip().upper()
         target_sector_key = str(target_sector or "").strip().lower()
 
         for raw in positions or ():
@@ -63,8 +67,8 @@ class PortfolioRiskOverlay:
                 weight /= 100.0
             gross += weight
 
-            symbol = str(raw.get("symbol") or raw.get("code") or "").strip().upper()
-            if symbol == target_symbol:
+            existing_symbol = str(raw.get("symbol") or raw.get("code") or "").strip().upper()
+            if existing_symbol == target_symbol:
                 symbol_exposure += weight
 
             sector = str(raw.get("sector") or "").strip().lower()
@@ -72,12 +76,11 @@ class PortfolioRiskOverlay:
                 sector_exposure += weight
 
         caps = [
-            plan.max_position_pct,
+            proposed,
             max(0.0, self.max_single_name_pct - symbol_exposure),
             max(0.0, self.max_gross_pct - gross),
         ]
-        limitations = list(decision.limitations)
-
+        reasons: list[str] = []
         if target_sector_key:
             caps.append(max(0.0, self.max_sector_pct - sector_exposure))
 
@@ -90,16 +93,45 @@ class PortfolioRiskOverlay:
 
         if dd >= self.drawdown_hard_limit_pct:
             caps.append(0.0)
-            limitations.append("portfolio hard drawdown gate active")
+            reasons.append("portfolio hard drawdown gate active")
         elif dd >= self.drawdown_soft_limit_pct:
-            caps.append(plan.max_position_pct * 0.5)
-            limitations.append("portfolio soft drawdown de-risking active")
+            caps.append(proposed * 0.5)
+            reasons.append("portfolio soft drawdown de-risking active")
 
         final_cap = round(max(0.0, min(caps)), 4)
-        if final_cap < plan.max_position_pct:
-            limitations.append(
-                f"portfolio gate reduced max position {plan.max_position_pct:.2%}->{final_cap:.2%}"
+        if final_cap < proposed:
+            reasons.append(
+                f"portfolio gate reduced max position {proposed:.2%}->{final_cap:.2%}"
             )
+        if self.max_gross_pct - gross <= 0:
+            reasons.append("portfolio gross exposure limit reached")
+        if self.max_single_name_pct - symbol_exposure <= 0:
+            reasons.append("single-name exposure limit reached")
+        if target_sector_key and self.max_sector_pct - sector_exposure <= 0:
+            reasons.append("sector exposure limit reached")
+        return final_cap, tuple(dict.fromkeys(reasons))
+
+    def apply(
+        self,
+        decision: AlphaDecision,
+        *,
+        positions: Optional[Iterable[Mapping[str, object]]] = None,
+        target_sector: Optional[str] = None,
+        portfolio_drawdown_pct: Optional[float] = None,
+    ) -> AlphaDecision:
+        plan = decision.trade_plan
+        if decision.decision not in {"BUY_SETUP", "WATCH"} or plan.max_position_pct <= 0:
+            return decision
+
+        final_cap, cap_reasons = self.position_cap(
+            symbol=decision.symbol,
+            proposed_max_position_pct=plan.max_position_pct,
+            positions=positions,
+            target_sector=target_sector,
+            portfolio_drawdown_pct=portfolio_drawdown_pct,
+        )
+        limitations = list(decision.limitations)
+        limitations.extend(cap_reasons)
 
         action = plan.action
         decision_name = decision.decision
