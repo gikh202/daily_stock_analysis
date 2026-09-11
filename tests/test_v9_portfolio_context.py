@@ -102,3 +102,78 @@ def test_portfolio_overlay_can_only_reduce_proposed_risk() -> None:
     )
     assert blocked == 0.0
     assert any("hard drawdown" in reason for reason in hard_reasons)
+
+
+def test_trade_history_without_materialized_positions_fails_closed(tmp_path: Path) -> None:
+    db = tmp_path / "stock.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE portfolio_accounts (
+                id INTEGER PRIMARY KEY, is_active INTEGER, market TEXT
+            );
+            CREATE TABLE portfolio_positions (
+                account_id INTEGER, symbol TEXT, market TEXT, cost_method TEXT,
+                quantity REAL, market_value_base REAL
+            );
+            CREATE TABLE portfolio_trades (
+                id INTEGER PRIMARY KEY, account_id INTEGER, trade_date TEXT
+            );
+            CREATE TABLE portfolio_daily_snapshots (
+                id INTEGER PRIMARY KEY, account_id INTEGER, snapshot_date TEXT,
+                cost_method TEXT, total_equity REAL
+            );
+            """
+        )
+        conn.execute("INSERT INTO portfolio_accounts VALUES (1,1,'us')")
+        conn.execute("INSERT INTO portfolio_trades VALUES (1,1,'2026-09-10')")
+        conn.execute(
+            "INSERT INTO portfolio_daily_snapshots VALUES (1,1,'2026-09-09','fifo',1000)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    context = load_portfolio_risk_context(db)
+    assert context.status == "positions_cache_unavailable"
+    assert context.positions == ()
+    assert context.gross_exposure_pct is None
+    assert context.diagnostics["reason"] == "materialized_positions_missing_after_trade_history"
+
+
+def test_replayed_empty_portfolio_is_not_treated_as_stale_cache(tmp_path: Path) -> None:
+    db = tmp_path / "stock.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE portfolio_accounts (
+                id INTEGER PRIMARY KEY, is_active INTEGER, market TEXT
+            );
+            CREATE TABLE portfolio_positions (
+                account_id INTEGER, symbol TEXT, market TEXT, cost_method TEXT,
+                quantity REAL, market_value_base REAL
+            );
+            CREATE TABLE portfolio_trades (
+                id INTEGER PRIMARY KEY, account_id INTEGER, trade_date TEXT
+            );
+            CREATE TABLE portfolio_daily_snapshots (
+                id INTEGER PRIMARY KEY, account_id INTEGER, snapshot_date TEXT,
+                cost_method TEXT, total_equity REAL
+            );
+            """
+        )
+        conn.execute("INSERT INTO portfolio_accounts VALUES (1,1,'us')")
+        conn.execute("INSERT INTO portfolio_trades VALUES (1,1,'2026-09-10')")
+        conn.execute(
+            "INSERT INTO portfolio_daily_snapshots VALUES (1,1,'2026-09-10','fifo',1000)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    context = load_portfolio_risk_context(db)
+    assert context.status == "available"
+    assert context.positions == ()
+    assert context.gross_exposure_pct == 0.0

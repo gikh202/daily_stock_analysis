@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] V9 仅将当前组合风险应用于最新 canonical 信号，组合持仓缓存缺失时停止释放新增风险容量，并从 Entry Optimizer 晋级样本中排除非入场决策，避免历史前视偏差和虚假优化 Alpha。
 - [新功能] V7.5 将美股开/收盘低延迟通知与深度分析拆分：开盘从 09:30 ET 起使用轻量依赖和 SMTP、首根 1m K 线即可给出保守状态；新增 16:00 ET 收盘快讯；深度 V4 改为 16:05 ET 候选并移除 22:30 UTC 固定延迟与随机 sleep。
 - [新功能] V7.5 新增多候选 Entry Optimizer，以原风控计划、VWAP、1m EMA20、Opening Range、日内低点和前收等因果价格比较触达评分、R:R 与研究 EV，邮件显式输出理想买点、可接受区和禁止追价线；REJECTED、止损、失效与仓位硬约束仍优先。
 - [新功能] Research Ledger v4 持久化 1m/5m 美股盘中 K 线并结算理想买点触达、等待策略收益和相对立即买入 Alpha；新增 entry-timing 回测及按 market regime 分层统计。

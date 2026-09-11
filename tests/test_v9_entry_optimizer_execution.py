@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from scripts.backtest_entry_optimizer import _simulate_after_fill, _simulate_row
+from scripts.backtest_entry_optimizer import _simulate_after_fill, _simulate_row, run
+from scripts.us_open_research_ledger import connect
 
 
 def test_same_bar_stop_and_target_is_conservatively_a_stop() -> None:
@@ -87,3 +88,52 @@ def test_round_trip_cost_and_slippage_reduce_modeled_return() -> None:
         fee_bps=5.0,
     )
     assert costly["return_pct"] < free["return_pct"]
+
+
+def test_promotion_metrics_exclude_non_entry_decisions(tmp_path) -> None:
+    db = tmp_path / "open.db"
+    with connect(db) as conn:
+        for index, status in enumerate(("NO_BUY", "WAIT_BETTER_ENTRY"), start=1):
+            decision = {
+                "action": status,
+                "ideal_entry_price": 99.0,
+                "expected_wait_minutes": 5,
+            }
+            conn.execute(
+                """
+                INSERT INTO us_open_signals(
+                    schema_version,signal_key,session_date,symbol,policy_version,
+                    evaluated_at,signal_bar_time,signal_price,decision_status,
+                    packet_json,snapshot_json,decision_json,settled_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "test", f"key-{index}", "2026-09-09", f"T{index}", "test",
+                    "2026-09-09T09:30:00-04:00", "2026-09-09T09:30:00-04:00",
+                    100.0, status,
+                    json.dumps({"execution": {"stop_loss": 95.0, "targets": [103.0]}}),
+                    "{}", json.dumps(decision), "2026-09-10T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO us_intraday_bars(
+                    symbol,session_date,interval,bar_time,open,high,low,close,volume
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (f"T{index}", "2026-09-09", "1m", "2026-09-09T09:31:00-04:00", 100, 103, 99, 102, 1000),
+            )
+        conn.commit()
+
+    payload = run(
+        db,
+        bootstrap_iterations=10,
+        minimum_samples=1,
+        minimum_session_dates=1,
+        minimum_symbols=1,
+        minimum_fills=1,
+    )
+    assert payload["overall"]["settled_rows_seen"] == 2
+    assert payload["overall"]["eligible_optimizer_rows"] == 1
+    assert payload["overall"]["excluded_non_entry_rows"] == 1
+    assert payload["observations"] == 1

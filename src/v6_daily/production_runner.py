@@ -242,6 +242,7 @@ def run(
     accuracy_lab_max_holding_bars: int = DEFAULT_MAX_HOLDING_BARS,
     accuracy_lab_promotion_min_samples: int = DEFAULT_PROMOTION_MIN_SAMPLES,
     repo_root: str | Path | None = None,
+    current_portfolio_context: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
     import_guard = assert_production_import_graph_clean(root)
@@ -314,6 +315,7 @@ def run(
                 record,
                 primary_model=primary_model,
                 external_context=public_context,
+                portfolio_context=current_portfolio_context,
             )
             if enriched is not None:
                 signal = enriched

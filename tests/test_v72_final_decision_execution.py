@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from src.v6_daily.final_decision_service import (
     CONDITIONAL_APPROVED,
-    REJECTED,
+    HARD_REJECTED,
+    UNRESOLVED,
     _execution_status,
     _serialize_packet,
     _upgrade_execution_contract,
@@ -62,24 +63,24 @@ def test_constructive_wait_becomes_conditional_approval_without_execution_author
     assert serialized["execution_contract"]["authorized"] is False
 
 
-def test_risk_heavy_wait_remains_rejected():
+def test_risk_heavy_wait_remains_hard_rejected():
     raw = build_final_decision_packet(
         _v6(opportunity=55.0, risk=70.0),
         _v4(),
     )
     upgraded = _upgrade_execution_contract(raw)
     assert upgraded.assessment.worth_buying is False
-    assert _execution_status(upgraded) == REJECTED
+    assert _execution_status(upgraded) == HARD_REJECTED
 
 
-def test_direction_conflict_wait_remains_rejected():
+def test_direction_conflict_wait_remains_unresolved():
     raw = build_final_decision_packet(
         _v6(direction="bullish"),
         _v4(direction="bearish"),
     )
     upgraded = _upgrade_execution_contract(raw)
     assert upgraded.assessment.worth_buying is False
-    assert _execution_status(upgraded) == REJECTED
+    assert _execution_status(upgraded) == UNRESOLVED
 
 
 def test_v4_reduce_or_sell_blocks_conditional_upgrade():
@@ -87,4 +88,4 @@ def test_v4_reduce_or_sell_blocks_conditional_upgrade():
         raw = build_final_decision_packet(_v6(), _v4(operation=operation))
         upgraded = _upgrade_execution_contract(raw)
         assert upgraded.assessment.worth_buying is False
-        assert _execution_status(upgraded) == REJECTED
+        assert _execution_status(upgraded) == HARD_REJECTED

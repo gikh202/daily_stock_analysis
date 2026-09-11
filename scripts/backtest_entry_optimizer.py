@@ -396,24 +396,39 @@ def run(
             "signal_price",
             "packet_json",
             "decision_json",
+            "decision_status",
             "settled_at",
         }
         missing = sorted(required - columns)
         if missing:
             raise RuntimeError(f"entry-optimizer ledger columns missing: {missing}")
+        settled_rows_seen = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM us_open_signals WHERE settled_at IS NOT NULL"
+            ).fetchone()[0]
+        )
         rows = conn.execute(
             """
             SELECT id,session_date,symbol,market_regime,signal_bar_time,signal_price,
                    packet_json,decision_json
             FROM us_open_signals
             WHERE settled_at IS NOT NULL
+              AND decision_status='WAIT_BETTER_ENTRY'
             ORDER BY session_date,symbol,id
             """
         ).fetchall()
         observations: list[dict[str, Any]] = []
         missing_bars = 0
+        excluded_non_entry_rows = 0
         for raw in rows:
             row = dict(raw)
+            decision = _json_object(row.get("decision_json"))
+            if (
+                _finite(decision.get("ideal_entry_price")) is None
+                or int(_finite(decision.get("expected_wait_minutes")) or 0) <= 0
+            ):
+                excluded_non_entry_rows += 1
+                continue
             bars = _load_bars(
                 conn,
                 symbol=str(row["symbol"]),
@@ -433,6 +448,10 @@ def run(
         conn.close()
 
     overall = _metrics(observations, bootstrap_iterations=bootstrap_iterations)
+    overall["settled_rows_seen"] = settled_rows_seen
+    overall["eligible_optimizer_rows"] = len(observations)
+    overall["excluded_non_entry_rows"] = settled_rows_seen - len(rows)
+    overall["excluded_incomplete_entry_rows"] = excluded_non_entry_rows
     regimes = sorted({str(item.get("market_regime") or "unknown") for item in observations})
     by_regime = {
         regime: _metrics(

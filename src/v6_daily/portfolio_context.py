@@ -236,6 +236,38 @@ def load_portfolio_risk_context(
             (*account_ids, method),
         ).fetchall()
 
+        stale_empty_cache = False
+        if (
+            "portfolio_trades" in tables
+            and "portfolio_daily_snapshots" in tables
+            and "trade_date" in _columns(conn, "portfolio_trades")
+        ):
+            stale_empty_cache = conn.execute(
+                f"""
+                SELECT 1
+                FROM portfolio_trades t
+                WHERE t.account_id IN ({placeholders})
+                GROUP BY t.account_id
+                HAVING MAX(t.trade_date) > COALESCE((
+                    SELECT MAX(s.snapshot_date)
+                    FROM portfolio_daily_snapshots s
+                    WHERE s.account_id=t.account_id AND s.cost_method=?
+                ), '')
+                LIMIT 1
+                """,
+                (*account_ids, method),
+            ).fetchone() is not None
+        if stale_empty_cache and not raw_positions:
+            return PortfolioRiskContext(
+                status="positions_cache_unavailable",
+                cost_method=method,
+                active_accounts=len(account_ids),
+                diagnostics={
+                    "reason": "materialized_positions_missing_after_trade_history",
+                    "database": str(path),
+                },
+            )
+
         by_symbol: dict[str, float] = {}
         for row in raw_positions:
             symbol = str(row["symbol"] or "").strip().upper()
