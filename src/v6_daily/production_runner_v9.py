@@ -7,7 +7,6 @@ from typing import Any, Dict
 from src.alpha_engine.shadow_store import read_analysis_records
 
 from . import production_runner as base_runner
-from .engine import V6DailyEngine
 from .free_sources_v9 import fetch_free_context_v9
 from .portfolio_context import (
     load_portfolio_risk_context,
@@ -64,23 +63,12 @@ def run(**kwargs: Any) -> Dict[str, Any]:
         sector_by_symbol=sector_map,
     ).to_dict()
 
-    original_from_analysis_record = V6DailyEngine.from_analysis_record
     original_fetch_free_context = base_runner.fetch_free_context
-
-    def portfolio_aware_from_analysis_record(
-        self: V6DailyEngine,
-        record: Any,
-        **call_kwargs: Any,
-    ) -> Any:
-        call_kwargs.setdefault("portfolio_context", portfolio_context)
-        return original_from_analysis_record(self, record, **call_kwargs)
-
-    V6DailyEngine.from_analysis_record = portfolio_aware_from_analysis_record  # type: ignore[method-assign]
     base_runner.fetch_free_context = fetch_free_context_v9
     try:
+        kwargs.setdefault("current_portfolio_context", portfolio_context)
         result = _BASE_RUN(**kwargs)
     finally:
-        V6DailyEngine.from_analysis_record = original_from_analysis_record  # type: ignore[method-assign]
         base_runner.fetch_free_context = original_fetch_free_context
 
     return _persist_v9_metadata(
